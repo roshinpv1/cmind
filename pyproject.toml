@@ -1,0 +1,151 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codemind"
+version = "0.1.0"
+description = "Incremental, append-only code intelligence platform with semantic search and knowledge graphs"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    { name = "CodeMind Team" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    # Web framework (Milestone 10)
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    
+    # Workflow orchestration (Milestone 8)
+    "langgraph>=0.0.40",
+    "langchain-core>=0.1.0",
+    
+    # Vector storage (Milestone 6, 11)
+    "lancedb>=0.4.0",
+    "pyarrow>=15.0.0",
+    
+    # Embeddings (Milestone 5)
+    "sentence-transformers>=2.3.0",
+    "torch>=2.1.0",
+    
+    # AST parsing (Milestone 3)
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-go>=0.21.0",
+    "tree-sitter-rust>=0.21.0",
+    "tree-sitter-java>=0.21.0",
+    
+    # Git operations (Milestone 1)
+    "gitpython>=3.1.40",
+    
+    # Database & persistence (Milestone 2, 9)
+    "sqlalchemy>=2.0.25",
+    "aiosqlite>=0.19.0",
+    
+    # Graph database (Milestone 7)
+    "neo4j>=5.16.0",
+    
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "structlog>=24.1.0",
+    "click>=8.1.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Code quality
+    "black>=24.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    
+    # Testing
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "httpx>=0.26.0",  # For FastAPI testing
+]
+
+[project.scripts]
+codemind = "codemind.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function call in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--cov=codemind",
+    "--cov-report=term-missing",
+]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
