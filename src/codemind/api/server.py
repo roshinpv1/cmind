@@ -96,6 +96,12 @@ async def lifespan(app: FastAPI):
         app.state.manifest, app.state.lance_storage, app.state.graph_db
     )
 
+    # Initialize agent services
+    from . import agents as agents_module
+    agents_module.init_agent_services(app.state.lance_storage, app.state.graph_db, app.state.workflow.embedder)
+    app.include_router(agents_module.router)
+    print("[SERVER] ✅ Agent system initialized")
+
     yield
 
     # Cleanup

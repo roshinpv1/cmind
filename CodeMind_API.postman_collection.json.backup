@@ -1,0 +1,216 @@
+{
+    "info": {
+        "_postman_id": "codemind-api-collection",
+        "name": "CodeMind API",
+        "description": "CodeMind API with repo_id support",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+        {
+            "key": "base_url",
+            "value": "http://localhost:8000"
+        }
+    ],
+    "item": [
+        {
+            "name": "Index Local Path",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"repo_path\": \"/Users/username/projects/my-repo\"\n}"
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/index",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "index"
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Success",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"status\": \"pending\",\n  \"repo_id\": \"def456\"\n}"
+                }
+            ]
+        },
+        {
+            "name": "Index Git URL",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"repo_url\": \"https://github.com/fastapi/fastapi.git\",\n  \"branch\": \"master\"\n}"
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/index",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "index"
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Success",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"job_id\": \"xyz-789\",\n  \"status\": \"pending\",\n  \"repo_id\": \"ghi012\"\n}"
+                }
+            ]
+        },
+        {
+            "name": "Get Job Status",
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "{{base_url}}/api/v1/jobs/:job_id",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "jobs",
+                        ":job_id"
+                    ],
+                    "variable": [
+                        {
+                            "key": "job_id",
+                            "value": "abc-123"
+                        }
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Running",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"repo_path\": \"/path/to/repo\",\n  \"status\": \"running\",\n  \"stage\": \"embedding\",\n  \"progress\": 65,\n  \"error\": null,\n  \"repo_id\": \"def456\"\n}"
+                },
+                {
+                    "name": "Completed",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"repo_path\": \"/path/to/repo\",\n  \"status\": \"completed\",\n  \"stage\": \"completed\",\n  \"progress\": 100,\n  \"error\": null,\n  \"repo_id\": \"def456\"\n}"
+                }
+            ]
+        },
+        {
+            "name": "Search Code",
+            "request": {
+                "method": "POST",
+                "header": [
+                    {
+                        "key": "Content-Type",
+                        "value": "application/json"
+                    }
+                ],
+                "body": {
+                    "mode": "raw",
+                    "raw": "{\n  \"query\": \"authentication functions\",\n  \"repo_id\": \"def456\",\n  \"limit\": 10\n}"
+                },
+                "url": {
+                    "raw": "{{base_url}}/api/v1/search",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "search"
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Results",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"results\": [\n    {\n      \"chunk_text\": \"def authenticate_user(...):\",\n      \"file_path\": \"src/auth.py\",\n      \"start_line\": 45,\n      \"score\": 0.92\n    }\n  ],\n  \"query\": \"authentication functions\"\n}"
+                }
+            ]
+        },
+        {
+            "name": "Health Check",
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "{{base_url}}/api/v1/health",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "health"
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Healthy",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"status\": \"healthy\",\n  \"version\": \"0.1.0\"\n}"
+                }
+            ]
+        },
+        {
+            "name": "System Stats",
+            "request": {
+                "method": "GET",
+                "url": {
+                    "raw": "{{base_url}}/api/v1/stats",
+                    "host": [
+                        "{{base_url}}"
+                    ],
+                    "path": [
+                        "api",
+                        "v1",
+                        "stats"
+                    ]
+                }
+            },
+            "response": [
+                {
+                    "name": "Stats",
+                    "status": "OK",
+                    "code": 200,
+                    "_postman_previewlanguage": "json",
+                    "body": "{\n  \"total_repositories\": 5,\n  \"total_jobs\": 12,\n  \"active_jobs\": 1\n}"
+                }
+            ]
+        }
+    ]
+}

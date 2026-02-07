@@ -2,213 +2,284 @@
     "info": {
         "_postman_id": "codemind-api-collection",
         "name": "CodeMind API",
-        "description": "CodeMind API with repo_id support",
+        "description": "CodeMind API with LangGraph Agents",
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
         {
             "key": "base_url",
             "value": "http://localhost:8000"
+        },
+        {
+            "key": "repo_id",
+            "value": "1dd450cb2ecd63a9",
+            "description": "Default repo ID for testing"
         }
     ],
     "item": [
         {
-            "name": "Index Local Path",
-            "request": {
-                "method": "POST",
-                "header": [
-                    {
-                        "key": "Content-Type",
-                        "value": "application/json"
-                    }
-                ],
-                "body": {
-                    "mode": "raw",
-                    "raw": "{\n  \"repo_path\": \"/Users/username/projects/my-repo\"\n}"
-                },
-                "url": {
-                    "raw": "{{base_url}}/api/v1/index",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "index"
-                    ]
-                }
-            },
-            "response": [
+            "name": "Indexing",
+            "item": [
                 {
-                    "name": "Success",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"status\": \"pending\",\n  \"repo_id\": \"def456\"\n}"
-                }
-            ]
-        },
-        {
-            "name": "Index Git URL",
-            "request": {
-                "method": "POST",
-                "header": [
-                    {
-                        "key": "Content-Type",
-                        "value": "application/json"
-                    }
-                ],
-                "body": {
-                    "mode": "raw",
-                    "raw": "{\n  \"repo_url\": \"https://github.com/fastapi/fastapi.git\",\n  \"branch\": \"master\"\n}"
-                },
-                "url": {
-                    "raw": "{{base_url}}/api/v1/index",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "index"
-                    ]
-                }
-            },
-            "response": [
-                {
-                    "name": "Success",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"job_id\": \"xyz-789\",\n  \"status\": \"pending\",\n  \"repo_id\": \"ghi012\"\n}"
-                }
-            ]
-        },
-        {
-            "name": "Get Job Status",
-            "request": {
-                "method": "GET",
-                "url": {
-                    "raw": "{{base_url}}/api/v1/jobs/:job_id",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "jobs",
-                        ":job_id"
-                    ],
-                    "variable": [
-                        {
-                            "key": "job_id",
-                            "value": "abc-123"
+                    "name": "Index Local Path",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_path\": \"/Users/username/projects/my-repo\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/index",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "index"
+                            ]
                         }
-                    ]
-                }
-            },
-            "response": [
-                {
-                    "name": "Running",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"repo_path\": \"/path/to/repo\",\n  \"status\": \"running\",\n  \"stage\": \"embedding\",\n  \"progress\": 65,\n  \"error\": null,\n  \"repo_id\": \"def456\"\n}"
-                },
-                {
-                    "name": "Completed",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"job_id\": \"abc-123\",\n  \"repo_path\": \"/path/to/repo\",\n  \"status\": \"completed\",\n  \"stage\": \"completed\",\n  \"progress\": 100,\n  \"error\": null,\n  \"repo_id\": \"def456\"\n}"
-                }
-            ]
-        },
-        {
-            "name": "Search Code",
-            "request": {
-                "method": "POST",
-                "header": [
-                    {
-                        "key": "Content-Type",
-                        "value": "application/json"
                     }
-                ],
-                "body": {
-                    "mode": "raw",
-                    "raw": "{\n  \"query\": \"authentication functions\",\n  \"repo_id\": \"def456\",\n  \"limit\": 10\n}"
                 },
-                "url": {
-                    "raw": "{{base_url}}/api/v1/search",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "search"
-                    ]
-                }
-            },
-            "response": [
                 {
-                    "name": "Results",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"results\": [\n    {\n      \"chunk_text\": \"def authenticate_user(...):\",\n      \"file_path\": \"src/auth.py\",\n      \"start_line\": 45,\n      \"score\": 0.92\n    }\n  ],\n  \"query\": \"authentication functions\"\n}"
+                    "name": "Index Git URL",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_url\": \"https://github.com/fastapi/fastapi.git\",\n  \"branch\": \"master\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/index",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "index"
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "Get Job Status",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/jobs/:job_id",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "jobs",
+                                ":job_id"
+                            ],
+                            "variable": [
+                                {
+                                    "key": "job_id",
+                                    "value": "abc-123"
+                                }
+                            ]
+                        }
+                    }
                 }
             ]
         },
         {
-            "name": "Health Check",
-            "request": {
-                "method": "GET",
-                "url": {
-                    "raw": "{{base_url}}/api/v1/health",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "health"
-                    ]
-                }
-            },
-            "response": [
+            "name": "Search",
+            "item": [
                 {
-                    "name": "Healthy",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"status\": \"healthy\",\n  \"version\": \"0.1.0\"\n}"
+                    "name": "Semantic Search",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"query\": \"authentication functions\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"semantic\",\n  \"limit\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "search"
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "Hybrid Search with Filters",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"query\": \"API endpoints\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"hybrid\",\n  \"filters\": {\n    \"file_type\": \".py\",\n    \"file_patterns\": [\"api\", \"routes\"]\n  },\n  \"limit\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "search"
+                            ]
+                        }
+                    }
                 }
             ]
         },
         {
-            "name": "System Stats",
-            "request": {
-                "method": "GET",
-                "url": {
-                    "raw": "{{base_url}}/api/v1/stats",
-                    "host": [
-                        "{{base_url}}"
-                    ],
-                    "path": [
-                        "api",
-                        "v1",
-                        "stats"
-                    ]
-                }
-            },
-            "response": [
+            "name": "Agents (LangGraph)",
+            "item": [
                 {
-                    "name": "Stats",
-                    "status": "OK",
-                    "code": 200,
-                    "_postman_previewlanguage": "json",
-                    "body": "{\n  \"total_repositories\": 5,\n  \"total_jobs\": 12,\n  \"active_jobs\": 1\n}"
+                    "name": "Generate README",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"agent_type\": \"doc_generator\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"task\": \"generate_readme\",\n  \"config\": {\n    \"doc_type\": \"readme\",\n    \"include_examples\": true\n  }\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/execute",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "execute"
+                            ]
+                        },
+                        "description": "Starts LangGraph workflow to generate README using:\n1. analyze_structure\n2. identify_components\n3. extract_features\n4. generate_documentation"
+                    }
+                },
+                {
+                    "name": "Get Agent Status",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/:job_id/status",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                ":job_id",
+                                "status"
+                            ],
+                            "variable": [
+                                {
+                                    "key": "job_id",
+                                    "value": "ee77ac09-19fe-4e3d-9249-9b1f58e1edf4"
+                                }
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "Get Agent Result",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/:job_id/result",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                ":job_id",
+                                "result"
+                            ],
+                            "variable": [
+                                {
+                                    "key": "job_id",
+                                    "value": "ee77ac09-19fe-4e3d-9249-9b1f58e1edf4"
+                                }
+                            ]
+                        },
+                        "description": "Returns generated documentation and progress tracking:\n- documentation: Generated README\n- progress: [\"✓ Analyzed structure\", \"✓ Found components\", ...]\n- error: null if successful"
+                    }
+                }
+            ]
+        },
+        {
+            "name": "System",
+            "item": [
+                {
+                    "name": "Health Check",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/health",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "health"
+                            ]
+                        }
+                    }
+                },
+                {
+                    "name": "System Stats",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/stats",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "stats"
+                            ]
+                        }
+                    }
                 }
             ]
         }
