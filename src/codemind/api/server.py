@@ -10,6 +10,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from codemind.jobs import JobManager, JobStatus
+from codemind.llm.factory import get_llm_client
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
 from codemind.workflows import IndexingState, IndexingWorkflow
@@ -96,11 +97,22 @@ async def lifespan(app: FastAPI):
         app.state.manifest, app.state.lance_storage, app.state.graph_db
     )
 
-    # Initialize agent services
+    # Initialize agent services (existing doc generator)
     from . import agents as agents_module
     agents_module.init_agent_services(app.state.lance_storage, app.state.graph_db, app.state.workflow.embedder)
     app.include_router(agents_module.router)
     print("[SERVER] ✅ Agent system initialized")
+    
+    # Initialize autonomous agent system (skill-based)
+    from .autonomous_agents import init_autonomous_agents, router as autonomous_router
+    init_autonomous_agents(
+        app.state.lance_storage,
+        app.state.graph_query,
+        get_llm_client(),
+        app.state.workflow.embedder
+    )
+    app.include_router(autonomous_router)
+    print("[SERVER] ✅ Autonomous agent system initialized")
 
     yield
 

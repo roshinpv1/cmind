@@ -108,7 +108,16 @@ class LangGraphDocAgent:
                 return state
             
             # Get file counts by type
-            file_types = [".py", ".js", ".ts", ".md", ".json", ".yaml", ".txt"]
+            file_types = [
+                ".py", ".js", ".ts", ".tsx", ".jsx", ".vue", ".svelte",
+                ".go", ".rs", ".java", ".kt", ".scala", ".cs",
+                ".c", ".cpp", ".h", ".hpp",
+                ".rb", ".php", ".swift", ".dart", ".ex", ".hs",
+                ".html", ".css", ".scss", ".sql",
+                ".md", ".json", ".yaml", ".yml", ".toml", ".xml",
+                ".sh", ".dockerfile", ".tf",
+                ".txt", ".rst", ".proto", ".graphql",
+            ]
             for ext in file_types:
                 try:
                     files = self.graph.find_files_by_pattern(state["repo_id"], file_type=ext)

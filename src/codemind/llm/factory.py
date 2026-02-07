@@ -21,7 +21,7 @@ def get_llm_client():
         elif provider == LLMProvider.LOCAL:
             return LLMConfig(
                 provider=provider,
-                model=os.environ.get("LOCAL_LLM_MODEL", os.environ.get("LMSTUDIO_MODEL", "google/gemma-3n-e4b")),
+                model=os.environ.get("LOCAL_LLM_MODEL", os.environ.get("LMSTUDIO_MODEL", "openai/gpt-oss-20b")),
                 base_url=os.environ.get("LOCAL_LLM_URL", os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")),
                 api_key=os.environ.get("LOCAL_LLM_API_KEY", "not-needed")
             )

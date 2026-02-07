@@ -12,6 +12,7 @@ from codemind.indexer import ChangeDetector
 from codemind.indexer.ast_extractor import ASTExtractor
 from codemind.indexer.chunker import CodeChunker
 from codemind.indexer.embedder import EmbeddingGenerator
+from codemind.indexer.file_filters import CODE_EXTENSIONS, KNOWN_FILENAMES
 from codemind.indexer.models import FileChange
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
@@ -149,14 +150,11 @@ class IndexingWorkflow:
             for file_change in state.changed_files:
                 file_path = Path(state.repo_path) / file_change.path
 
-                # Only chunk text files
-                if file_path.exists() and file_path.suffix in [
-                    ".py",
-                    ".js",
-                    ".ts",
-                    ".md",
-                    ".txt",
-                ]:
+                # Chunk all programming-related files
+                if file_path.exists() and (
+                    file_path.suffix.lower() in CODE_EXTENSIONS
+                    or file_path.name in KNOWN_FILENAMES
+                ):
                     chunks = self.chunker.chunk_file(str(file_path))
                     all_chunks.extend(chunks)
 
