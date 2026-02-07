@@ -51,8 +51,10 @@ class GraphQueryService:
             result = self.graph.conn.execute(query, params)
             rows = []
             while result.has_next():
-                batch = result.get_next()
-                rows.extend([{"file_path": row[0]} for row in batch])
+                row = result.get_next()
+                # get_next() returns a single row (list/tuple), not a batch
+                if row and len(row) > 0:
+                    rows.append({"file_path": row[0]})
             return rows
 
         except Exception as e:
@@ -202,7 +204,9 @@ class GraphQueryService:
                 result = self.graph.conn.execute(query, params)
                 funcs = []
                 while result.has_next():
-                    funcs.extend([row[0] for row in result.get_next()])
+                    row = result.get_next()
+                    if row and len(row) > 0:
+                        funcs.append(row[0])
                 context["functions"] = funcs
             except:
                 # If DECLARES_FUNCTION relationship doesn't exist, skip functions
@@ -277,7 +281,9 @@ class GraphQueryService:
                 result = self.graph.conn.execute(query, {"repo_id": repo_id})
                 all_files = []
                 while result.has_next():
-                    all_files.extend([row[0] for row in result.get_next()])
+                    row = result.get_next()
+                    if row and len(row) > 0:
+                        all_files.append(row[0])
                 file_type_matches.update(f for f in all_files if regex.search(f))
             
             if file_type_matches:

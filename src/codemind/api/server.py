@@ -262,15 +262,20 @@ async def semantic_search(request: SearchRequest):
     # Semantic or Hybrid search
     candidate_files = None
     
-    # Check if filters are actually provided (convert to dict and check if non-empty)
-    has_filters = request.filters and any(
-        v is not None for v in request.filters.model_dump(exclude_none=True).values()
-    )
+    # Check if filters are actually provided and convert to dict
+    filters_dict = None
+    if request.filters:
+        # Handle both dict and Pydantic model
+        if isinstance(request.filters, dict):
+            filters_dict = {k: v for k, v in request.filters.items() if v is not None}
+        else:
+            filters_dict = request.filters.model_dump(exclude_none=True)
+    
+    has_filters = filters_dict and any(v is not None for v in filters_dict.values())
     
     if request.search_mode == "hybrid" and has_filters and request.repo_id:
         # Apply structural filters first
         try:
-            filters_dict = request.filters.model_dump(exclude_none=True)
             print(f"[SEARCH] Applying filters: {filters_dict}")
             
             candidate_files = graph_query.filter_by_structure(request.repo_id, filters_dict)
@@ -295,13 +300,50 @@ async def semantic_search(request: SearchRequest):
 
     # Filter by candidate files if in hybrid mode with valid results
     if candidate_files:
-        print(f"[SEARCH] Candidate files from graph: {candidate_files[:5]}")  # Show first 5
-        print(f"[SEARCH] Sample LanceDB file paths: {[r['file_path'] for r in search_results[:5]]}")
+        print(f"[SEARCH] Candidate files from graph ({len(candidate_files)} total):")
+        for i, f in enumerate(candidate_files[:3]):
+            print(f"  [{i}] '{f}'")
         
-        search_results = [
-            r for r in search_results 
-            if r["file_path"] in candidate_files
-        ]
+        print(f"\n[SEARCH] LanceDB file paths ({len(search_results)} results):")
+        for i, r in enumerate(search_results[:3]):
+            print(f"  [{i}] '{r['file_path']}'")
+        
+        # Normalize paths: graph has relative paths, LanceDB has full paths
+        # LanceDB format: data/repos/{repo_name}/{branch}/{relative_path}
+        # Graph format: {relative_path}
+        
+        # Check if we need to normalize by comparing a sample
+        if search_results and candidate_files:
+            sample_lance = search_results[0]['file_path']
+            sample_graph = candidate_files[0]
+            
+            # If LanceDB path doesn't match graph path, try to normalize
+            if not sample_lance.endswith(sample_graph):
+                print(f"[SEARCH] Path normalization needed")
+                
+                # Strategy: check if LanceDB path ends with graph path
+                normalized_candidates = set()
+                for lance_result in search_results:
+                    lance_path = lance_result['file_path']
+                    # Check if this lance path ends with any candidate
+                    for candidate in candidate_files:
+                        if lance_path.endswith(candidate):
+                            normalized_candidates.add(lance_path)
+                            break
+                
+                print(f"[SEARCH] After normalization: {len(normalized_candidates)} candidates matched")
+                
+                search_results = [
+                    r for r in search_results 
+                    if r["file_path"] in normalized_candidates
+                ]
+            else:
+                # Direct match
+                search_results = [
+                    r for r in search_results 
+                    if r["file_path"] in candidate_files
+                ]
+        
         print(f"[SEARCH] After filtering: {len(search_results)} results")
 
     # Build response with optional context expansion
