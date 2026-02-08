@@ -37,9 +37,12 @@ class LanceDBStorage:
                 pa.field("chunk_text", pa.string()),
                 pa.field("start_line", pa.int32()),
                 pa.field("end_line", pa.int32()),
-                pa.field("embedding", pa.list_(pa.float32(), 384)),  # Fixed size for all-MiniLM-L6-v2
+                pa.field("embedding", pa.list_(pa.float32(), 768)),  # nomic-embed-code
                 pa.field("embedding_version", pa.int32()),
                 pa.field("indexed_at", pa.timestamp("us")),
+                pa.field("symbol_name", pa.string()),   # Function/class name (AST chunk)
+                pa.field("symbol_type", pa.string()),   # "function", "class", "method", "module"
+                pa.field("language", pa.string()),       # Programming language
             ]
         )
 
@@ -121,6 +124,9 @@ class LanceDBStorage:
                     "embedding": embedding,
                     "embedding_version": embedding_version,
                     "indexed_at": now,
+                    "symbol_name": getattr(chunk, "symbol_name", None) or "",
+                    "symbol_type": getattr(chunk, "symbol_type", None) or "",
+                    "language": getattr(chunk, "language", None) or "",
                 }
             )
 
@@ -131,13 +137,26 @@ class LanceDBStorage:
             # Try to open existing table
             table = self.db.open_table(table_name)
             print(f"[LANCEDB] Table exists, appending...")
-            table.add(data)
-            print(f"[LANCEDB] ✅ Successfully appended {len(data)} rows")
+            try:
+                table.add(data)
+                print(f"[LANCEDB] ✅ Successfully appended {len(data)} rows")
+            except ValueError as schema_err:
+                if "not found in target schema" in str(schema_err):
+                    # Schema mismatch — old table missing new columns. Drop and recreate.
+                    print(f"[LANCEDB] ⚠️  Schema mismatch, dropping old table and recreating: {schema_err}")
+                    self.db.drop_table(table_name)
+                    self.db.create_table(table_name, data=data, schema=self.schema, mode="create")
+                    print(f"[LANCEDB] ✅ Recreated table with new schema and added {len(data)} rows")
+                else:
+                    raise
         except Exception as e:
-            # Table doesn't exist, create it
-            print(f"[LANCEDB] Table doesn't exist, creating: {e}")
-            self.db.create_table(table_name, data=data, schema=self.schema, mode="create")
-            print(f"[LANCEDB] ✅ Created table and added {len(data)} rows")
+            if "was not found" in str(e) or "does not exist" in str(e):
+                # Table doesn't exist, create it
+                print(f"[LANCEDB] Table doesn't exist, creating...")
+                self.db.create_table(table_name, data=data, schema=self.schema, mode="create")
+                print(f"[LANCEDB] ✅ Created table and added {len(data)} rows")
+            else:
+                raise
 
     def get_chunk_hashes(
         self, repo_id: str, embedding_version: int, table_name: str = "code_chunks"

@@ -12,30 +12,36 @@ def get_llm_client():
     
     # helper to create config
     def create_config(provider):
+        max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+        
         if provider == LLMProvider.APIGEE:
             return LLMConfig(
                 provider=provider,
                 model=os.environ.get("APIGEE_MODEL", "gpt-4"),
-                timeout=float(os.environ.get("APIGEE_TIMEOUT", "600"))
+                timeout=float(os.environ.get("APIGEE_TIMEOUT", "600")),
+                max_tokens=max_tokens
             )
         elif provider == LLMProvider.LOCAL:
             return LLMConfig(
                 provider=provider,
                 model=os.environ.get("LOCAL_LLM_MODEL", os.environ.get("LMSTUDIO_MODEL", "openai/gpt-oss-20b")),
                 base_url=os.environ.get("LOCAL_LLM_URL", os.environ.get("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")),
-                api_key=os.environ.get("LOCAL_LLM_API_KEY", "not-needed")
+                api_key=os.environ.get("LOCAL_LLM_API_KEY", "not-needed"),
+                max_tokens=max_tokens
             )
         elif provider == LLMProvider.OLLAMA:
             return LLMConfig(
                 provider=provider,
                 model=os.environ.get("OLLAMA_MODEL", "llama-3.2-3b-instruct"),
-                base_url=os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+                base_url=os.environ.get("OLLAMA_HOST", "http://localhost:11434"),
+                max_tokens=max_tokens
             )
         elif provider == LLMProvider.ENTERPRISE:
             return LLMConfig(
                 provider=provider,
                 model=os.environ.get("ENTERPRISE_LLM_MODEL", "llama-3.2-3b-instruct"),
-                base_url=os.environ.get("ENTERPRISE_LLM_URL")
+                base_url=os.environ.get("ENTERPRISE_LLM_URL"),
+                max_tokens=max_tokens
             )
         return None
 

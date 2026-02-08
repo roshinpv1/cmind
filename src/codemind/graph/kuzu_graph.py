@@ -96,6 +96,33 @@ class KuzuGraphDB:
             )
             """)
 
+        # Cross-file relationship tables
+        self.conn.execute("""
+            CREATE REL TABLE IF NOT EXISTS IMPORTS(
+                FROM File TO File,
+                import_name STRING
+            )
+            """)
+
+        self.conn.execute("""
+            CREATE REL TABLE IF NOT EXISTS CALLS(
+                FROM Function TO Function,
+                call_line INT32
+            )
+            """)
+
+        self.conn.execute("""
+            CREATE REL TABLE IF NOT EXISTS INHERITS(
+                FROM Class TO Class
+            )
+            """)
+
+        self.conn.execute("""
+            CREATE REL TABLE IF NOT EXISTS USES_TYPE(
+                FROM Function TO Class
+            )
+            """)
+
     def add_repository(self, repo_id: str, path: str):
         """Add repository node (idempotent)."""
         self.conn.execute(
@@ -246,7 +273,156 @@ class KuzuGraphDB:
             rows.append({"name": row[0], "id": row[1]})
         return rows
 
+    # -- Cross-file relationship methods --
+
+    def add_import_edge(self, repo_id: str, from_file: str, to_file: str, import_name: str):
+        """Add IMPORTS edge between two files."""
+        from_id = f"{repo_id}:{from_file}"
+        to_id = f"{repo_id}:{to_file}"
+        try:
+            self.conn.execute(
+                """
+                MATCH (f1:File {file_id: $from_id})
+                MATCH (f2:File {file_id: $to_id})
+                MERGE (f1)-[i:IMPORTS {import_name: $import_name}]->(f2)
+                """,
+                {"from_id": from_id, "to_id": to_id, "import_name": import_name},
+            )
+        except Exception:
+            pass  # Graceful: skip if nodes don't exist
+
+    def add_call_edge(self, repo_id: str, caller_file: str, caller_func: str,
+                      callee_file: str, callee_func: str, line: int = 0):
+        """Add CALLS edge between two functions."""
+        caller_id = f"{repo_id}:{caller_file}:{caller_func}"
+        callee_id = f"{repo_id}:{callee_file}:{callee_func}"
+        try:
+            self.conn.execute(
+                """
+                MATCH (f1:Function {func_id: $caller_id})
+                MATCH (f2:Function {func_id: $callee_id})
+                MERGE (f1)-[c:CALLS {call_line: $line}]->(f2)
+                """,
+                {"caller_id": caller_id, "callee_id": callee_id, "line": line},
+            )
+        except Exception:
+            pass
+
+    def add_inheritance_edge(self, repo_id: str, child_file: str, child_class: str,
+                             parent_file: str, parent_class: str):
+        """Add INHERITS edge between two classes."""
+        child_id = f"{repo_id}:{child_file}:{child_class}"
+        parent_id = f"{repo_id}:{parent_file}:{parent_class}"
+        try:
+            self.conn.execute(
+                """
+                MATCH (c1:Class {class_id: $child_id})
+                MATCH (c2:Class {class_id: $parent_id})
+                MERGE (c1)-[:INHERITS]->(c2)
+                """,
+                {"child_id": child_id, "parent_id": parent_id},
+            )
+        except Exception:
+            pass
+
+    def get_callers(self, repo_id: str, func_name: str) -> list[dict]:
+        """Find all functions that call the given function."""
+        result = self.conn.execute(
+            """
+            MATCH (caller:Function)-[c:CALLS]->(callee:Function)
+            WHERE callee.name = $name AND callee.repo_id = $repo_id
+            RETURN caller.name AS caller_name, caller.file_path AS caller_file,
+                   c.call_line AS line
+            """,
+            {"name": func_name, "repo_id": repo_id},
+        )
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append({"name": row[0], "file_path": row[1], "line": row[2]})
+        return rows
+
+    def get_callees(self, repo_id: str, func_name: str) -> list[dict]:
+        """Find all functions called by the given function."""
+        result = self.conn.execute(
+            """
+            MATCH (caller:Function)-[c:CALLS]->(callee:Function)
+            WHERE caller.name = $name AND caller.repo_id = $repo_id
+            RETURN callee.name AS callee_name, callee.file_path AS callee_file,
+                   c.call_line AS line
+            """,
+            {"name": func_name, "repo_id": repo_id},
+        )
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append({"name": row[0], "file_path": row[1], "line": row[2]})
+        return rows
+
+    def get_file_dependencies(self, repo_id: str, file_path: str) -> list[dict]:
+        """Get all files imported by this file."""
+        file_id = f"{repo_id}:{file_path}"
+        result = self.conn.execute(
+            """
+            MATCH (f:File {file_id: $file_id})-[i:IMPORTS]->(dep:File)
+            RETURN dep.path AS file_path, i.import_name AS import_name
+            """,
+            {"file_id": file_id},
+        )
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append({"file_path": row[0], "import_name": row[1]})
+        return rows
+
+    def get_file_dependents(self, repo_id: str, file_path: str) -> list[dict]:
+        """Get all files that import this file."""
+        file_id = f"{repo_id}:{file_path}"
+        result = self.conn.execute(
+            """
+            MATCH (dep:File)-[i:IMPORTS]->(f:File {file_id: $file_id})
+            RETURN dep.path AS file_path, i.import_name AS import_name
+            """,
+            {"file_id": file_id},
+        )
+        rows = []
+        while result.has_next():
+            row = result.get_next()
+            rows.append({"file_path": row[0], "import_name": row[1]})
+        return rows
+
+    def get_class_hierarchy(self, repo_id: str, class_name: str) -> dict:
+        """Get inheritance hierarchy for a class."""
+        # Parents
+        parents_result = self.conn.execute(
+            """
+            MATCH (c:Class)-[:INHERITS]->(parent:Class)
+            WHERE c.name = $name AND c.repo_id = $repo_id
+            RETURN parent.name AS name, parent.file_path AS file_path
+            """,
+            {"name": class_name, "repo_id": repo_id},
+        )
+        parents = []
+        while parents_result.has_next():
+            row = parents_result.get_next()
+            parents.append({"name": row[0], "file_path": row[1]})
+
+        # Children
+        children_result = self.conn.execute(
+            """
+            MATCH (child:Class)-[:INHERITS]->(c:Class)
+            WHERE c.name = $name AND c.repo_id = $repo_id
+            RETURN child.name AS name, child.file_path AS file_path
+            """,
+            {"name": class_name, "repo_id": repo_id},
+        )
+        children = []
+        while children_result.has_next():
+            row = children_result.get_next()
+            children.append({"name": row[0], "file_path": row[1]})
+
+        return {"class": class_name, "parents": parents, "children": children}
+
     def close(self):
         """Close database connection."""
-        # Kùzu connections auto-close, but we can explicitly do it
         pass

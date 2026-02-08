@@ -17,18 +17,33 @@ class LocalDriver(LLMDriver):
         if self.config.api_key and self.config.api_key != "not-needed":
             headers["Authorization"] = f"Bearer {self.config.api_key}"
 
+        # Build messages with optional system prompt
+        messages = []
+        system_prompt = kwargs.pop("system_prompt", None)
+        if system_prompt:
+            # Truncate system prompt if too long
+            messages.append({"role": "system", "content": system_prompt[:4000]})
+        # Truncate user prompt to prevent context overflow
+        messages.append({"role": "user", "content": prompt[:8000]})
+
+        max_tokens = kwargs.get("max_tokens", self.config.max_tokens)
+        temperature = kwargs.get("temperature", self.config.temperature)
+
         async with httpx.AsyncClient(timeout=self.config.timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
                 headers=headers,
                 json={
                     "model": self.config.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": kwargs.get("temperature", self.config.temperature),
-                    "max_tokens": kwargs.get("max_tokens", self.config.max_tokens)
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": min(max_tokens, self.config.max_tokens)
                 }
             )
-            response.raise_for_status()
+            if response.status_code != 200:
+                error_body = response.text[:500]
+                print(f"[LLM] Error {response.status_code}: {error_body}")
+                response.raise_for_status()
             data = response.json()
             return data["choices"][0]["message"]["content"]
 
@@ -41,12 +56,20 @@ class OllamaDriver(LLMDriver):
 
     async def generate(self, prompt: str, **kwargs) -> str:
         base_url = self.config.base_url or "http://localhost:11434"
+
+        # Build messages with optional system prompt
+        messages = []
+        system_prompt = kwargs.pop("system_prompt", None)
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         async with httpx.AsyncClient(timeout=self.config.timeout) as client:
             response = await client.post(
                 f"{base_url}/api/chat",
                 json={
                     "model": self.config.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "options": {
                         "temperature": kwargs.get("temperature", self.config.temperature),
                         "num_predict": kwargs.get("max_tokens", self.config.max_tokens)

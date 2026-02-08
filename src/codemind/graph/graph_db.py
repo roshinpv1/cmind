@@ -235,3 +235,24 @@ class GraphBuilder:
 
             edge = Edge(from_id=parent_id, to_id=func_id, type="DECLARES", properties={})
             self.graph.add_edge(edge)
+
+    # -- Cross-file relationship builders --
+
+    def build_import_edges(self, repo_id: str, from_file: str, to_file: str, import_name: str):
+        """Create IMPORTS edge between two files."""
+        if self.is_kuzu:
+            self.graph.add_import_edge(repo_id, from_file, to_file, import_name)
+
+    def build_call_edges(self, repo_id: str, caller_file: str, caller_func: str,
+                         callee_file: str, callee_func: str, line: int = 0):
+        """Create CALLS edge between two functions."""
+        if self.is_kuzu:
+            self.graph.add_call_edge(repo_id, caller_file, caller_func,
+                                     callee_file, callee_func, line)
+
+    def build_inheritance_edges(self, repo_id: str, child_file: str, child_class: str,
+                                parent_file: str, parent_class: str):
+        """Create INHERITS edge between two classes."""
+        if self.is_kuzu:
+            self.graph.add_inheritance_edge(repo_id, child_file, child_class,
+                                            parent_file, parent_class)

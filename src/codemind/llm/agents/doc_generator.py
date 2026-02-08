@@ -282,7 +282,7 @@ class LangGraphDocAgent:
             return []
         
         # Generate query embedding
-        query_embedding = self.embedder.model.encode([query])[0].tolist()
+        query_embedding = self.embedder.encode_query(query)
         
         results = self.search.search(query_embedding, repo_id=repo_id, limit=limit)
         

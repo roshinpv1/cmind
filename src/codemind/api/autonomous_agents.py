@@ -9,10 +9,11 @@ Endpoints:
 - GET /api/v1/agents/autonomous/{job_id}/result - Get job result
 """
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
 import uuid
+import asyncio
 from datetime import datetime
 
 router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
@@ -96,18 +97,13 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
 async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iterations: int):
     """
     Background task for autonomous execution.
-    
-    Args:
-        job_id: Unique job identifier
-        goal: User's goal
-        repo_id: Repository to work with
-        max_iterations: Maximum iterations
+    Runs as a concurrent coroutine via asyncio.create_task().
     """
     try:
         print(f"[AUTONOMOUS] Starting job {job_id}")
         autonomous_jobs[job_id]["status"] = "running"
         
-        # Execute planner
+        # Execute planner directly as async coroutine
         result = await planner_agent.execute(goal, repo_id, max_iterations)
         
         # Update job with result
@@ -127,16 +123,11 @@ async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iteratio
 
 
 @router.post("/autonomous", response_model=AutonomousJobResponse)
-async def execute_autonomous(request: AutonomousRequest, background_tasks: BackgroundTasks):
+async def execute_autonomous(request: AutonomousRequest):
     """
     Execute an autonomous agent with a natural language goal.
     
-    The agent will:
-    1. Interpret the goal
-    2. Select appropriate skills iteratively
-    3. Execute skills via the skill executor
-    4. Synthesize a final answer
-    
+    Uses asyncio.create_task() for true non-blocking execution.
     Returns a job ID for tracking execution.
     """
     if not planner_agent:
@@ -155,13 +146,15 @@ async def execute_autonomous(request: AutonomousRequest, background_tasks: Backg
         "max_iterations": request.max_iterations
     }
     
-    # Start background task
-    background_tasks.add_task(
-        run_autonomous_task,
-        job_id=job_id,
-        goal=request.goal,
-        repo_id=request.repo_id,
-        max_iterations=request.max_iterations
+    # Use asyncio.create_task for true concurrent execution
+    # (BackgroundTasks blocks the event loop for async functions)
+    asyncio.create_task(
+        run_autonomous_task(
+            job_id=job_id,
+            goal=request.goal,
+            repo_id=request.repo_id,
+            max_iterations=request.max_iterations
+        )
     )
     
     return AutonomousJobResponse(

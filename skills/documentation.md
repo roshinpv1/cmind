@@ -4,7 +4,7 @@ name: documentation
 version: 1.0.0
 
 ## Description
-Generates structured documentation (README, architectural overview) from a codebase using semantic and structural search.
+Generates a detailed and structured documentation (README, architectural overview) from a codebase using semantic and structural search.
 
 ## Intent Signals
 - "generate documentation"

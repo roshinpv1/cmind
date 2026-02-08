@@ -389,3 +389,80 @@ class GraphQueryService:
             import traceback
             traceback.print_exc()
             return []
+
+    # -- Cross-file relationship queries --
+
+    def get_callers(self, repo_id: str, func_name: str) -> list[dict]:
+        """Find all functions that call the given function."""
+        try:
+            return self.graph.get_callers(repo_id, func_name)
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting callers: {e}")
+            return []
+
+    def get_callees(self, repo_id: str, func_name: str) -> list[dict]:
+        """Find all functions called by the given function."""
+        try:
+            return self.graph.get_callees(repo_id, func_name)
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting callees: {e}")
+            return []
+
+    def get_dependency_chain(self, repo_id: str, file_path: str) -> list[dict]:
+        """Get all files imported by this file (direct dependencies)."""
+        try:
+            return self.graph.get_file_dependencies(repo_id, file_path)
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting dependencies: {e}")
+            return []
+
+    def get_dependents(self, repo_id: str, file_path: str) -> list[dict]:
+        """Get all files that import this file."""
+        try:
+            return self.graph.get_file_dependents(repo_id, file_path)
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting dependents: {e}")
+            return []
+
+    def get_impact_radius(self, repo_id: str, symbol_name: str) -> dict:
+        """Get all symbols/files affected by changing this symbol.
+        
+        Returns direct callers and files that import the containing file.
+        """
+        try:
+            # Find all functions with this name
+            symbols = self.find_symbol_by_name(repo_id, symbol_name)
+            
+            affected_functions = []
+            affected_files = set()
+            
+            for sym in symbols:
+                # Get callers of this function
+                if sym["type"] == "Function":
+                    callers = self.get_callers(repo_id, sym["name"])
+                    affected_functions.extend(callers)
+                    for c in callers:
+                        affected_files.add(c["file_path"])
+                
+                # Get files that import the file containing this symbol
+                if "file_path" in sym:
+                    dependents = self.get_dependents(repo_id, sym["file_path"])
+                    for d in dependents:
+                        affected_files.add(d["file_path"])
+            
+            return {
+                "symbol": symbol_name,
+                "affected_functions": affected_functions,
+                "affected_files": list(affected_files),
+            }
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting impact radius: {e}")
+            return {"symbol": symbol_name, "affected_functions": [], "affected_files": []}
+
+    def get_class_hierarchy(self, repo_id: str, class_name: str) -> dict:
+        """Get inheritance hierarchy for a class."""
+        try:
+            return self.graph.get_class_hierarchy(repo_id, class_name)
+        except Exception as e:
+            print(f"[GRAPH_QUERY] Error getting class hierarchy: {e}")
+            return {"class": class_name, "parents": [], "children": []}

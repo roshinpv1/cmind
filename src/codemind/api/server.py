@@ -4,6 +4,9 @@ FastAPI control plane for CodeMind.
 REST API for indexing, search, and system management.
 """
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before anything reads os.environ
+
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -248,8 +251,8 @@ async def semantic_search(request: SearchRequest):
     graph_query = app.state.graph_query
     embedder = app.state.workflow.embedder
 
-    # Generate query embedding
-    query_embedding = embedder.model.encode([request.query])[0].tolist()
+    # Generate query embedding with proper task prefix
+    query_embedding = embedder.encode_query(request.query)
 
     results = []
 

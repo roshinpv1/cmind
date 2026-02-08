@@ -10,9 +10,11 @@ from pathlib import Path
 from codemind.graph import GraphBuilder
 from codemind.indexer import ChangeDetector
 from codemind.indexer.ast_extractor import ASTExtractor
-from codemind.indexer.chunker import CodeChunker
+from codemind.indexer.ast_chunker import ASTChunker
+from codemind.indexer.call_extractor import CallExtractor
 from codemind.indexer.embedder import EmbeddingGenerator
 from codemind.indexer.file_filters import CODE_EXTENSIONS, KNOWN_FILENAMES
+from codemind.indexer.import_resolver import ImportResolver
 from codemind.indexer.models import FileChange
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
@@ -51,7 +53,8 @@ class IndexingWorkflow:
 
         # Initialize components
         self.ast_extractor = ASTExtractor()
-        self.chunker = CodeChunker()
+        self.chunker = ASTChunker()  # AST-aware chunking (falls back to char-based)
+        self.call_extractor = CallExtractor()
         self.embedder = EmbeddingGenerator()
         self.graph_builder = GraphBuilder(graph_db)
 
@@ -90,6 +93,12 @@ class IndexingWorkflow:
                 print(f"[WORKFLOW] ❌ build_graph failed: {state.error}")
                 return state
             print(f"[WORKFLOW] ✅ build_graph complete")
+
+            state = self.extract_relationships(state)
+            if state.error:
+                print(f"[WORKFLOW] ❌ extract_relationships failed: {state.error}")
+                return state
+            print(f"[WORKFLOW] ✅ extract_relationships complete")
 
             state = self.update_manifest(state)
             state.stage = "completed"
@@ -247,14 +256,15 @@ class IndexingWorkflow:
                 )
                 files_processed += 1
 
-                # Extract and add classes/functions for Python files
-                if file_path.suffix == ".py":
+                # Extract and add classes/functions for ALL supported languages
+                language = self.ast_extractor.detect_language(file_path)
+                if language:
                     try:
-                        result = self.ast_extractor.extract(file_path)
+                        result = self.ast_extractor.extract(file_path, language)
 
                         # Add class nodes
                         for symbol in result.symbols:
-                            if symbol.type == "class":
+                            if symbol.type in ("class", "interface", "struct", "trait", "enum"):
                                 self.graph_builder.build_class_node(
                                     state.repo_id,
                                     str(file_change.path),
@@ -282,6 +292,99 @@ class IndexingWorkflow:
             import traceback
             traceback.print_exc()
             state.error = f"Graph building failed: {e}"
+
+        return state
+
+    def extract_relationships(self, state: IndexingState) -> IndexingState:
+        """Node: Extract cross-file relationships (IMPORTS, CALLS, INHERITS)."""
+        try:
+            state.stage = "extracting_relationships"
+            repo_path = Path(state.repo_path)
+            import_resolver = ImportResolver(repo_path)
+
+            import_edges = 0
+            call_edges = 0
+            inherit_edges = 0
+
+            # Build a symbol-to-file index for resolving cross-file calls
+            symbol_file_map: dict[str, list[str]] = {}  # name → [file_paths]
+
+            for file_change in state.changed_files:
+                file_path = repo_path / file_change.path
+                if not file_path.exists():
+                    continue
+
+                language = self.ast_extractor.detect_language(file_path)
+                if not language:
+                    continue
+
+                try:
+                    result = self.ast_extractor.extract(file_path, language)
+
+                    # Index symbols
+                    for sym in result.symbols:
+                        if sym.name not in symbol_file_map:
+                            symbol_file_map[sym.name] = []
+                        symbol_file_map[sym.name].append(str(file_change.path))
+
+                    # Build IMPORTS edges
+                    for imp in result.imports:
+                        resolved = import_resolver.resolve(
+                            imp.module, language, source_file=file_path
+                        )
+                        if resolved:
+                            self.graph_builder.build_import_edges(
+                                state.repo_id, str(file_change.path), resolved, imp.module
+                            )
+                            import_edges += 1
+
+                    # Build INHERITS edges
+                    for sym in result.symbols:
+                        if sym.bases:
+                            for base in sym.bases:
+                                # Find the file that declares the base class
+                                if base in symbol_file_map:
+                                    for base_file in symbol_file_map[base]:
+                                        if base_file != str(file_change.path):
+                                            self.graph_builder.build_inheritance_edges(
+                                                state.repo_id,
+                                                str(file_change.path), sym.name,
+                                                base_file, base,
+                                            )
+                                            inherit_edges += 1
+
+                except Exception as e:
+                    print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
+
+            # Build CALLS edges
+            for file_change in state.changed_files:
+                file_path = repo_path / file_change.path
+                if not file_path.exists():
+                    continue
+
+                try:
+                    calls = self.call_extractor.extract_calls(file_path)
+                    for call in calls:
+                        # Resolve callee to a file
+                        if call.callee_name in symbol_file_map:
+                            for callee_file in symbol_file_map[call.callee_name]:
+                                self.graph_builder.build_call_edges(
+                                    state.repo_id,
+                                    str(file_change.path), call.caller_name,
+                                    callee_file, call.callee_name,
+                                    call.line,
+                                )
+                                call_edges += 1
+                except Exception:
+                    pass
+
+            print(f"[REL] ✅ Extracted {import_edges} imports, {call_edges} calls, {inherit_edges} inheritance edges")
+
+        except Exception as e:
+            print(f"[REL] ❌ Relationship extraction failed: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Non-fatal: don't set state.error so indexing continues
 
         return state
 

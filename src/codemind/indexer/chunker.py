@@ -20,6 +20,9 @@ class CodeChunk:
     start_byte: int
     end_byte: int
     file_path: str
+    symbol_name: str | None = None   # Function/class name if AST-derived
+    symbol_type: str | None = None   # "function", "class", "method"
+    language: str | None = None       # Programming language
 
 
 class CodeChunker:
