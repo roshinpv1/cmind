@@ -279,7 +279,7 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects skills (qa, documentation) or tools (search, graph queries)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously (non-blocking)\n\nmax_iterations: caps the planner loop (default: 10)"
+                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects a high-level skill (code_analyzer) or tools (search, graph queries)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously (non-blocking)\n\nmax_iterations: caps the planner loop (default: 10)"
                     }
                 },
                 {
@@ -324,7 +324,7 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the 'documentation' skill to analyze the codebase and produce structured output."
+                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the 'code_analyzer' skill to analyze the codebase and produce structured output."
                     }
                 },
                 {
@@ -369,7 +369,7 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use the 'qa' skill, graph tools (callers, dependencies), and search to reason through the answer."
+                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use the 'code_analyzer' skill, graph tools, and search to reason through the answer."
                     }
                 },
                 {
@@ -631,7 +631,7 @@
                                 "health"
                             ]
                         },
-                        "description": "Returns server health status and version.\n\nResponse: { status: 'healthy', version: '0.1.0' }"
+                        "description": "Returns server health status, version, and embedding configuration.\n\nResponse: { status: 'healthy', version: '0.1.0', embedding_model: '...', embedding_dim: 768 }"
                     }
                 },
                 {
