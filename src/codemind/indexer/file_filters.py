@@ -68,6 +68,8 @@ CODE_EXTENSIONS = {
     # Web / Markup
     ".html",
     ".htm",
+    ".jsp",
+    ".jspx",
     ".css",
     ".scss",
     ".sass",

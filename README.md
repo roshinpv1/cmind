@@ -259,6 +259,8 @@ parse_input → search_code → pack_context → llm_generate
 | Zig | `.zig` | ✅ | ✅ | ✅ |
 | Elixir | `.ex`, `.exs` | ✅ | ✅ | ✅ |
 | Haskell | `.hs` | ✅ | ✅ | ✅ |
+| **JSP** | `.jsp`, `.jspx` | ❌ | ❌ | ❌ | (Semantic-Only)
+| HTML/CSS | `.html`, `.css` | ❌ | ❌ | ❌ | (Semantic-Only)
 
 **Extracts:** Classes, functions, methods, interfaces, structs, traits, enums, imports, base classes, parameters, docstrings.
 
@@ -324,7 +326,28 @@ Every `max_tokens` parameter in the system derives from `LLM_MAX_TOKENS`:
 | **Executor batch output** | Per-batch LLM output | `cfg × 0.1` → 10% |
 | **Executor reduce output** | Final merge output | `cfg × 0.3` → 30% |
 
-### 12. Non-Blocking Agent Execution
+### 12. Configurable Embedding System
+
+CodeMind supports both cloud-based (HuggingFace) and local embedding models. All parameters are externalized to environment variables.
+
+**Supported Configurations:**
+- **Model Loading**: Load from HuggingFace (`BAAI/bge-base-en-v1.5`) or local directory paths.
+- **Auto-Detection**: The system automatically detects embedding dimensions from the loaded model.
+- **Dynamic Schema**: LanceDB storage automatically adapts its schema to match the model's dimensions.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `EMBEDDING_MODEL` | `BAAI/bge-base-en-v1.5` | Model name or absolute local path |
+| `EMBEDDING_DIMENSION` | `768` | Vector dimensions (e.g., 768 for BGE, 384 for MiniLM) |
+| `EMBEDDING_MAX_TOKENS` | `512` | Max sequence length for the model |
+| `EMBEDDING_BATCH_SIZE` | `32` | Chunks processed per batch during indexing |
+| `EMBEDDING_QUERY_PREFIX` | BGE instruction | Custom instruction prefix for query Encoding |
+| **Normalization** | ✅ L2 | Embeddings are normalized by default |
+
+> [!IMPORTANT]
+> Changing the embedding model or dimensions requires deleting `data/lancedb/` and re-indexing all repositories to avoid vector dimension mismatches.
+
+### 13. Non-Blocking Agent Execution
 
 The autonomous agent runs as a background coroutine via `asyncio.create_task()`:
 
@@ -338,7 +361,7 @@ asyncio.create_task(run_autonomous_task(job_id, goal, repo_id, max_iterations))
 - Retrieve result via `GET /api/v1/agents/autonomous/{job_id}/result`
 - Explicit `await asyncio.sleep(0)` yield points in every planner node
 
-### 13. Indexing Pipeline
+### 14. Indexing Pipeline
 
 The indexing process is orchestrated by LangGraph as an 8-step workflow:
 
@@ -431,7 +454,14 @@ LOCAL_LLM_URL=http://localhost:1234/v1     # LLM server endpoint
 LOCAL_LLM_MODEL=openai/gpt-oss-20b        # Model name
 
 # Token Configuration (all budgets scale from this single value)
-LLM_MAX_TOKENS=100000                     # Default: 4096
+LLM_MAX_TOKENS=100000
+
+# Embedding Configuration
+EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+EMBEDDING_DIMENSION=768
+EMBEDDING_MAX_TOKENS=512
+EMBEDDING_BATCH_SIZE=32
+EMBEDDING_QUERY_PREFIX="Represent this sentence for searching relevant passages: "
 ```
 
 ### Start the Server
@@ -548,24 +578,6 @@ cmind/
 
 ---
 
-## 🔧 Embedding Model
-
-CodeMind uses **BAAI/bge-base-en-v1.5** for semantic embeddings:
-
-| Property | Value |
-|----------|-------|
-| Model | `BAAI/bge-base-en-v1.5` |
-| Dimensions | 768 |
-| Max Tokens | 512 |
-| Batch Size | 32 |
-| Document Prefix | None |
-| Query Prefix | `Represent this sentence for searching relevant passages: ` |
-| Normalization | ✅ L2 normalized |
-
-> **Note:** Changing the embedding model requires re-indexing all repositories.
-
----
-
 ## 🔌 API Reference
 
 ### Core Endpoints
@@ -574,7 +586,8 @@ CodeMind uses **BAAI/bge-base-en-v1.5** for semantic embeddings:
 |--------|----------|-------------|
 | `POST` | `/api/v1/index` | Index a repository |
 | `POST` | `/api/v1/search` | Search codebase (semantic/hybrid) |
-| `GET` | `/api/v1/health` | Health check |
+| `GET` | `/api/v1/health` | Health check (returns version + embedding config) |
+| `GET` | `/api/v1/stats` | System statistics (job counts) |
 | `GET` | `/docs` | Swagger UI |
 
 ### Agent Endpoints
@@ -582,17 +595,27 @@ CodeMind uses **BAAI/bge-base-en-v1.5** for semantic embeddings:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/v1/agents/autonomous` | Start autonomous agent job |
-| `GET` | `/api/v1/agents/autonomous/{job_id}/status` | Poll job status |
-| `GET` | `/api/v1/agents/autonomous/{job_id}/result` | Get job result |
+| `GET` | `/api/v1/agents/autonomous/{job_id}/status` | Poll agent job status |
+| `GET` | `/api/v1/agents/autonomous/{job_id}/result` | Get final agent output |
 
 ### Graph Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/v1/graph/callers` | Find function callers |
-| `GET` | `/api/v1/graph/callees` | Find function callees |
-| `GET` | `/api/v1/graph/dependencies` | File dependencies |
-| `GET` | `/api/v1/graph/dependents` | File dependents |
+| `POST` | `/api/v1/graph/query` | Unified GraphQL-like query for code structure |
+
+**Graph Query Request Body:**
+```json
+{
+  "repo_id": "c03b42a23b1fdc85",
+  "query_type": "files",   // "files", "classes", "functions", "symbol"
+  "pattern": "api",        // Optional pattern
+  "file_type": ".py",      // Optional filter
+  "class_name": "Planner", // For finding methods in a class
+  "symbol_name": "exec"    // For exact symbol lookup
+}
+```
+
 
 ---
 

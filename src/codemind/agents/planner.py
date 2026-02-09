@@ -143,8 +143,8 @@ class PlannerAgent:
                 else:
                     available = self.registry.list_skills()
                     print(f"[PLANNER] Skill '{action['name']}' not found. Available: {available}")
-                    # Auto-correct to qa skill
-                    state["plan"] = [{"skill": "qa", "params": action["params"]}]
+                    # Auto-correct to code_analyzer skill
+                    state["plan"] = [{"skill": "code_analyzer", "params": action["params"]}]
             
             elif action["type"] == "finish":
                 state["finished"] = True

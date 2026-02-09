@@ -11,10 +11,10 @@ Iteration: {{iteration}}
 2. **Select ONE skill** from the list above that best fits the goal.
 3. **Finish** if the goal is already satisfied (e.g. documentation generated).
 
-**Phase-1 Config:**
-- You have access to `documentation` and `qa`.
-- If user wants docs/overview -> `documentation`
-- If user asks specific question -> `qa`
+**Configuration:**
+- Use `code_analyzer` for most general inquiries, architectural analysis, and deep dives.
+- Use TOOLS for direct data retrieval (files, graph) before calling a skill if specific context is missing.
+
 
 ## Format
 
