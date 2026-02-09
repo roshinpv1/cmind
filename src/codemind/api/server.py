@@ -81,6 +81,8 @@ class HealthResponse(BaseModel):
 
     status: str
     version: str
+    embedding_model: str | None = None
+    embedding_dim: int | None = None
 
 
 # FastAPI app with lifespan
@@ -390,8 +392,16 @@ async def semantic_search(request: SearchRequest):
 
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
-    return HealthResponse(status="healthy", version="0.1.0")
+    """Health check endpoint with embedding model info."""
+    workflow: IndexingWorkflow = app.state.workflow
+    embedder = workflow.embedder
+    
+    return HealthResponse(
+        status="healthy",
+        version="0.1.0",
+        embedding_model=embedder.model_name,
+        embedding_dim=embedder.embedding_dim
+    )
 
 
 @app.get("/api/v1/stats")

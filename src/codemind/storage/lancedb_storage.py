@@ -2,8 +2,10 @@
 LanceDB append-only storage for code embeddings.
 
 Stores chunks, embeddings, and metadata immutably.
+Supports configurable embedding dimensions.
 """
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -14,20 +16,24 @@ from codemind.indexer.chunker import CodeChunk
 
 
 class LanceDBStorage:
-    """Append-only vector storage using LanceDB."""
+    """Append-only vector storage using LanceDB with configurable embedding dimensions."""
 
-    def __init__(self, db_path: str | Path = "data/lancedb"):
+    def __init__(self, db_path: str | Path = "data/lancedb", embedding_dim: int | None = None):
         """
         Initialize LanceDB storage.
 
         Args:
             db_path: Path to LanceDB directory
+            embedding_dim: Embedding vector dimension (default: from EMBEDDING_DIMENSION env or 768)
         """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(str(self.db_path))
+        
+        # Read embedding dimension from env or parameter
+        self.embedding_dim = embedding_dim or int(os.getenv("EMBEDDING_DIMENSION", "768"))
 
-        # Define schema
+        # Define schema with dynamic embedding dimension
         self.schema = pa.schema(
             [
                 pa.field("chunk_id", pa.string()),
@@ -37,7 +43,7 @@ class LanceDBStorage:
                 pa.field("chunk_text", pa.string()),
                 pa.field("start_line", pa.int32()),
                 pa.field("end_line", pa.int32()),
-                pa.field("embedding", pa.list_(pa.float32(), 768)),  # nomic-embed-code
+                pa.field("embedding", pa.list_(pa.float32(), self.embedding_dim)),  # Dynamic dimension
                 pa.field("embedding_version", pa.int32()),
                 pa.field("indexed_at", pa.timestamp("us")),
                 pa.field("symbol_name", pa.string()),   # Function/class name (AST chunk)

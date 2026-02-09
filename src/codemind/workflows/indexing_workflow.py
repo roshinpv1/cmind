@@ -48,7 +48,6 @@ class IndexingWorkflow:
     ):
         """Initialize workflow."""
         self.manifest = manifest_manager
-        self.storage = lance_storage
         self.graph = graph_db
 
         # Initialize components
@@ -56,6 +55,12 @@ class IndexingWorkflow:
         self.chunker = ASTChunker()  # AST-aware chunking (falls back to char-based)
         self.call_extractor = CallExtractor()
         self.embedder = EmbeddingGenerator()
+        
+        # Pass embedding dimension to storage (ensures schema matches model)
+        self.storage = LanceDBStorage(
+            db_path=lance_storage.db_path,
+            embedding_dim=self.embedder.embedding_dim
+        )
         self.graph_builder = GraphBuilder(graph_db)
 
     def run(self, state: IndexingState) -> IndexingState:
