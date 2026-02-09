@@ -2,26 +2,55 @@
     "info": {
         "_postman_id": "codemind-api-collection",
         "name": "CodeMind API",
-        "description": "CodeMind API with LangGraph Agents",
+        "description": "CodeMind v2 — AI-Powered Code Intelligence Platform with Autonomous Agents\n\nFeatures:\n- Repository indexing (local path + Git URL)\n- Semantic & hybrid code search\n- Autonomous LangGraph agents with skill-based reasoning\n- Kùzu graph queries (callers, callees, dependencies)\n- System health & stats",
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
         {
             "key": "base_url",
-            "value": "http://localhost:8000"
+            "value": "http://localhost:8000",
+            "description": "CodeMind server base URL"
         },
         {
             "key": "repo_id",
-            "value": "1dd450cb2ecd63a9",
-            "description": "Default repo ID for testing"
+            "value": "c03b42a23b1fdc85",
+            "description": "Default repo ID for testing (set after indexing)"
+        },
+        {
+            "key": "job_id",
+            "value": "",
+            "description": "Job ID from indexing or agent execution"
+        },
+        {
+            "key": "agent_job_id",
+            "value": "",
+            "description": "Job ID from autonomous agent execution"
         }
     ],
     "item": [
         {
-            "name": "Indexing",
+            "name": "1. Indexing",
+            "description": "Index repositories from local folders or Git URLs. Returns a job_id for tracking.",
             "item": [
                 {
-                    "name": "Index Local Path",
+                    "name": "Index Local Folder",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('job_id', jsonData.job_id);",
+                                    "pm.collectionVariables.set('repo_id', jsonData.repo_id);",
+                                    "pm.test('Index request accepted', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
                     "request": {
                         "method": "POST",
                         "header": [
@@ -32,7 +61,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"repo_path\": \"/Users/username/projects/my-repo\"\n}"
+                            "raw": "{\n  \"repo_path\": \"/path/to/your/local/project\"\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/index",
@@ -44,11 +73,29 @@
                                 "v1",
                                 "index"
                             ]
-                        }
+                        },
+                        "description": "Index a local folder. The repo_path must be an absolute path to an existing directory.\n\nReturns job_id and repo_id. Use job_id to poll status."
                     }
                 },
                 {
                     "name": "Index Git URL",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('job_id', jsonData.job_id);",
+                                    "pm.collectionVariables.set('repo_id', jsonData.repo_id);",
+                                    "pm.test('Index request accepted', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
                     "request": {
                         "method": "POST",
                         "header": [
@@ -71,7 +118,8 @@
                                 "v1",
                                 "index"
                             ]
-                        }
+                        },
+                        "description": "Index a Git repository by URL. The repo will be cloned locally.\n\nSupported: GitHub, GitLab, Bitbucket, or any Git URL.\nDefault branch: main"
                     }
                 },
                 {
@@ -79,7 +127,7 @@
                     "request": {
                         "method": "GET",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/jobs/:job_id",
+                            "raw": "{{base_url}}/api/v1/jobs/{{job_id}}",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -87,21 +135,17 @@
                                 "api",
                                 "v1",
                                 "jobs",
-                                ":job_id"
-                            ],
-                            "variable": [
-                                {
-                                    "key": "job_id",
-                                    "value": "abc-123"
-                                }
+                                "{{job_id}}"
                             ]
-                        }
+                        },
+                        "description": "Poll indexing job status.\n\nPossible statuses: pending, running, completed, failed\nIncludes: stage, progress (0-100), error (if failed), repo_id"
                     }
                 }
             ]
         },
         {
-            "name": "Search",
+            "name": "2. Search",
+            "description": "Search indexed codebases using semantic vectors or hybrid (vector + graph) modes.",
             "item": [
                 {
                     "name": "Semantic Search",
@@ -127,7 +171,8 @@
                                 "v1",
                                 "search"
                             ]
-                        }
+                        },
+                        "description": "Pure semantic search using BAAI/bge-base-en-v1.5 (768d vectors).\n\nReturns: chunk_text, file_path, start_line, score, context (classes/functions)"
                     }
                 },
                 {
@@ -154,16 +199,12 @@
                                 "v1",
                                 "search"
                             ]
-                        }
+                        },
+                        "description": "Hybrid search combining semantic vectors with graph-based structural filters.\n\nAvailable filters:\n- file_type: filter by extension (.py, .ts, .java, etc.)\n- file_patterns: filter by path patterns\n- class_name: filter by class\n- exclude_patterns: exclude paths matching patterns"
                     }
-                }
-            ]
-        },
-        {
-            "name": "Agents (LangGraph)",
-            "item": [
+                },
                 {
-                    "name": "Generate README",
+                    "name": "Search by Symbol",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -174,10 +215,60 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"agent_type\": \"doc_generator\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"task\": \"generate_readme\",\n  \"config\": {\n    \"doc_type\": \"readme\",\n    \"include_examples\": true\n  }\n}"
+                            "raw": "{\n  \"query\": \"PlannerAgent class\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"semantic\",\n  \"filters\": {\n    \"symbol_type\": \"class\"\n  },\n  \"limit\": 5\n}"
                         },
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/execute",
+                            "raw": "{{base_url}}/api/v1/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "search"
+                            ]
+                        },
+                        "description": "Search for specific code symbols (classes, functions, methods)."
+                    }
+                }
+            ]
+        },
+        {
+            "name": "3. Autonomous Agent",
+            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with 7 tools and skill-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
+            "item": [
+                {
+                    "name": "Start Agent - Generate Architecture",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
+                                    "pm.test('Agent started', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"Generate a detailed high-level architecture diagram with Mermaid\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -185,10 +276,145 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                "execute"
+                                "autonomous"
                             ]
                         },
-                        "description": "Starts LangGraph workflow to generate README using:\n1. analyze_structure\n2. identify_components\n3. extract_features\n4. generate_documentation"
+                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects skills (qa, documentation) or tools (search, graph queries)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously (non-blocking)\n\nmax_iterations: caps the planner loop (default: 10)"
+                    }
+                },
+                {
+                    "name": "Start Agent - Generate Documentation",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
+                                    "pm.test('Agent started', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"Generate comprehensive documentation including README, API reference, and setup guide\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous"
+                            ]
+                        },
+                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the 'documentation' skill to analyze the codebase and produce structured output."
+                    }
+                },
+                {
+                    "name": "Start Agent - Answer Question",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
+                                    "pm.test('Agent started', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"What functions call the authenticate() method and which files import auth.py?\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous"
+                            ]
+                        },
+                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use the 'qa' skill, graph tools (callers, dependencies), and search to reason through the answer."
+                    }
+                },
+                {
+                    "name": "Start Agent - Find Dead Code",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
+                                    "pm.test('Agent started', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"Find unused or dead code, orphaned functions, and unreferenced modules\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous"
+                            ]
+                        },
+                        "description": "Start an autonomous agent to analyze the codebase for dead/unused code."
                     }
                 },
                 {
@@ -196,7 +422,7 @@
                     "request": {
                         "method": "GET",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/:job_id/status",
+                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{agent_job_id}}/status",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -204,16 +430,12 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                ":job_id",
+                                "autonomous",
+                                "{{agent_job_id}}",
                                 "status"
-                            ],
-                            "variable": [
-                                {
-                                    "key": "job_id",
-                                    "value": "ee77ac09-19fe-4e3d-9249-9b1f58e1edf4"
-                                }
                             ]
-                        }
+                        },
+                        "description": "Poll autonomous agent job status.\n\nPossible statuses: pending, running, completed, failed\nIncludes: iterations, steps_taken, goal, created_at"
                     }
                 },
                 {
@@ -221,7 +443,7 @@
                     "request": {
                         "method": "GET",
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/:job_id/result",
+                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{agent_job_id}}/result",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -229,23 +451,170 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                ":job_id",
+                                "autonomous",
+                                "{{agent_job_id}}",
                                 "result"
-                            ],
-                            "variable": [
-                                {
-                                    "key": "job_id",
-                                    "value": "ee77ac09-19fe-4e3d-9249-9b1f58e1edf4"
-                                }
                             ]
                         },
-                        "description": "Returns generated documentation and progress tracking:\n- documentation: Generated README\n- progress: [\"✓ Analyzed structure\", \"✓ Found components\", ...]\n- error: null if successful"
+                        "description": "Get the final result from a completed autonomous agent job.\n\nReturns:\n- answer: The agent's final output (markdown)\n- steps_taken: Total processing steps\n- iterations: Planner loop iterations\n- skills_used: List of skills invoked\n- error: null if successful\n\nReturns 425 Too Early if the job is still running."
                     }
                 }
             ]
         },
         {
-            "name": "System",
+            "name": "4. Graph Queries",
+            "description": "Query the Kùzu code knowledge graph for structural relationships: files, classes, functions, symbols, callers, callees, and dependencies.",
+            "item": [
+                {
+                    "name": "Find Files by Pattern",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"files\",\n  \"pattern\": \"api\",\n  \"file_type\": \".py\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/graph/query",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "graph",
+                                "query"
+                            ]
+                        },
+                        "description": "Find files in the graph matching a pattern and/or file type."
+                    }
+                },
+                {
+                    "name": "Find Classes",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"classes\",\n  \"pattern\": \"Agent\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/graph/query",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "graph",
+                                "query"
+                            ]
+                        },
+                        "description": "Find classes by name pattern in the code graph."
+                    }
+                },
+                {
+                    "name": "Find Functions in Class",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"functions\",\n  \"class_name\": \"PlannerAgent\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/graph/query",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "graph",
+                                "query"
+                            ]
+                        },
+                        "description": "Find all functions/methods in a given class."
+                    }
+                },
+                {
+                    "name": "Find Functions by Pattern",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"functions\",\n  \"pattern\": \"search\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/graph/query",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "graph",
+                                "query"
+                            ]
+                        },
+                        "description": "Find functions by name pattern across the codebase."
+                    }
+                },
+                {
+                    "name": "Search Symbol by Name",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"symbol\",\n  \"symbol_name\": \"SkillExecutor\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/graph/query",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "graph",
+                                "query"
+                            ]
+                        },
+                        "description": "Find any symbol (class, function, method) by exact name."
+                    }
+                }
+            ]
+        },
+        {
+            "name": "5. System",
+            "description": "Health checks and system statistics.",
             "item": [
                 {
                     "name": "Health Check",
@@ -261,7 +630,8 @@
                                 "v1",
                                 "health"
                             ]
-                        }
+                        },
+                        "description": "Returns server health status and version.\n\nResponse: { status: 'healthy', version: '0.1.0' }"
                     }
                 },
                 {
@@ -278,7 +648,8 @@
                                 "v1",
                                 "stats"
                             ]
-                        }
+                        },
+                        "description": "Get system statistics.\n\nReturns: total_jobs, pending_jobs, running_jobs, completed_jobs, failed_jobs"
                     }
                 }
             ]
