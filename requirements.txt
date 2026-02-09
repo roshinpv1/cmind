@@ -1,0 +1,49 @@
+# =============================================================================
+# CodeMind - Requirements
+# Generated from actual imports across the codebase
+# =============================================================================
+
+# --- Web Framework ---
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+httpx>=0.26.0                    # Async HTTP client for LLM API calls
+
+# --- Workflow Orchestration ---
+langgraph>=0.0.40
+langchain-core>=0.1.0
+
+# --- Vector Storage ---
+lancedb>=0.4.0
+pyarrow>=15.0.0
+
+# --- Embeddings ---
+sentence-transformers>=2.3.0
+torch>=2.1.0
+numpy>=1.24.0
+
+# --- Graph Database ---
+kuzu>=0.3.0                      # Kùzu graph DB (replaces neo4j)
+
+# --- AST Parsing (Tree-sitter) ---
+tree-sitter>=0.21.0
+tree-sitter-python>=0.21.0
+tree-sitter-javascript>=0.21.0
+tree-sitter-typescript>=0.21.0
+tree-sitter-go>=0.21.0
+tree-sitter-rust>=0.21.0
+tree-sitter-java>=0.21.0
+
+# --- Git Operations ---
+gitpython>=3.1.40
+
+# --- Database & Persistence ---
+sqlalchemy>=2.0.25
+aiosqlite>=0.19.0
+
+# --- Utilities ---
+python-dotenv>=1.0.0             # .env file loading
+pyyaml>=6.0                      # Skill markdown YAML frontmatter parsing
+click>=8.1.7                     # CLI interface
+structlog>=24.1.0                # Structured logging
