@@ -5,8 +5,8 @@ Runs the REAL planner flow against the REAL LLM (LM Studio / local).
 Captures and prints:
   - Prompt sent to LLM
   - LLM response
-  - Skill selection decision
-  - Skill execution result
+  - Playbook selection decision
+  - Playbook execution result
   - Final answer
 
 Usage:
@@ -90,7 +90,7 @@ async def run_test(goal: str, repo_id: str):
     print("📦 [1/4] Initializing components...")
 
     from codemind.llm.factory import get_llm_client
-    from codemind.skills import SkillRegistry, SkillExecutor, SkillTools
+    from codemind.playbooks import PlaybookRegistry, PlaybookExecutor, PlaybookTools
     from codemind.agents import PlannerAgent
 
     # Get real LLM client and wrap it
@@ -98,20 +98,20 @@ async def run_test(goal: str, repo_id: str):
     llm = CapturingLLMWrapper(real_llm)
     print(f"  ✓ LLM client: {type(real_llm).__name__}")
 
-    # Initialize skill registry
-    registry = SkillRegistry()
-    available_skills = registry.list_skills()
-    print(f"  ✓ Registry: {len(registry)} skills loaded: {available_skills}")
+    # Initialize playbook registry
+    registry = PlaybookRegistry()
+    available_playbooks = registry.list_playbooks()
+    print(f"  ✓ Registry: {len(registry)} playbooks loaded: {available_playbooks}")
 
-    if not available_skills:
-        print("  ✗ ERROR: No skills loaded! Check skills/ directory.")
+    if not available_playbooks:
+        print("  ✗ ERROR: No playbooks loaded! Check playbooks/ directory.")
         return
 
     # Show what the planner will see
-    print(f"\n  Skills prompt format:")
-    for name in available_skills:
-        skill = registry.get_skill(name)
-        print(f"    - {name}: {skill.when_to_use[:100]}...")
+    print(f"\n  Playbooks prompt format:")
+    for name in available_playbooks:
+        playbook = registry.get_playbook(name)
+        print(f"    - {name}: {playbook.when_to_use[:100]}...")
 
     # ── Step 2: Initialize executor (needs real search backend) ──
     print("\n📦 [2/4] Initializing executor...")
@@ -130,9 +130,9 @@ async def run_test(goal: str, repo_id: str):
         
         embedder = get_embedder()
         
-        tools = SkillTools(lance_storage, graph_service, embedder)
+        tools = PlaybookTools(lance_storage, graph_service, embedder)
         # Use the capturing wrapper for ALL LLM calls (executor + planner)
-        executor = SkillExecutor(registry, tools, llm)
+        executor = PlaybookExecutor(registry, tools, llm)
         print(f"  ✓ Executor ready (with real search backend)")
     except Exception as e:
         print(f"  ⚠ Could not initialize real search backend: {e}")
@@ -145,7 +145,7 @@ async def run_test(goal: str, repo_id: str):
                 return {"success": True, "results": [], "count": 0}
         
         tools = MockTools()
-        executor = SkillExecutor(registry, tools, llm)
+        executor = PlaybookExecutor(registry, tools, llm)
 
     # ── Step 3: Run planner ──
     print(f"\n🚀 [3/4] Running planner...")
@@ -170,7 +170,7 @@ async def run_test(goal: str, repo_id: str):
         print(f"\n  Goal:         {result.get('goal', 'N/A')}")
         print(f"  Steps taken:  {result.get('steps_taken', 'N/A')}")
         print(f"  Iterations:   {result.get('iterations', 'N/A')}")
-        print(f"  Skills used:  {result.get('skills_used', 'N/A')}")
+        print(f"  Playbooks used:  {result.get('playbooks_used', 'N/A')}")
         
         if result.get("error"):
             print(f"\n  ❌ Error: {result['error']}")

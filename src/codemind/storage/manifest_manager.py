@@ -107,8 +107,10 @@ class ManifestManager:
         self,
         repo_id: str,
         last_commit_hash: str | None = None,
-        total_files: int | None = None,
+                total_files: int | None = None,
         embedding_version: int | None = None,
+        # New metadata fields
+        metadata: dict | None = None,
     ) -> RepositoryManifest | None:
         """
         Update repository manifest.
@@ -118,6 +120,7 @@ class ManifestManager:
             last_commit_hash: Latest Git commit hash
             total_files: Total number of indexed files
             embedding_version: Embedding version
+            metadata: Dictionary containing first_author, last_authors, etc.
 
         Returns:
             Updated repository manifest or None if not found
@@ -134,6 +137,19 @@ class ManifestManager:
                 repo.total_files_indexed = total_files
             if embedding_version is not None:
                 repo.embedding_version = embedding_version
+            
+            # Update metadata if provided
+            if metadata:
+                import json
+                if "first_commit_at" in metadata:
+                    repo.first_commit_at = metadata["first_commit_at"]
+                if "first_author" in metadata:
+                    repo.first_author = metadata["first_author"]
+                if "last_authors" in metadata:
+                    # Store list as JSON string
+                    repo.last_authors = json.dumps(metadata["last_authors"])
+                if "total_commits" in metadata:
+                    repo.total_commits = metadata["total_commits"]
 
             repo.last_indexed_at = datetime.now(UTC)
             repo.updated_at = datetime.now(UTC)

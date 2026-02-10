@@ -24,13 +24,13 @@ class PlannerState(TypedDict):
     repo_id: str  # Repository to work with
     
     # === Planning ===
-    plan: list[dict]  # Current plan: [{"skill": "...", "params": {...}}]
+    plan: list[dict]  # Current plan: [{"playbook": "...", "params": {...}}]
     current_step: int  # Which step we're on
     
     # === Execution History (append-only) ===
     thoughts: Annotated[list[str], operator.add]  # Agent's reasoning
-    actions: Annotated[list[dict], operator.add]  # Skills executed
-    observations: Annotated[list[dict], operator.add]  # Results from skills
+    actions: Annotated[list[dict], operator.add]  # Playbooks executed
+    observations: Annotated[list[dict], operator.add]  # Results from playbooks
     
     # === Control ===
     iteration: int  # Current iteration number

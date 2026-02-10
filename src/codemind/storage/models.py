@@ -25,6 +25,13 @@ class RepositoryManifest(Base):
     embedding_model: Mapped[str] = mapped_column(String, default="all-MiniLM-L6-v2")
     embedding_version: Mapped[int] = mapped_column(Integer, default=1)
     total_files_indexed: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # New metadata fields
+    first_commit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    first_author: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_authors: Mapped[str | None] = mapped_column(String, nullable=True, comment="JSON list of last 4 authors")
+    total_commits: Mapped[int] = mapped_column(Integer, default=0)
+    
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)

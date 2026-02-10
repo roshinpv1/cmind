@@ -108,7 +108,7 @@ async def lifespan(app: FastAPI):
     app.include_router(agents_module.router)
     print("[SERVER] ✅ Agent system initialized")
     
-    # Initialize autonomous agent system (skill-based)
+    # Initialize autonomous agent system (playbook-based)
     from .autonomous_agents import init_autonomous_agents, router as autonomous_router
     init_autonomous_agents(
         app.state.lance_storage,
@@ -147,8 +147,11 @@ def run_indexing_job(
 
         # Handle git URL if provided
         if repo_url:
+            import os
+            git_token = os.environ.get("GIT_ACCESS_TOKEN")
+            
             git_manager = GitRepoManager()
-            local_path, computed_repo_id, _ = git_manager.ensure_repo(repo_url, branch)
+            local_path, computed_repo_id, _ = git_manager.ensure_repo(repo_url, branch, token=git_token)
             actual_repo_path = str(local_path)
             # Use the computed repo_id from GitRepoManager
             actual_repo_id = computed_repo_id

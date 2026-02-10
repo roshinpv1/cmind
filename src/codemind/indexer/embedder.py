@@ -221,7 +221,7 @@ class EmbeddingGenerator:
         prefixed = f"{self.query_prefix}{query}"
         
         embeddings = self.provider.encode_batch([prefixed])
-        if not embeddings:
+        if len(embeddings) == 0:
             return []
             
         return embeddings[0].tolist()

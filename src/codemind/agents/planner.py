@@ -1,10 +1,10 @@
 """
-Autonomous Planner Agent - LLM-powered skill selection and execution.
+Autonomous Planner Agent - LLM-powered playbook selection and execution.
 
 The planner:
 1. Interprets user goals
-2. Selects appropriate skills or tools
-3. Executes via executor (skills) or direct dispatch (tools)
+2. Selects appropriate playbooks or tools
+3. Executes via executor (playbooks) or direct dispatch (tools)
 4. Observes results
 5. Iterates until goal satisfied (requires at least 1 data retrieval step)
 6. Returns final answer grounded in codebase data
@@ -23,10 +23,10 @@ from .planner_state import PlannerState
 
 class PlannerAgent:
     """
-    Autonomous planner that selects and executes skills to achieve goals.
+    Autonomous planner that selects and executes playbooks to achieve goals.
     
-    Uses LLM for reasoning and skill selection.
-    Uses SkillExecutor for deterministic execution.
+    Uses LLM for reasoning and playbook selection.
+    Uses PlaybookExecutor for deterministic execution.
     """
     
     def __init__(self, registry, executor, llm_client):
@@ -73,7 +73,7 @@ class PlannerAgent:
         )
         has_data = successful_runs > 0
         
-        # Auto-finish after 10 successful skill/tool runs — no need to ask LLM
+        # Auto-finish after 10 successful playbook/tool runs — no need to ask LLM
         if successful_runs >= 10:
             print(f"[PLANNER] Auto-finishing: {successful_runs} successful data retrievals")
             state["finished"] = True
@@ -81,7 +81,7 @@ class PlannerAgent:
             state["iteration"] += 1
             return state
         
-        skills_desc = self._format_skills_for_prompt()
+        playbooks_desc = self._format_playbooks_for_prompt()
         tools_desc = self._format_tools_for_prompt()
         history_desc = self._format_history(state)
         
@@ -90,18 +90,18 @@ class PlannerAgent:
                 "FINISH: <your comprehensive answer based on gathered data>\n\n"
                 "IMPORTANT: You already have data from " + str(successful_runs) + " successful queries. "
                 "You SHOULD finish now unless you need fundamentally different data. "
-                "Do NOT repeat the same skill with similar queries."
+                "Do NOT repeat the same playbook with similar queries."
             )
         else:
-            finish_opt = "FINISH is NOT allowed yet. You MUST use a SKILL or TOOL first."
+            finish_opt = "FINISH is NOT allowed yet. You MUST use a PLAYBOOK or TOOL first."
         
         # System prompt sent as a system message
         system_prompt = (
             "You are a code analysis agent. Respond with EXACTLY one action.\n\n"
-            "SKILLS (LLM analysis):\n" + skills_desc + "\n\n"
+            "PLAYBOOKS (LLM analysis):\n" + playbooks_desc + "\n\n"
             "TOOLS (direct data lookup):\n" + tools_desc + "\n\n"
             "RESPONSE FORMAT - reply with ONLY one of these:\n\n"
-            "SKILL: <name>\n"
+            "PLAYBOOK: <name>\n"
             'PARAMS: {"query": "<search query>"}\n\n'
             "TOOL: <name>\n"
             'PARAMS: {"<param>": "<value>"}\n\n'
@@ -136,15 +136,15 @@ class PlannerAgent:
                 print(f"[PLANNER] Selected tool: {action['name']}")
                 state["plan"] = [{"tool": action["name"], "params": action["params"]}]
             
-            elif action["type"] == "skill":
-                if self.registry.get_skill(action["name"]):
-                    print(f"[PLANNER] Selected skill: {action['name']}")
-                    state["plan"] = [{"skill": action["name"], "params": action["params"]}]
+            elif action["type"] == "playbook":
+                if self.registry.get_playbook(action["name"]):
+                    print(f"[PLANNER] Selected playbook: {action['name']}")
+                    state["plan"] = [{"playbook": action["name"], "params": action["params"]}]
                 else:
-                    available = self.registry.list_skills()
-                    print(f"[PLANNER] Skill '{action['name']}' not found. Available: {available}")
-                    # Auto-correct to code_analyzer skill
-                    state["plan"] = [{"skill": "code_analyzer", "params": action["params"]}]
+                    available = self.registry.list_playbooks()
+                    print(f"[PLANNER] Playbook '{action['name']}' not found. Available: {available}")
+                    # Auto-correct to code_analyzer playbook
+                    state["plan"] = [{"playbook": "code_analyzer", "params": action["params"]}]
             
             elif action["type"] == "finish":
                 state["finished"] = True
@@ -152,13 +152,13 @@ class PlannerAgent:
                 print(f"[PLANNER] Agent decided to finish")
             
             elif action["type"] == "fallback":
-                print(f"[PLANNER] Using fallback: qa skill with extracted query")
-                state["plan"] = [{"skill": "qa", "params": action["params"]}]
+                print(f"[PLANNER] Using fallback: qa playbook with extracted query")
+                state["plan"] = [{"playbook": "qa", "params": action["params"]}]
         
         except Exception as e:
             print(f"[PLANNER] Think error: {e}")
             if not has_data:
-                state["plan"] = [{"skill": "qa", "params": {"query": state["goal"]}}]
+                state["plan"] = [{"playbook": "qa", "params": {"query": state["goal"]}}]
                 state["thoughts"] = state.get("thoughts", []) + [f"Think error: {e}. Falling back to qa."]
             else:
                 state["finished"] = True
@@ -181,23 +181,23 @@ class PlannerAgent:
         Parse LLM output into an action dict.
         
         Tries formats in order:
-        1. Standard SKILL:/TOOL:/FINISH: format
+        1. Standard PLAYBOOK:/TOOL:/FINISH: format
         2. Model-native <|channel|>/<|message|> format (openai/gpt-oss-20b)
         3. Raw JSON extraction
-        4. Fallback to qa skill with the user's goal
+        4. Fallback to qa playbook with the user's goal
         """
-        # 1. Try standard format: TOOL: / SKILL: / FINISH:
+        # 1. Try standard format: TOOL: / PLAYBOOK: / FINISH:
         tool_match = re.search(r'TOOL:\s*(.+)', thought)
-        skill_match = re.search(r'SKILL:\s*(.+)', thought)
+        playbook_match = re.search(r'PLAYBOOK:\s*(.+)', thought)
         finish_match = re.search(r'FINISH:\s*(.+)', thought, re.DOTALL)
         
         if tool_match and not finish_match:
             tool_name = tool_match.group(1).strip().strip('"\'')
             return {"type": "tool", "name": tool_name, "params": self._parse_params(thought)}
         
-        if skill_match and not finish_match:
-            skill_name = skill_match.group(1).strip().strip('"\'')
-            return {"type": "skill", "name": skill_name, "params": self._parse_params(thought)}
+        if playbook_match and not finish_match:
+            playbook_name = playbook_match.group(1).strip().strip('"\'')
+            return {"type": "playbook", "name": playbook_name, "params": self._parse_params(thought)}
         
         if finish_match and has_data:
             return {"type": "finish", "result": finish_match.group(1).strip()}
@@ -228,18 +228,18 @@ class PlannerAgent:
             print(f"[PLANNER] Data gathered + unrecognized format -> finishing")
             return {"type": "finish", "result": "Analysis complete based on gathered data."}
         
-        # 5. Last resort: use goal as query for qa skill
+        # 5. Last resort: use goal as query for qa playbook
         return {"type": "fallback", "params": {"query": state["goal"]}}
 
     def _has_gathered_data(self, state: PlannerState) -> bool:
-        """Check if agent has gathered any codebase data via tools/skills."""
+        """Check if agent has gathered any codebase data via tools/playbooks."""
         for obs in state.get("observations", []):
             if obs.get("success"):
                 return True
         return False
     
     async def _act(self, state: PlannerState) -> PlannerState:
-        """Execute the selected skill or tool."""
+        """Execute the selected playbook or tool."""
         print(f"\n[PLANNER] Act")
         await asyncio.sleep(0)  # Yield to event loop
         
@@ -276,23 +276,23 @@ class PlannerAgent:
                     "success": False, "error": str(e), "outputs": {}
                 }]
         else:
-            # Skill call (LLM-powered)
-            skill_name = action["skill"]
+            # Playbook call (LLM-powered)
+            playbook_name = action["playbook"]
             user_input = action.get("params", {})
             user_input["goal"] = state["goal"]
             if "repo_id" not in user_input:
                 user_input["repo_id"] = state["repo_id"]
             
-            print(f"[PLANNER] Executing skill: {skill_name}")
+            print(f"[PLANNER] Executing playbook: {playbook_name}")
             try:
-                result = await self.executor.execute(skill_name, user_input)
+                result = await self.executor.execute(playbook_name, user_input)
                 state["actions"] = state.get("actions", []) + [action]
                 state["observations"] = state.get("observations", []) + [result]
                 
                 if result["success"]:
-                    print(f"[PLANNER] Skill succeeded")
+                    print(f"[PLANNER] Playbook succeeded")
                 else:
-                    print(f"[PLANNER] Skill failed: {result.get('error')}")
+                    print(f"[PLANNER] Playbook failed: {result.get('error')}")
             except Exception as e:
                 print(f"[PLANNER] Execution error: {e}")
                 state["actions"] = state.get("actions", []) + [action]
@@ -303,7 +303,7 @@ class PlannerAgent:
         return state
     
     async def _observe(self, state: PlannerState) -> PlannerState:
-        """Process observation from skill/tool execution."""
+        """Process observation from playbook/tool execution."""
         print(f"\n[PLANNER] Observe")
         await asyncio.sleep(0)  # Yield to event loop
         
@@ -331,13 +331,13 @@ class PlannerAgent:
     async def _finish(self, state: PlannerState) -> PlannerState:
         """
         Synthesize final answer from execution history.
-        Uses skill output directly when available, otherwise synthesizes.
+        Uses playbook output directly when available, otherwise synthesizes.
         """
         print(f"\n[PLANNER] Finish")
         await asyncio.sleep(0)  # Yield to event loop
         
         # Collect all successful outputs
-        skill_output = None
+        playbook_output = None
         all_data = []
         
         for obs in state.get("observations", []):
@@ -345,7 +345,7 @@ class PlannerAgent:
                 outputs = obs["outputs"]
                 
                 if isinstance(outputs, dict) and outputs.get("result"):
-                    skill_output = outputs["result"]
+                    playbook_output = outputs["result"]
                 
                 if isinstance(outputs, dict):
                     for key, val in outputs.items():
@@ -354,22 +354,22 @@ class PlannerAgent:
                         elif isinstance(val, list):
                             all_data.append(str(val[:10]))
         
-        print(f"[PLANNER] Collected: skill_output={'yes' if skill_output else 'no'} ({len(skill_output) if skill_output else 0} chars), all_data={len(all_data)} items")
+        print(f"[PLANNER] Collected: playbook_output={'yes' if playbook_output else 'no'} ({len(playbook_output) if playbook_output else 0} chars), all_data={len(all_data)} items")
         
-        # Extract action names (handle both "skill" and "tool" keys)
+        # Extract action names (handle both "playbook" and "tool" keys)
         actions_used = []
         for a in state.get("actions", []):
-            name = a.get("skill") or a.get("tool") or "unknown"
+            name = a.get("playbook") or a.get("tool") or "unknown"
             actions_used.append(name)
         
-        if skill_output:
-            print(f"[PLANNER] ✅ Using skill output directly ({len(skill_output)} chars) — no LLM call needed")
+        if playbook_output:
+            print(f"[PLANNER] ✅ Using playbook output directly ({len(playbook_output)} chars) — no LLM call needed")
             state["final_answer"] = {
                 "goal": state["goal"],
-                "answer": skill_output,
+                "answer": playbook_output,
                 "steps_taken": len(state["actions"]),
                 "iterations": state["iteration"],
-                "skills_used": actions_used
+                "playbooks_used": actions_used
             }
         elif all_data:
             print(f"[PLANNER] 🔄 Synthesizing from {len(all_data)} data sources — calling LLM...")
@@ -400,7 +400,7 @@ class PlannerAgent:
                     "answer": answer_text,
                     "steps_taken": len(state["actions"]),
                     "iterations": state["iteration"],
-                    "skills_used": actions_used
+                    "playbooks_used": actions_used
                 }
             except Exception as e:
                 print(f"[PLANNER] Synthesis error: {e}")
@@ -409,7 +409,7 @@ class PlannerAgent:
                     "answer": state.get("final_result", "Unable to complete goal"),
                     "steps_taken": len(state["actions"]),
                     "iterations": state["iteration"],
-                    "skills_used": actions_used,
+                    "playbooks_used": actions_used,
                     "error": str(e)
                 }
         else:
@@ -419,7 +419,7 @@ class PlannerAgent:
                 "answer": state.get("final_result", "Unable to gather information from the codebase."),
                 "steps_taken": len(state["actions"]),
                 "iterations": state["iteration"],
-                "skills_used": actions_used
+                "playbooks_used": actions_used
             }
         
         return state
@@ -437,8 +437,8 @@ class PlannerAgent:
         
         if not state["plan"]:
             if not self._has_gathered_data(state):
-                print(f"[PLANNER] No plan but no data yet. Forcing qa skill.")
-                state["plan"] = [{"skill": "qa", "params": {"query": state["goal"]}}]
+                print(f"[PLANNER] No plan but no data yet. Forcing qa playbook.")
+                state["plan"] = [{"playbook": "qa", "params": {"query": state["goal"]}}]
                 return "act"
             
             print(f"[PLANNER] No plan, finishing")
@@ -453,7 +453,7 @@ class PlannerAgent:
         iteration = state["iteration"]
         
         if iteration == 0:
-            return "No actions taken yet. You MUST use a SKILL or TOOL first."
+            return "No actions taken yet. You MUST use a PLAYBOOK or TOOL first."
         
         actions = state.get("actions", [])
         observations = state.get("observations", [])
@@ -464,8 +464,8 @@ class PlannerAgent:
         
         history = []
         for i, (action, obs) in enumerate(zip(recent_actions, recent_obs), start=start_idx + 1):
-            name = action.get("skill") or action.get("tool") or "unknown"
-            action_type = "SKILL" if "skill" in action else "TOOL"
+            name = action.get("playbook") or action.get("tool") or "unknown"
+            action_type = "PLAYBOOK" if "playbook" in action else "TOOL"
             success = "OK" if obs.get("success") else "FAIL"
             
             line = f"{i}. [{action_type}] {name} ({success})"
@@ -492,18 +492,18 @@ class PlannerAgent:
         
         return "\n".join(history) if history else "No actions taken yet."
 
-    def _format_skills_for_prompt(self) -> str:
-        """Format skills concisely."""
-        skills = []
-        for name in self.registry.list_skills():
-            skill = self.registry.get_skill(name)
-            skills.append(f"- {name}: {skill.when_to_use[:200]}")
-        return "\n".join(skills)
+    def _format_playbooks_for_prompt(self) -> str:
+        """Format playbooks concisely."""
+        playbooks = []
+        for name in self.registry.list_playbooks():
+            playbook = self.registry.get_playbook(name)
+            playbooks.append(f"- {name}: {playbook.when_to_use[:200]}")
+        return "\n".join(playbooks)
 
     def _format_tools_for_prompt(self) -> str:
         """Format tool descriptions for the thinking prompt."""
-        from codemind.skills.tools import SkillTools
-        tools = SkillTools.get_tool_descriptions()
+        from codemind.playbooks.tools import PlaybookTools
+        tools = PlaybookTools.get_tool_descriptions()
         lines = []
         for t in tools:
             lines.append(f"- {t['name']}: {t['description']}")

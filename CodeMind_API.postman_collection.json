@@ -235,7 +235,7 @@
         },
         {
             "name": "3. Autonomous Agent",
-            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with 7 tools and skill-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
+            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with 7 tools and playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
             "item": [
                 {
                     "name": "Start Agent - Generate Architecture",
@@ -418,7 +418,7 @@
                     }
                 },
                 {
-                    "name": "Execute Skill (Auto)",
+                    "name": "Execute Playbook (Auto)",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -432,7 +432,7 @@
                             "raw": "{\n  \"prompt\": \"Explain how the authentication middleware works\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
                         },
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/skill",
+                            "raw": "{{base_url}}/api/v1/agents/playbook",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -440,14 +440,14 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                "skill"
+                                "playbook"
                             ]
                         },
-                        "description": "Smart skill execution. The system automatically selects the best skill (e.g. code_analyzer) based on your prompt."
+                        "description": "Smart playbook execution. The system automatically selects the best playbook (e.g. code_analyzer) based on your prompt."
                     }
                 },
                 {
-                    "name": "Execute Skill (Explicit)",
+                    "name": "Execute Playbook (Explicit)",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -458,10 +458,10 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"skill_name\": \"code_analyzer\",\n  \"prompt\": \"Deep dive into the auth logic\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                            "raw": "{\n  \"playbook_name\": \"code_analyzer\",\n  \"prompt\": \"Deep dive into the auth logic\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
                         },
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/skill",
+                            "raw": "{{base_url}}/api/v1/agents/playbook",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -469,10 +469,10 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                "skill"
+                                "playbook"
                             ]
                         },
-                        "description": "Directly execute a specific skill by name."
+                        "description": "Directly execute a specific playbook by name."
                     }
                 },
                 {
@@ -514,7 +514,7 @@
                                 "result"
                             ]
                         },
-                        "description": "Get the final result from a completed autonomous agent job.\n\nReturns:\n- answer: The agent's final output (markdown)\n- steps_taken: Total processing steps\n- iterations: Planner loop iterations\n- skills_used: List of skills invoked\n- error: null if successful\n\nReturns 425 Too Early if the job is still running."
+                        "description": "Get the final result from a completed autonomous agent job.\n\nReturns:\n- answer: The agent's final output (markdown)\n- steps_taken: Total processing steps\n- iterations: Planner loop iterations\n- playbooks_used: List of playbooks invoked\n- error: null if successful\n\nReturns 425 Too Early if the job is still running."
                     }
                 }
             ]
@@ -651,7 +651,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"symbol\",\n  \"symbol_name\": \"SkillExecutor\"\n}"
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"symbol\",\n  \"symbol_name\": \"PlaybookExecutor\"\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/graph/query",

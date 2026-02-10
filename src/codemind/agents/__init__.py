@@ -9,6 +9,6 @@ Provides:
 
 from .planner_state import PlannerState
 from .planner import PlannerAgent
-from .skill_selector import SkillSelector
+from .playbook_selector import PlaybookSelector
 
-__all__ = ["PlannerState", "PlannerAgent", "SkillSelector"]
+__all__ = ["PlannerState", "PlannerAgent", "PlaybookSelector"]

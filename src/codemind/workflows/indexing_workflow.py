@@ -35,6 +35,7 @@ class IndexingState:
     changed_files: list[FileChange] = field(default_factory=list)
     deleted_files: list[str] = field(default_factory=list)
     commit_hash: str | None = None  # Git commit hash if using git detection
+    metadata: dict = field(default_factory=dict)
 
 
 class IndexingWorkflow:
@@ -133,6 +134,19 @@ class IndexingWorkflow:
             state.changed_files = changes.changed_files
             state.deleted_files = changes.deleted_files
             state.commit_hash = changes.commit_hash  # Store git commit if available
+            
+            # Extract metadata if it's a git repo
+            if changes.detection_method == "git":
+                try:
+                    from codemind.utils.git_utils import GitRepoManager
+                    mgr = GitRepoManager()
+                    state.metadata = mgr.extract_metadata(Path(state.repo_path))
+                    print(f"[WORKFLOW] Extracted metadata: {list(state.metadata.keys())}")
+                except Exception as e:
+                    print(f"[WORKFLOW] ⚠️ Metadata extraction failed: {e}")
+                    state.metadata = {}
+            else:
+                state.metadata = {}
 
         except Exception as e:
             state.error = f"Change detection failed: {e}"
@@ -400,10 +414,20 @@ class IndexingWorkflow:
 
             # Create or update repository
             repo = self.manifest.get_repository(state.repo_path)
+            
+            metadata = getattr(state, "metadata", {})
+            
             if not repo:
-                # Use commit hash from state (set during change detection if Git repo)
-                self.manifest.create_repository(state.repo_path, state.commit_hash)
+                # Use commit hash from state
+                self.manifest.create_repository(state.repo_path)
                 repo = self.manifest.get_repository(state.repo_path)
+            
+            # Update manifest with commit hash and metadata
+            self.manifest.update_repository(
+                repo.repo_id, 
+                last_commit_hash=state.commit_hash,
+                metadata=metadata
+            )
 
             # Update file manifests in batch
             self.manifest.update_files(repo.repo_id, state.changed_files, state.deleted_files)

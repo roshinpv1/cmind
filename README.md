@@ -64,12 +64,12 @@ POST /api/v1/search
 
 ### 2. Multi-Tool Autonomous Agent 🤖
 
-CodeMind features a **Planner-Executor Autonomous Agent** that can chain multiple skills and tools for complex, multi-step reasoning.
+CodeMind features a **Planner-Executor Autonomous Agent** that can chain multiple playbooks and tools for complex, multi-step reasoning.
 
 **Capabilities:**
-- ✅ **Multi-Step Planning** — Breaks down goals into tool/skill steps (no single-skill limit)
+- ✅ **Multi-Step Planning** — Breaks down goals into tool/playbook steps (no single-playbook limit)
 - ✅ **7 Specialized Tools** — Search, read files, trace callers/callees, resolve dependencies
-- ✅ **Skill + Tool Dispatch** — Skills invoke LLM reasoning; tools retrieve data directly
+- ✅ **Playbook + Tool Dispatch** — Playbooks invoke LLM reasoning; tools retrieve data directly
 - ✅ **Context Intelligence** — Token-aware context packing with overflow handling
 - ✅ **Session Memory** — Multi-turn conversations with automatic history management
 - ✅ **Self-Correction** — Retries on failure and adjusts strategy
@@ -95,7 +95,7 @@ User Goal
   ▼
 ┌─────────────────────────────────────────────────┐
 │  THINK                                          │
-│  LLM selects next action (SKILL / TOOL / FINISH)│
+│  LLM selects next action (PLAYBOOK / TOOL / FINISH)│
 │  • Parses standard, model-native, and JSON formats│
 │  • Auto-finishes after N successful data runs    │
 │  • Blocks FINISH until at least 1 data retrieval │
@@ -104,8 +104,8 @@ User Goal
            ▼
 ┌─────────────────────────────────────────────────┐
 │  ACT                                            │
-│  Executes the selected skill or tool            │
-│  • Skills → SkillExecutor (search + LLM generate)│
+│  Executes the selected playbook or tool            │
+│  • Playbooks → PlaybookExecutor (search + LLM generate)│
 │  • Tools → Direct data retrieval (no LLM)       │
 └──────────┬──────────────────────────────────────┘
            │
@@ -120,7 +120,7 @@ User Goal
 ┌─────────────────────────────────────────────────┐
 │  FINISH                                         │
 │  Synthesizes final answer:                      │
-│  • Uses last skill output directly (fast path)  │
+│  • Uses last playbook output directly (fast path)  │
 │  • OR calls LLM to merge multiple data sources  │
 │  • Logs progress at every step                  │
 └─────────────────────────────────────────────────┘
@@ -129,11 +129,11 @@ User Goal
 **Decision Flow in `_think`:**
 1. Count successful data retrievals from previous observations
 2. If count ≥ auto-finish threshold → finish immediately (no LLM call)
-3. Otherwise, ask LLM to select next SKILL/TOOL/FINISH
-4. LLM output is parsed through multi-format parser (standard `SKILL:`, model-native `<|channel|>`, raw JSON, fallback)
+3. Otherwise, ask LLM to select next PLAYBOOK/TOOL/FINISH
+4. LLM output is parsed through multi-format parser (standard `PLAYBOOK:`, model-native `<|channel|>`, raw JSON, fallback)
 
 **Action Parsing (`_parse_action`):**
-- Handles `SKILL: <name>` / `TOOL: <name>` / `FINISH: <answer>` standard format
+- Handles `PLAYBOOK: <name>` / `TOOL: <name>` / `FINISH: <answer>` standard format
 - Handles model-native formats (e.g., `<|message|>{"query":"..."}`)
 - Extracts raw JSON from unstructured output
 - Auto-finishes when data exists but output format is unrecognized
@@ -152,39 +152,39 @@ The agent has **7 tools** available for multi-step code understanding:
 | `get_dependencies` | Graph | File-level import dependencies (imports/imported_by) |
 | `list_files` | Graph | List files matching a pattern or type |
 
-**Tool vs Skill:**
+**Tool vs Playbook:**
 - **Tools** return raw data directly (no LLM involved) — fast, deterministic
-- **Skills** use LLM reasoning over retrieved code — slower, more intelligent
+- **Playbooks** use LLM reasoning over retrieved code — slower, more intelligent
 
-### 5. Skill System (Prompt-Based)
+### 5. Playbook System (Prompt-Based)
 
-Higher-level capabilities are defined in **Markdown** skill files — not hardcoded logic. Skills are discovered at startup from the `skills/` directory.
+Higher-level capabilities are defined in **Markdown** playbook files — not hardcoded logic. Playbooks are discovered at startup from the `playbooks/` directory.
 
-**Active Skills:**
+**Active Playbooks:**
 - **📝 Documentation Generator** — Creates detailed, structured documentation (README, architectural overview, Mermaid diagrams)
 - **🔍 QA (Question Answering)** — Finds and explains code snippets with grounded answers
 
-**How Skills Work:**
+**How Playbooks Work:**
 ```
-Skill .md file defines:
+Playbook .md file defines:
   ├── Description + intent signals (for matching)
   ├── System prompt (instructions for the LLM)
   ├── Search queries (how to find relevant code)
   └── Output format (markdown, JSON, etc.)
 
 Executor Pipeline:
-  1. Parse skill config from .md file
-  2. Search codebase using skill's query patterns
+  1. Parse playbook config from .md file
+  2. Search codebase using playbook's query patterns
   3. Pack code chunks into context (token-aware)
   4. Generate output via LLM (single-pass or map-reduce)
   5. Return structured result
 ```
 
-**Adding New Skills:** Create a `.md` file in `skills/` following the schema — no code changes needed.
+**Adding New Playbooks:** Create a `.md` file in `playbooks/` following the schema — no code changes needed.
 
-### 6. Skill Executor & Map-Reduce
+### 6. Playbook Executor & Map-Reduce
 
-The `SkillExecutor` runs a 4-node LangGraph workflow:
+The `PlaybookExecutor` runs a 4-node LangGraph workflow:
 
 ```
 parse_input → search_code → pack_context → llm_generate
@@ -319,7 +319,7 @@ Every `max_tokens` parameter in the system derives from `LLM_MAX_TOKENS`:
 |-----------|--------|---------|
 | **Planner thinking** | Action selection | `max(256, cfg ÷ 20)` → ~5% |
 | **Planner synthesis** | Final answer merge | `max(512, cfg ÷ 10)` → ~10% |
-| **Executor single-pass** | Skill output generation | `cfg × 0.3` → 30% |
+| **Executor single-pass** | Playbook output generation | `cfg × 0.3` → 30% |
 | **Executor code context** | Code fed to LLM | `cfg × 0.5` → 50% |
 | **Executor MAX_CONTEXT** | Single-pass threshold | `cfg × 0.7` → 70% |
 | **Executor batch chunk** | Per-batch code size | `cfg × 0.15` → 15% |
@@ -394,9 +394,9 @@ graph TD
     API --> Agent[Autonomous Agent]
     
     subgraph "Agent Core"
-        Planner["Planner Agent<br/>(Think → Act → Observe)"] <--> Executor[Skill Executor]
+        Planner["Planner Agent<br/>(Think → Act → Observe)"] <--> Executor[Playbook Executor]
         Planner <--> Tools["7 Tools"]
-        Planner <--> Registry[Skill Registry]
+        Planner <--> Registry[Playbook Registry]
         Planner <--> Memory[Session Store]
     end
     
@@ -535,11 +535,11 @@ cmind/
 │   │   ├── planner.py          # Multi-step planner (Think→Act→Observe→Finish)
 │   │   ├── planner_state.py    # Agent state TypedDict
 │   │   └── session_store.py    # Multi-turn conversation memory (LRU)
-│   ├── skills/                 # Skill Executors & Tools
-│   │   ├── executors.py        # Skill execution + ContextPacker + map-reduce
+│   ├── playbooks/                 # Playbook Executors & Tools
+│   │   ├── executors.py        # Playbook execution + ContextPacker + map-reduce
 │   │   ├── tools.py            # 7 agent tools (search, read, graph queries)
-│   │   ├── registry.py         # Skill discovery from .md files
-│   │   ├── parsers.py          # Skill markdown file parser
+│   │   ├── registry.py         # Playbook discovery from .md files
+│   │   ├── parsers.py          # Playbook markdown file parser
 │   │   ├── token_utils.py      # Token estimation + chunk splitting
 │   │   └── schema.py           # Pydantic models
 │   ├── graph/                  # Kùzu Graph Database
@@ -569,9 +569,9 @@ cmind/
 │   │   └── agents/             # LangGraph doc generator agents
 │   ├── jobs/                   # Background job management
 │   └── utils/                  # Shared utilities
-├── skills/                     # Skill Definitions (.md files)
-│   ├── qa.md                   # Question-answering skill
-│   └── documentation.md        # Documentation generation skill
+├── playbooks/                     # Playbook Definitions (.md files)
+│   ├── qa.md                   # Question-answering playbook
+│   └── documentation.md        # Documentation generation playbook
 ├── docs/                       # Documentation
 └── tests/                      # Test suite
 ```

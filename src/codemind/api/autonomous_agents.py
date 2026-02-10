@@ -1,7 +1,7 @@
 """
 Autonomous Agent API endpoints.
 
-Provides REST API for skill-based autonomous agent execution.
+Provides REST API for playbook-based autonomous agent execution.
 
 Endpoints:
 - POST /api/v1/agents/autonomous - Execute autonomous agent with goal
@@ -21,8 +21,8 @@ router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
 # Global state
 # Global state
 planner_agent = None
-skill_executor = None
-skill_selector = None
+playbook_executor = None
+playbook_selector = None
 autonomous_jobs = {}
 
 
@@ -59,19 +59,19 @@ class AutonomousJobResult(BaseModel):
     answer: Optional[str] = None
     steps_taken: Optional[int] = None
     iterations: Optional[int] = None
-    skills_used: Optional[list[str]] = None
+    playbooks_used: Optional[list[str]] = None
     error: Optional[str] = None
 
 
-class SkillRequest(BaseModel):
-    """Request to execute a specific skill."""
-    skill_name: str = Field("auto", description="Name of the skill to execute (or 'auto')")
-    prompt: str = Field(..., description="Input prompt for the skill")
+class PlaybookRequest(BaseModel):
+    """Request to execute a specific playbook."""
+    playbook_name: str = Field("auto", description="Name of the playbook to execute (or 'auto')")
+    prompt: str = Field(..., description="Input prompt for the playbook")
     repo_id: Optional[str] = Field(None, description="Repository identifier (if needed)")
 
 
-class SkillResponse(BaseModel):
-    """Response from skill execution."""
+class PlaybookResponse(BaseModel):
+    """Response from playbook execution."""
     success: bool
     result: Optional[str] = None
     error: Optional[str] = None
@@ -88,32 +88,32 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
         llm_client: LLM client for generation
         embedder: Embedder for query encoding
     """
-    global planner_agent, skill_executor, skill_selector
+    global planner_agent, playbook_executor, playbook_selector
     
-    from ..skills import SkillRegistry, SkillExecutor, SkillTools
-    from ..agents import PlannerAgent, SkillSelector
+    from ..playbooks import PlaybookRegistry, PlaybookExecutor, PlaybookTools
+    from ..agents import PlannerAgent, PlaybookSelector
     
     print("[AUTONOMOUS] Initializing autonomous agent system...")
     
-    # Initialize skill system
-    registry = SkillRegistry()
-    print(f"[AUTONOMOUS] ✓ Loaded {len(registry)} skills")
+    # Initialize playbook system
+    registry = PlaybookRegistry()
+    print(f"[AUTONOMOUS] ✓ Loaded {len(registry)} playbooks")
     
     # Initialize tools (only search_codebase now)
-    tools = SkillTools(lance_storage, graph_service, embedder)
+    tools = PlaybookTools(lance_storage, graph_service, embedder)
     
     # Initialize executor (now needs LLM for prompt-based execution)
-    executor = SkillExecutor(registry, tools, llm_client)
-    skill_executor = executor
+    executor = PlaybookExecutor(registry, tools, llm_client)
+    playbook_executor = executor
     
     # Initialize planner
     planner_agent = PlannerAgent(registry, executor, llm_client)
     
     # Initialize selector
-    skill_selector = SkillSelector(registry, llm_client)
+    playbook_selector = PlaybookSelector(registry, llm_client)
     
     print(f"[AUTONOMOUS] ✓ Autonomous agent system ready")
-    print(f"[AUTONOMOUS] ✓ Available skills: {', '.join(registry.list_skills())}")
+    print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
 async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iterations: int):
@@ -232,36 +232,36 @@ async def get_autonomous_result(job_id: str):
         answer=result.get("answer"),
         steps_taken=result.get("steps_taken"),
         iterations=result.get("iterations"),
-        skills_used=result.get("skills_used"),
+        playbooks_used=result.get("playbooks_used"),
         error=job.get("error")
     )
 
 
-@router.post("/skill", response_model=SkillResponse)
-async def execute_skill(request: SkillRequest):
+@router.post("/playbook", response_model=PlaybookResponse)
+async def execute_playbook(request: PlaybookRequest):
     """
-    Execute a single skill directly.
+    Execute a single playbook directly.
     
-    This matches the user's request for "a simple endpoint... Skill can be used as the system prompt".
+    This matches the user's request for "a simple endpoint... Playbook can be used as the system prompt".
     """
-    if not skill_executor:
+    if not playbook_executor:
         raise HTTPException(
             status_code=503,
-            detail="Skill system not initialized"
+            detail="Playbook system not initialized"
         )
     
-    # Determine skill to use
-    final_skill_name = request.skill_name
+    # Determine playbook to use
+    final_playbook_name = request.playbook_name
     
-    if final_skill_name == "auto" or not final_skill_name:
-        if not skill_selector:
+    if final_playbook_name == "auto" or not final_playbook_name:
+        if not playbook_selector:
             # Fallback if selector not init (shouldn't happen)
-            final_skill_name = "code_analyzer"
+            final_playbook_name = "code_analyzer"
         else:
-            final_skill_name = await skill_selector.select_skill(request.prompt)
+            final_playbook_name = await playbook_selector.select_playbook(request.prompt)
             
-    # Construct input for the skill
-    # We map 'prompt' to both 'query' and 'goal' to cover different skill expectations
+    # Construct input for the playbook
+    # We map 'prompt' to both 'query' and 'goal' to cover different playbook expectations
     user_input = {
         "query": request.prompt,
         "goal": request.prompt,
@@ -269,12 +269,12 @@ async def execute_skill(request: SkillRequest):
     }
     
     # Execute
-    result = await skill_executor.execute(final_skill_name, user_input)
+    result = await playbook_executor.execute(final_playbook_name, user_input)
     
     # Extract result string from outputs
     output_text = result.get("outputs", {}).get("result")
     
-    return SkillResponse(
+    return PlaybookResponse(
         success=result["success"],
         result=output_text,
         error=result.get("error"),
