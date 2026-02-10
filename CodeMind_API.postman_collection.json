@@ -418,6 +418,64 @@
                     }
                 },
                 {
+                    "name": "Execute Skill (Auto)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"prompt\": \"Explain how the authentication middleware works\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/skill",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "skill"
+                            ]
+                        },
+                        "description": "Smart skill execution. The system automatically selects the best skill (e.g. code_analyzer) based on your prompt."
+                    }
+                },
+                {
+                    "name": "Execute Skill (Explicit)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"skill_name\": \"code_analyzer\",\n  \"prompt\": \"Deep dive into the auth logic\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/skill",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "skill"
+                            ]
+                        },
+                        "description": "Directly execute a specific skill by name."
+                    }
+                },
+                {
                     "name": "Get Agent Status",
                     "request": {
                         "method": "GET",

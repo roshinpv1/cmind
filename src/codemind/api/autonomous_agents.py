@@ -19,7 +19,10 @@ from datetime import datetime
 router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
 
 # Global state
+# Global state
 planner_agent = None
+skill_executor = None
+skill_selector = None
 autonomous_jobs = {}
 
 
@@ -60,6 +63,21 @@ class AutonomousJobResult(BaseModel):
     error: Optional[str] = None
 
 
+class SkillRequest(BaseModel):
+    """Request to execute a specific skill."""
+    skill_name: str = Field("auto", description="Name of the skill to execute (or 'auto')")
+    prompt: str = Field(..., description="Input prompt for the skill")
+    repo_id: Optional[str] = Field(None, description="Repository identifier (if needed)")
+
+
+class SkillResponse(BaseModel):
+    """Response from skill execution."""
+    success: bool
+    result: Optional[str] = None
+    error: Optional[str] = None
+    logs: list[str] = []
+
+
 def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
     """
     Initialize autonomous agent system.
@@ -70,10 +88,10 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
         llm_client: LLM client for generation
         embedder: Embedder for query encoding
     """
-    global planner_agent
+    global planner_agent, skill_executor, skill_selector
     
     from ..skills import SkillRegistry, SkillExecutor, SkillTools
-    from ..agents import PlannerAgent
+    from ..agents import PlannerAgent, SkillSelector
     
     print("[AUTONOMOUS] Initializing autonomous agent system...")
     
@@ -86,9 +104,13 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
     
     # Initialize executor (now needs LLM for prompt-based execution)
     executor = SkillExecutor(registry, tools, llm_client)
+    skill_executor = executor
     
     # Initialize planner
     planner_agent = PlannerAgent(registry, executor, llm_client)
+    
+    # Initialize selector
+    skill_selector = SkillSelector(registry, llm_client)
     
     print(f"[AUTONOMOUS] ✓ Autonomous agent system ready")
     print(f"[AUTONOMOUS] ✓ Available skills: {', '.join(registry.list_skills())}")
@@ -212,4 +234,49 @@ async def get_autonomous_result(job_id: str):
         iterations=result.get("iterations"),
         skills_used=result.get("skills_used"),
         error=job.get("error")
+    )
+
+
+@router.post("/skill", response_model=SkillResponse)
+async def execute_skill(request: SkillRequest):
+    """
+    Execute a single skill directly.
+    
+    This matches the user's request for "a simple endpoint... Skill can be used as the system prompt".
+    """
+    if not skill_executor:
+        raise HTTPException(
+            status_code=503,
+            detail="Skill system not initialized"
+        )
+    
+    # Determine skill to use
+    final_skill_name = request.skill_name
+    
+    if final_skill_name == "auto" or not final_skill_name:
+        if not skill_selector:
+            # Fallback if selector not init (shouldn't happen)
+            final_skill_name = "code_analyzer"
+        else:
+            final_skill_name = await skill_selector.select_skill(request.prompt)
+            
+    # Construct input for the skill
+    # We map 'prompt' to both 'query' and 'goal' to cover different skill expectations
+    user_input = {
+        "query": request.prompt,
+        "goal": request.prompt,
+        "repo_id": request.repo_id
+    }
+    
+    # Execute
+    result = await skill_executor.execute(final_skill_name, user_input)
+    
+    # Extract result string from outputs
+    output_text = result.get("outputs", {}).get("result")
+    
+    return SkillResponse(
+        success=result["success"],
+        result=output_text,
+        error=result.get("error"),
+        logs=result.get("logs", [])
     )
