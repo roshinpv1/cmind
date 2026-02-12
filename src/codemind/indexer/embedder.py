@@ -226,6 +226,14 @@ class EmbeddingGenerator:
             
         return embeddings[0].tolist()
 
+    def encode_document(self, text: str) -> list[float]:
+        """Encode a document text (no query prefix)."""
+        embeddings = self.provider.encode_batch([text])
+        if len(embeddings) == 0:
+            return []
+            
+        return embeddings[0].tolist()
+
     def get_embedding_dim(self) -> int:
         """Get embedding dimensionality."""
         return self.embedding_dim

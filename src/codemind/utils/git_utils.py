@@ -145,12 +145,31 @@ class GitRepoManager:
                 # 'git rev-list --count HEAD' is highly optimized
                 total_commits = int(repo.git.rev_list("--count", "HEAD"))
                 
-                return {
+                # 4. Fetch GitHub Metadata (PRs etc) if applicable
+                github_metadata = {}
+                # We need the original remote URL to query GitHub
+                try:
+                    remote_url = repo.remotes.origin.url
+                    if "github.com" in remote_url:
+                        from .github_client import GitHubClient
+                        # Use same token if we have it in env, or none
+                        gh_client = GitHubClient() 
+                        github_metadata = gh_client.get_repo_details(remote_url)
+                        gh_client.close()
+                except Exception as e:
+                    print(f"[GIT] GitHub metadata fetch failed: {e}")
+
+                base_metadata = {
                     "first_commit_at": first_commit_at,
                     "first_author": first_author,
                     "last_authors": last_authors,  # List of strings
                     "total_commits": total_commits
                 }
+                
+                # Merge GitHub metadata
+                base_metadata.update(github_metadata)
+                
+                return base_metadata
             return {}
         except Exception as e:
             print(f"[GIT] Metadata extraction failed: {e}")

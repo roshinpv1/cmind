@@ -258,6 +258,98 @@ class LanceDBStorage:
         """Alias for append_chunks for consistency."""
         self.append_chunks(repo_id, chunks_with_embeddings, embedding_version)
 
+    def create_catalog_table(self, table_name: str = "catalogs"):
+        """Create catalogs table if it doesn't exist."""
+        if table_name not in self.db.table_names():
+            schema = pa.schema([
+                pa.field("catalog_id", pa.string()),
+                pa.field("repo_id", pa.string()),
+                pa.field("repo_name", pa.string()),
+                pa.field("playbook_name", pa.string()),
+                pa.field("result", pa.string()),
+                pa.field("metadata", pa.string()),  # JSON string
+                pa.field("created_at", pa.timestamp("us")),
+                pa.field("embedding", pa.list_(pa.float32(), self.embedding_dim)),
+            ])
+            self.db.create_table(table_name, schema=schema, mode="create")
+
+    def store_catalog_item(self, item: dict, table_name: str = "catalogs"):
+        """
+        Store a processed catalog item.
+        
+        Args:
+            item: Dictionary with catalog fields
+            table_name: Table name
+        """
+        print(f"[LANCEDB] Storing catalog item for repo {item.get('repo_id')}")
+        
+        # Ensure table exists (will create with new schema if missing)
+        self.create_catalog_table(table_name)
+        
+        # Add timestamp if missing
+        if "created_at" not in item:
+            item["created_at"] = datetime.now(UTC)
+            
+        try:
+            table = self.db.open_table(table_name)
+            table.add([item])
+            print(f"[LANCEDB] ✅ Catalog item stored")
+        except NotImplementedError:
+             # Schema mismatch likely
+            print(f"[LANCEDB] Schema mismatch likely, dropping table and recreating...")
+            self.db.drop_table(table_name)
+            self.create_catalog_table(table_name)
+            table = self.db.open_table(table_name)
+            table.add([item])
+            print(f"[LANCEDB] ✅ Recreated table and stored item")
+        except Exception as e:
+            if "not found in target schema" in str(e) or "doesn't exist" in str(e):
+                print(f"[LANCEDB] Schema/Table issue ({e}), dropping table and recreating...")
+                if table_name in self.db.table_names():
+                    self.db.drop_table(table_name)
+                self.create_catalog_table(table_name)
+                table = self.db.open_table(table_name)
+                table.add([item])
+                print(f"[LANCEDB] ✅ Recreated table and stored item")
+            else:
+                print(f"[LANCEDB] Failed to store catalog item: {e}")
+                raise
+
+    def get_catalog_items(self, repo_id: str | None = None, table_name: str = "catalogs") -> list[dict]:
+        """Get catalog items."""
+        if table_name not in self.db.table_names():
+            return []
+            
+        table = self.db.open_table(table_name)
+        query = table.search()
+        
+        if repo_id:
+            query = query.where(f"repo_id = '{repo_id}'")
+            
+        return query.limit(100).to_list()
+
+    def search_catalogs(
+        self,
+        query_embedding: list[float],
+        repo_id: str | None = None,
+        limit: int = 10,
+        table_name: str = "catalogs",
+    ) -> list[dict]:
+        """
+        Semantic search over catalog entries.
+        """
+        if table_name not in self.db.table_names():
+            return []
+
+        table = self.db.open_table(table_name)
+
+        query = table.search(query_embedding, vector_column_name="embedding").limit(limit)
+
+        if repo_id:
+            query = query.where(f"repo_id = '{repo_id}'")
+
+        return query.to_list()
+
     def close(self):
         """Close database connection."""
         # LanceDB handles connection management automatically

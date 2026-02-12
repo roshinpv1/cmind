@@ -23,6 +23,8 @@ class SearchStrategy(BaseModel):
     mode: str = Field(default="semantic", description="Search mode: semantic or hybrid")
     graph_filters: dict = Field(default_factory=dict, description="Additional graph-based filters")
     max_context_tokens: int = Field(default=3000, description="Max tokens for LLM context (triggers map-reduce if exceeded)")
+    min_score: float = Field(default=0.0, description="Minimum relevance score to include in context")
+    max_batches: int = Field(default=5, description="Maximum number of batches to process in map-reduce")
 
 
 class PlaybookDefinition(BaseModel):
@@ -44,6 +46,7 @@ class PlaybookDefinition(BaseModel):
     
     # Metadata
     deterministic: bool = Field(default=False, description="Whether output is deterministic")
+    default_prompt: Optional[str] = Field(None, description="Default prompt if user provides none")
     
     def __str__(self):
         return f"Playbook({self.name})"

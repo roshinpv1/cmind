@@ -58,6 +58,14 @@ class PlannerAgent:
         
         return graph.compile()
     
+    async def _emit_update(self, state: PlannerState):
+        """Emit state update if callback is registered."""
+        if hasattr(self, "on_update") and self.on_update:
+            try:
+                await self.on_update(state)
+            except Exception as e:
+                print(f"[PLANNER] Callback error: {e}")
+    
     async def _think(self, state: PlannerState) -> PlannerState:
         """
         Agent thinks about what to do next.
@@ -65,6 +73,7 @@ class PlannerAgent:
         """
         print(f"\n[PLANNER] 🤔 Think (iteration {state['iteration']})")
         await asyncio.sleep(0)  # Yield to event loop
+        await self._emit_update(state)
 
         # Count successful data retrievals
         successful_runs = sum(
@@ -242,6 +251,7 @@ class PlannerAgent:
         """Execute the selected playbook or tool."""
         print(f"\n[PLANNER] Act")
         await asyncio.sleep(0)  # Yield to event loop
+        await self._emit_update(state)
         
         if not state["plan"]:
             print(f"[PLANNER] No plan to execute")
@@ -306,6 +316,7 @@ class PlannerAgent:
         """Process observation from playbook/tool execution."""
         print(f"\n[PLANNER] Observe")
         await asyncio.sleep(0)  # Yield to event loop
+        await self._emit_update(state)
         
         if state["observations"]:
             obs = state["observations"][-1]
@@ -335,6 +346,7 @@ class PlannerAgent:
         """
         print(f"\n[PLANNER] Finish")
         await asyncio.sleep(0)  # Yield to event loop
+        await self._emit_update(state)
         
         # Collect all successful outputs
         playbook_output = None
@@ -509,8 +521,10 @@ class PlannerAgent:
             lines.append(f"- {t['name']}: {t['description']}")
         return "\n".join(lines)
 
-    async def execute(self, goal: str, repo_id: str, max_iterations: int = 10) -> dict:
+    async def execute(self, goal: str, repo_id: str, max_iterations: int = 10, on_update=None) -> dict:
         """Execute planner for a goal."""
+        self.on_update = on_update  # Register callback
+        
         print(f"\n{'='*60}")
         print(f"[PLANNER] Starting autonomous execution")
         print(f"[PLANNER] Goal: {goal}")

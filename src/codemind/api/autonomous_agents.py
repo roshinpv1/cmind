@@ -47,8 +47,10 @@ class AutonomousJobStatus(BaseModel):
     status: str  # pending, running, completed, failed
     created_at: str
     goal: str
+    goal: str
     iterations: Optional[int] = None
     steps_taken: Optional[int] = None
+    logs: list[str] = []
 
 
 class AutonomousJobResult(BaseModel):
@@ -66,7 +68,7 @@ class AutonomousJobResult(BaseModel):
 class PlaybookRequest(BaseModel):
     """Request to execute a specific playbook."""
     playbook_name: str = Field("auto", description="Name of the playbook to execute (or 'auto')")
-    prompt: str = Field(..., description="Input prompt for the playbook")
+    prompt: Optional[str] = Field(None, description="Input prompt for the playbook")
     repo_id: Optional[str] = Field(None, description="Repository identifier (if needed)")
 
 
@@ -124,9 +126,35 @@ async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iteratio
     try:
         print(f"[AUTONOMOUS] Starting job {job_id}")
         autonomous_jobs[job_id]["status"] = "running"
+        autonomous_jobs[job_id]["logs"] = ["Job started..."]
+        
+        async def update_job_state(state: dict):
+            """Callback to update job state from planner."""
+            # Extract logs/thoughts
+            thoughts = state.get("thoughts", [])
+            actions = state.get("actions", [])
+            iteration = state.get("iteration", 0)
+            
+            # Construct a simple log for now (can be richer later)
+            logs = []
+            for t in thoughts:
+                logs.append(f"Thinking: {t[:100]}...")
+            
+            for i, action in enumerate(actions):
+                name = action.get("playbook") or action.get("tool")
+                logs.append(f"Action {i+1}: Executing {name}")
+                
+            autonomous_jobs[job_id]["iterations"] = iteration
+            autonomous_jobs[job_id]["steps_taken"] = len(actions)
+            autonomous_jobs[job_id]["logs"] = logs
         
         # Execute planner directly as async coroutine
-        result = await planner_agent.execute(goal, repo_id, max_iterations)
+        result = await planner_agent.execute(
+            goal, 
+            repo_id, 
+            max_iterations, 
+            on_update=update_job_state
+        )
         
         # Update job with result
         autonomous_jobs[job_id]["status"] = "completed"
@@ -200,8 +228,12 @@ async def get_autonomous_status(job_id: str):
         status=job["status"],
         created_at=job["created_at"],
         goal=job["goal"],
+        status=job["status"],
+        created_at=job["created_at"],
+        goal=job["goal"],
         iterations=job.get("iterations"),
-        steps_taken=job.get("steps_taken")
+        steps_taken=job.get("steps_taken"),
+        logs=job.get("logs", [])
     )
 
 
@@ -254,17 +286,30 @@ async def execute_playbook(request: PlaybookRequest):
     final_playbook_name = request.playbook_name
     
     if final_playbook_name == "auto" or not final_playbook_name:
+        if not request.prompt:
+             raise HTTPException(status_code=400, detail="Prompt is required for auto-selection")
+
         if not playbook_selector:
             # Fallback if selector not init (shouldn't happen)
             final_playbook_name = "code_analyzer"
         else:
             final_playbook_name = await playbook_selector.select_playbook(request.prompt)
             
+    # Resolve prompt if missing
+    prompt = request.prompt
+    if not prompt:
+        registry = playbook_executor.registry
+        playbook_def = registry.get_playbook(final_playbook_name)
+        if playbook_def and playbook_def.default_prompt:
+             prompt = playbook_def.default_prompt
+        else:
+             raise HTTPException(status_code=400, detail="Prompt is required (no default found for playbook)")
+
     # Construct input for the playbook
     # We map 'prompt' to both 'query' and 'goal' to cover different playbook expectations
     user_input = {
-        "query": request.prompt,
-        "goal": request.prompt,
+        "query": prompt,
+        "goal": prompt,
         "repo_id": request.repo_id
     }
     

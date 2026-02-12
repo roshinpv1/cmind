@@ -39,6 +39,8 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
       - ".js"
     limit: 10
     mode: semantic
+    min_score: 0.7
+    max_batches: 5
     ```
     
     ## Deterministic
@@ -70,6 +72,7 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         description = _extract_section(content, "## Description")
         when_to_use = _extract_section(content, "## When to Use")
         system_prompt = _extract_section(content, "## System Prompt")
+        default_prompt = _extract_section(content, "## Default Prompt")
         search_strategy_yaml = _extract_code_block(content, "## Search Strategy")
         deterministic_str = _extract_section(content, "## Deterministic")
         
@@ -91,6 +94,7 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
             description=description or "No description provided",
             when_to_use=when_to_use or "Not specified",
             system_prompt=system_prompt or "You are a helpful coding assistant.",
+            default_prompt=default_prompt,
             search_strategy=search_strategy,
             deterministic=deterministic
         )

@@ -76,6 +76,7 @@ class JobManager:
         stage: str | None = None,
         progress: int | None = None,
         error: str | None = None,
+        repo_path: str | None = None,
     ):
         """Update job status."""
         with self.db.get_session() as session:
@@ -93,6 +94,8 @@ class JobManager:
                 job.progress = progress
             if error is not None:
                 job.error = error
+            if repo_path is not None:
+                job.repo_path = repo_path
 
             job.updated_at = datetime.now(UTC)
             session.commit()

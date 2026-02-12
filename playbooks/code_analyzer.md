@@ -40,10 +40,14 @@ You are a Lead Code Architect and Analyst. Your goal is to provide deep, accurat
 - **Strategic Implications**: Design decisions, dependencies, or potential risks identified.
 - **Actionable Insight**: (If relevant) suggestions for refactoring or documentation.
 
+## Default Prompt
+Analyze this repository structure and purpose.
+
 ## Search Strategy
 ```yaml
 limit: 100
 mode: hybrid
+min_score: 0.7
 expand_context: true
 # Executor will use the user's query/goal as the search query
 queries: [] 

@@ -103,6 +103,19 @@ class ManifestManager:
             session.refresh(repo)
             return repo
 
+            session.refresh(repo)
+            return repo
+
+    def list_repositories(self) -> list[RepositoryManifest]:
+        """
+        List all repository manifests.
+
+        Returns:
+            List of repository manifests
+        """
+        with self.db.get_session() as session:
+            return session.query(RepositoryManifest).all()
+
     def update_repository(
         self,
         repo_id: str,
@@ -150,6 +163,14 @@ class ManifestManager:
                     repo.last_authors = json.dumps(metadata["last_authors"])
                 if "total_commits" in metadata:
                     repo.total_commits = metadata["total_commits"]
+                
+                # PR Metadata
+                if "last_pr_title" in metadata:
+                    repo.last_pr_title = metadata["last_pr_title"]
+                if "last_pr_user" in metadata:
+                    repo.last_pr_user = metadata["last_pr_user"]
+                if "last_pr_merged_at" in metadata:
+                    repo.last_pr_merged_at = metadata["last_pr_merged_at"]
 
             repo.last_indexed_at = datetime.now(UTC)
             repo.updated_at = datetime.now(UTC)

@@ -9,6 +9,7 @@ load_dotenv()  # Load .env before anything reads os.environ
 
 from contextlib import asynccontextmanager
 
+from datetime import UTC, datetime
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -155,6 +156,9 @@ def run_indexing_job(
             actual_repo_path = str(local_path)
             # Use the computed repo_id from GitRepoManager
             actual_repo_id = computed_repo_id
+            
+            # Update job with actual path so get_status works correctly
+            job_manager.update_job(job_id, repo_path=actual_repo_path)
         else:
             actual_repo_path = repo_path
             actual_repo_id = repo_id
@@ -258,6 +262,12 @@ async def semantic_search(request: SearchRequest):
 
     # Generate query embedding with proper task prefix
     query_embedding = embedder.encode_query(request.query)
+
+    # Validate repo_id if provided
+    if request.repo_id:
+        manifest: ManifestManager = app.state.manifest
+        if not manifest.get_repository_by_id(request.repo_id):
+            raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
 
     results = []
 
@@ -407,6 +417,71 @@ async def health_check():
     )
 
 
+
+
+class RepoListItem(BaseModel):
+    """Repository list item."""
+    repo_id: str
+    name: str | None = None
+    branch: str | None = None
+    path: str
+    status: str
+    total_files: int
+    last_indexed: str
+    
+    # Metadata
+    first_author: str | None = None
+    total_commits: int | None = None
+    last_pr_title: str | None = None
+    last_pr_user: str | None = None
+    last_pr_merged_at: str | None = None
+
+
+@app.get("/api/v1/repos", response_model=list[RepoListItem])
+async def list_repos():
+    """List all indexed repositories."""
+    manifest: ManifestManager = app.state.manifest
+    repos = manifest.list_repositories()
+    
+    results = []
+    for r in repos:
+        # Infer properties from path
+        # Expected path format: .../data/repos/<name>/<branch>
+        path_parts = str(r.repo_path).split("/")
+        name = None
+        branch = None
+        
+        # Heuristic: verify if it looks like our git cache structure
+        if len(path_parts) >= 2:
+            # Check if parent is 'repos' (maybe too specific?)
+            # Just take last two parts
+            potential_branch = path_parts[-1]
+            potential_name = path_parts[-2]
+             
+            # Exclude standard dirs if any
+            if potential_name != "repos":
+                 name = potential_name
+                 branch = potential_branch
+
+        results.append(RepoListItem(
+            repo_id=r.repo_id,
+            name=name or "unknown",
+            branch=branch or "unknown",
+            path=r.repo_path,
+            status="indexed",
+            total_files=r.total_files_indexed,
+            last_indexed=r.last_indexed_at.isoformat(),
+            first_author=r.first_author,
+            total_commits=r.total_commits,
+            last_pr_title=r.last_pr_title,
+            last_pr_user=r.last_pr_user,
+            last_pr_merged_at=r.last_pr_merged_at
+        ))
+
+    
+    return results
+
+
 @app.get("/api/v1/stats")
 async def get_stats():
     """Get system stats."""
@@ -438,6 +513,11 @@ class GraphQueryRequest(BaseModel):
 async def query_graph(request: GraphQueryRequest):
     """Query code structure using Kùzu graph."""
     graph_query = app.state.graph_query
+    manifest: ManifestManager = app.state.manifest
+    
+    # Validate repo_id
+    if not manifest.get_repository_by_id(request.repo_id):
+         raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
     
     if request.query_type == "files":
         return graph_query.find_files_by_pattern(
@@ -478,3 +558,166 @@ async def query_graph(request: GraphQueryRequest):
         return []
     
     return []
+
+
+
+class CatalogCreateRequest(BaseModel):
+    """Request to create a catalog entry."""
+    repo_id: str
+    playbook_name: str = "code_analyzer"
+    prompt: str | None = None
+
+
+class CatalogSearchRequest(BaseModel):
+    """Request to search catalog entries."""
+    query: str
+    repo_id: str | None = None
+    limit: int = 5
+    min_score: float = 0.8
+
+
+@app.post("/api/v1/catalogs")
+async def create_catalog_entry(request: CatalogCreateRequest):
+    """
+    Execute a playbook on a repo and store the result in the catalog.
+    """
+    import uuid
+    import json
+    from codemind.api.autonomous_agents import playbook_executor
+    
+    if not playbook_executor:
+         raise HTTPException(status_code=503, detail="Playbook system not initialized")
+
+    manifest: ManifestManager = app.state.manifest
+    lance_storage: LanceDBStorage = app.state.lance_storage
+    embedder = app.state.workflow.embedder
+    
+    # 1. Fetch Repository Metadata
+    repo = manifest.get_repository_by_id(request.repo_id)
+    if not repo:
+        raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
+    
+    # Construct rich metadata object from repo manifest
+    repo_metadata = {
+        "repo_id": repo.repo_id,
+        "name": repo.repo_path.split("/")[-2] if len(repo.repo_path.split("/")) > 2 else "unknown",
+        "path": repo.repo_path,
+        "first_author": repo.first_author,
+        "total_commits": repo.total_commits,
+        "last_pr_title": repo.last_pr_title,
+        "last_pr_user": repo.last_pr_user,
+        "last_pr_merged_at": repo.last_pr_merged_at,
+        "last_indexed": repo.last_indexed_at.isoformat()
+    }
+    
+    # 2. Execute Playbook
+    # Resolve prompt
+    from codemind.playbooks import PlaybookRegistry
+    # We need to access the registry. Since it's not in app.state, we might need to instantiate or access global
+    # Ideally registry is singleton or in app.state. Checking autonomous_agents.py...
+    # It seems autonomous_agents.init_autonomous_agents initializes a local registry but doesn't expose it easily?
+    # Actually, PlaybookExecutor has the registry.
+    
+    prompt = request.prompt
+    if not prompt:
+        # Fetch default from playbook definition
+        # We can get it via playbook_executor.registry if accessible, or just reload it.
+        # But playbook_executor is available here.
+        registry = playbook_executor.registry
+        playbook_def = registry.get_playbook(request.playbook_name)
+        if playbook_def and playbook_def.default_prompt:
+            prompt = playbook_def.default_prompt
+        else:
+             raise HTTPException(status_code=400, detail="Prompt is required (no default found for playback)")
+
+    user_input = {
+        "query": prompt,
+        "goal": prompt,
+        "repo_id": request.repo_id,
+        "context": repo_metadata
+    }
+    
+    print(f"[CATALOG] Executing playbook '{request.playbook_name}' for repo {request.repo_id}")
+    result = await playbook_executor.execute(request.playbook_name, user_input)
+    
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=f"Playbook execution failed: {result.get('error')}")
+    
+    execution_result = result["outputs"].get("result", "")
+    
+    # 3. Generate Embedding for the result content
+    # Note: Using encode_document for document content
+    embedding = embedder.encode_document(execution_result)
+    
+    # 4. Store in LanceDB
+    catalog_item = {
+        "catalog_id": str(uuid.uuid4()),
+        "repo_id": request.repo_id,
+        "repo_name": repo_metadata["name"],
+        "playbook_name": request.playbook_name,
+        "result": execution_result,
+        "metadata": json.dumps(repo_metadata),
+        "created_at": datetime.now(UTC),
+        "embedding": embedding
+    }
+    
+    lance_storage.store_catalog_item(catalog_item)
+    
+    return {
+        "status": "created",
+        "catalog_id": catalog_item["catalog_id"],
+        "result": execution_result
+    }
+
+@app.get("/api/v1/catalogs/{repo_id}")
+async def get_catalog_entries(repo_id: str):
+    """Get catalog entries for a repository."""
+    manifest: ManifestManager = app.state.manifest
+    if not manifest.get_repository_by_id(repo_id):
+         raise HTTPException(status_code=404, detail=f"Repository {repo_id} not found")
+
+    lance_storage: LanceDBStorage = app.state.lance_storage
+    return lance_storage.get_catalog_items(repo_id=repo_id)
+
+
+@app.post("/api/v1/catalogs/search")
+async def search_catalog(request: CatalogSearchRequest):
+    """Semantic search over catalog entries."""
+    lance_storage: LanceDBStorage = app.state.lance_storage
+    embedder = app.state.workflow.embedder
+    
+    # Validate repo_id if provided
+    if request.repo_id:
+        manifest: ManifestManager = app.state.manifest
+        if not manifest.get_repository_by_id(request.repo_id):
+            raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
+    
+    # Generate query embedding
+    query_embedding = embedder.encode_query(request.query)
+    
+    # Search
+    # Note: lance_storage fetches 2*limit to allow for filtering
+    raw_results = lance_storage.search_catalogs(
+        query_embedding=query_embedding,
+        repo_id=request.repo_id,
+        limit=request.limit
+    )
+    
+    processed_results = []
+    for item in raw_results:
+        # LanceDB returns _distance. For cosine, distance = 1 - similarity.
+        # So similarity = 1 - distance.
+        score = 1 - item.get("_distance", 1.0)
+        
+        if score >= request.min_score:
+            # Clean up result (remove heavy embedding)
+            if "embedding" in item:
+                del item["embedding"]
+            
+            item["score"] = score
+            processed_results.append(item)
+    
+    # Sort by score descending (just in case)
+    processed_results.sort(key=lambda x: x["score"], reverse=True)
+    
+    return processed_results[:request.limit]

@@ -1,0 +1,13 @@
+[
+    {
+        "url": "https://github.com/tiangolo/typer",
+        "branch": "master",
+        "playbook": "code_analyzer",
+        "prompt": "Analyze the architectural patterns used in this CLI library."
+    },
+    {
+        "url": "https://github.com/httpx/httpx",
+        "branch": "master",
+        "playbook": "code_analyzer"
+    }
+]

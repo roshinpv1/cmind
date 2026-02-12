@@ -64,6 +64,7 @@ class PlaybookTools:
             mode = params.get("mode", "semantic")
             file_types = params.get("file_types", [])
             graph_filters = params.get("graph_filters", {})
+            min_score = params.get("min_score", 0.0)
             
             # Fallback: if queries is empty but there's a single "query" param
             if not queries and "query" in params:
@@ -111,10 +112,6 @@ class PlaybookTools:
                             if not any(file_path.endswith(ft) for ft in file_types):
                                 continue
                         
-                        # Graph filters (if any)
-                        # For now, we apply file_type filter only
-                        # In production, you'd query graph for more complex filtering
-                        
                         # Dedupe by file_path + chunk_text
                         dedupe_key = f"{file_path}:{r.get('chunk_text', '')[:50]}"
                         if dedupe_key not in dedupe_set:
@@ -124,16 +121,21 @@ class PlaybookTools:
                     results = filtered_results
                 else:
                     # Still dedupe
+                    results_to_add = []
                     for r in results:
                         file_path = r.get('file_path', '')
                         dedupe_key = f"{file_path}:{r.get('chunk_text', '')[:50]}"
                         if dedupe_key not in dedupe_set:
-                            all_results.append(r)
+                            results_to_add.append(r)
                             dedupe_set.add(dedupe_key)
-                            continue
+                    results = results_to_add
                 
                 all_results.extend(results)
             
+            # Filter by min_score
+            if min_score > 0:
+                all_results = [r for r in all_results if r.get('score', 0) >= min_score]
+
             # Sort by score and limit
             all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             final_results = all_results[:limit]
@@ -142,7 +144,8 @@ class PlaybookTools:
                 "success": True,
                 "results": final_results,
                 "count": len(final_results),
-                "queries_used": queries
+                "queries_used": queries,
+                "min_score": min_score
             }
         
         except Exception as e:

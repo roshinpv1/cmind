@@ -236,7 +236,8 @@ class PlaybookExecutor:
                 "limit": getattr(strategy, 'limit', 10),
                 "mode": getattr(strategy, 'mode', 'semantic'),
                 "file_types": getattr(strategy, 'file_types', []),
-                "graph_filters": getattr(strategy, 'graph_filters', {})
+                "graph_filters": getattr(strategy, 'graph_filters', {}),
+                "min_score": getattr(strategy, 'min_score', 0.0)
             }
             
             state["logs"].append(f"  Extracted {len(queries)} queries from search strategy")
@@ -321,15 +322,19 @@ class PlaybookExecutor:
                     # Context too large - use map-reduce
                     state["logs"].append(f"  Context too large ({total_tokens} tokens), using map-reduce")
                     
+                    max_batches = getattr(playbook.search_strategy, 'max_batches', 5)
                     batches = split_into_chunks(code_chunks, max_tokens_per_chunk=batch_chunk_tokens)
                     batch_results = []
                     
-                    for i, batch in enumerate(batches[:5]):  # Cap at 5 batches
+                    # Cap batches to configured limit
+                    batches_to_process = batches[:max_batches]
+                    
+                    for i, batch in enumerate(batches_to_process):
                         batch_code = format_code_chunks_for_llm(batch, max_tokens=batch_chunk_tokens)
                         
                         map_msg = (
                             "USER REQUEST:\n" + user_goal + "\n\n"
-                            "CODE BATCH " + str(i+1) + "/" + str(min(len(batches), 5)) + ":\n"
+                            "CODE BATCH " + str(i+1) + "/" + str(len(batches_to_process)) + ":\n"
                             + batch_code + "\n\n"
                             "Analyze this batch for the user's request:"
                         )
@@ -340,7 +345,7 @@ class PlaybookExecutor:
                             max_tokens=batch_output_tokens
                         )
                         batch_results.append(batch_output)
-                        state["logs"].append(f"  Processed batch {i+1}/{min(len(batches), 5)}")
+                        state["logs"].append(f"  Processed batch {i+1}/{len(batches_to_process)}")
                     
                     # Reduce: Merge all batch results
                     partial = "\n\n---\n\n".join(

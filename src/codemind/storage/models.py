@@ -30,7 +30,14 @@ class RepositoryManifest(Base):
     first_commit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     first_author: Mapped[str | None] = mapped_column(String, nullable=True)
     last_authors: Mapped[str | None] = mapped_column(String, nullable=True, comment="JSON list of last 4 authors")
+    first_author: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_authors: Mapped[str | None] = mapped_column(String, nullable=True, comment="JSON list of last 4 authors")
     total_commits: Mapped[int] = mapped_column(Integer, default=0)
+    
+    # GitHub PR Metadata
+    last_pr_title: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_pr_user: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_pr_merged_at: Mapped[str | None] = mapped_column(String, nullable=True)
     
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
