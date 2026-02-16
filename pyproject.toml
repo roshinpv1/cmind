@@ -62,6 +62,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
     "click>=8.1.7",
+
+    # MCP Server
+    "mcp[cli]>=1.0.0",
+    "httpx>=0.26.0",
 ]
 
 [project.optional-dependencies]
@@ -80,6 +84,7 @@ dev = [
 
 [project.scripts]
 codemind = "codemind.cli:main"
+codemind-mcp = "codemind.mcp.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

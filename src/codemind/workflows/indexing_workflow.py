@@ -416,15 +416,21 @@ class IndexingWorkflow:
             repo = self.manifest.get_repository(state.repo_path)
             
             metadata = getattr(state, "metadata", {})
+            branch = getattr(state, "branch", "main")  # Start using branch if available in state
             
             if not repo:
-                # Use commit hash from state
-                self.manifest.create_repository(state.repo_path)
+                # Use ID from state (which might come from GitRepoManager)
+                self.manifest.create_repository(
+                    state.repo_path, 
+                    repo_id=state.repo_id,
+                    branch=branch
+                )
                 repo = self.manifest.get_repository(state.repo_path)
             
-            # Update manifest with commit hash and metadata
+            # Update manifest with commit hash and metadata, ensuring ID consistency
             self.manifest.update_repository(
-                repo.repo_id, 
+                state.repo_id,  # Use state ID to be sure
+                branch=branch,
                 last_commit_hash=state.commit_hash,
                 metadata=metadata
             )

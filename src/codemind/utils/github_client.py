@@ -23,10 +23,10 @@ class GitHubClient:
         
         if self.token:
             auth = Auth.Token(self.token)
-            self.github = Github(auth=auth)
+            self.github = Github(auth=auth, timeout=10, retry=0)
         else:
             # Unauthenticated access (rate limited)
-            self.github = Github()
+            self.github = Github(timeout=10, retry=0)
 
     def get_repo_details(self, repo_url: str) -> Dict[str, Any]:
         """
@@ -74,7 +74,8 @@ class GitHubClient:
             return metadata
             
         except Exception as e:
-            print(f"[GITHUB] Failed to fetch metadata for {repo_url}: {e}")
+            # Fail silently on rate limits or network issues to allow indexing to proceed
+            print(f"[GITHUB] Warning: Failed to fetch metadata (API limit or network): {e}")
             return {}
 
     def close(self):

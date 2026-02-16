@@ -5,8 +5,8 @@ In the new prompt-based architecture, there's only ONE tool: search_codebase.
 Playbooks define HOW to process the retrieved code via their system prompts.
 """
 
-from typing import Optional, Any
-import traceback
+from datetime import UTC, datetime
+from codemind.storage.database import CatalogStore
 
 
 class PlaybookTools:
@@ -19,9 +19,10 @@ class PlaybookTools:
     READ-ONLY operations on:
     - LanceDB (semantic search)
     - Kùzu (graph filters)
+    - SQLite (catalog full content)
     """
     
-    def __init__(self, lance_storage, graph_service, embedder):
+    def __init__(self, lance_storage, graph_service, embedder, db=None):
         """
         Initialize playbook tools.
         
@@ -29,10 +30,12 @@ class PlaybookTools:
             lance_storage: LanceDBStorage instance
             graph_service: GraphQueryService instance
             embedder: Embedder for query encoding
+            db: Database instance (for SQLite access)
         """
         self.lance = lance_storage
         self.graph = graph_service
         self.embedder = embedder
+        self.db = db
     
     async def search_codebase(self, params: dict) -> dict:
         """
@@ -71,7 +74,7 @@ class PlaybookTools:
                 queries = [params["query"]]
             
             # Validate
-            limit = max(1, min(100, limit))
+            limit = max(1, min(1000, limit))
             
             if not queries:
                 return {
@@ -89,6 +92,143 @@ class PlaybookTools:
                     "queries_used": []
                 }
             
+            # Special handle for catalog mode
+            if mode == "catalog":
+                # Reroute to search_catalogs logic
+                # New Flow: Search chunks in LanceDB -> Dedupe Repos -> Fetch Full Content from SQLite
+                all_results = []
+                seen_repos = set()
+                
+                for query in queries:
+                    q_emb = self.embedder.encode_query(query)
+                    # Search chunks!
+                    # Optimization: Only fetch relevant columns
+                    chunk_results = self.lance.search_catalogs(
+                        q_emb, 
+                        repo_id=repo_id, 
+                        limit=limit*3, 
+                        columns=["repo_id", "repo_name", "chunk_text", "metadata"] # metadata needed for score/debug? No, scoring uses _distance
+                    ) # Get more chunks to ensure enough unique repos
+                    
+                    for item in chunk_results:
+                        rid = item['repo_id']
+                        if rid in seen_repos:
+                            continue
+                        
+                        score = max(0.0, 1.0 - item.get("_distance", 1.0))
+                        print(f"[DEBUG] Catalog match: {rid} (Chunk score: {score:.2f})")
+                        
+                        if score < min_score:
+                            continue
+
+                        # Fetch FULL content from SQLite
+                        full_content = ""
+                        metadata = {}
+                        if self.db:
+                            try:
+                                with self.db.get_session() as session:
+                                    cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
+                                    if cat_entry:
+                                        full_content = cat_entry.content
+                                        metadata = cat_entry.metadata_json or {}
+                                    else:
+                                        print(f"[WARN] No SQLite entry for {rid}, falling back to chunk text")
+                                        full_content = item.get("chunk_text") or item.get("result", "")
+                            except Exception as e:
+                                print(f"[ERROR] SQLite fetch failed: {e}")
+                                full_content = item.get("chunk_text") or item.get("result", "")
+                        else:
+                             # Fallback if no DB
+                             full_content = item.get("chunk_text") or item.get("result", "")
+
+                        seen_repos.add(rid)
+                        
+                        # Enrich text for LLM - surface ALL fields explicitly
+                        import json
+                        try:
+                            content_obj = json.loads(full_content)
+                        except:
+                            content_obj = {}
+
+                        # Build rich text with all fields explicitly surfaced
+                        repo_name = content_obj.get("repo_name", metadata.get("repo_name", item.get("repo_name", rid)))
+                        parts = [
+                            f"CATALOG ENTRY: {repo_name}",
+                            f"Relevance Score: {score:.2f}",
+                        ]
+
+                        # Identity
+                        if metadata.get("repo_url"):
+                            parts.append(f"Repository URL: {metadata['repo_url']}")
+                        if metadata.get("branch"):
+                            parts.append(f"Branch: {metadata['branch']}")
+                        if metadata.get("category"):
+                            parts.append(f"Category: {metadata['category']}")
+
+                        # Descriptions - include ALL levels
+                        desc = content_obj.get("description", "")
+                        if desc:
+                            parts.append(f"Description: {desc}")
+                        high_level = metadata.get("summary_high_level", "")
+                        if high_level:
+                            parts.append(f"High-Level Summary: {high_level}")
+                        detailed = content_obj.get("summary_detailed", "")
+                        if detailed:
+                            parts.append(f"Detailed Summary: {detailed}")
+
+                        # Technical details
+                        if metadata.get("architecture"):
+                            parts.append(f"Architecture: {metadata['architecture']}")
+                        if metadata.get("tech_stack"):
+                            parts.append(f"Tech Stack: {metadata['tech_stack']}")
+                        if metadata.get("specification"):
+                            parts.append(f"Specification: {metadata['specification']}")
+
+                        # Classification
+                        topics = metadata.get("topics", [])
+                        if topics:
+                            parts.append(f"Topics: {', '.join(topics)}")
+
+                        # Quality
+                        quality = metadata.get("quality_score", 0)
+                        if quality:
+                            parts.append(f"Quality Score: {quality}/100")
+                        pros = metadata.get("pros", [])
+                        if pros:
+                            parts.append(f"Pros: {'; '.join(pros)}")
+                        cons = metadata.get("cons", [])
+                        if cons:
+                            parts.append(f"Cons: {'; '.join(cons)}")
+
+                        rich_text = "\n".join(parts)
+
+                        all_results.append({
+                            "file_path": f"catalog://{rid}",
+                            "chunk_text": rich_text,
+                            "score": score,
+                            "start_line": 0,
+                            "end_line": 0,
+                            "repo_id": rid
+                        })
+
+                        if len(all_results) >= limit:
+                            break
+                    
+                    if len(all_results) >= limit:
+                        break
+
+                # Sort and limit (already effectively limited but good to be safe)
+                all_results.sort(key=lambda x: x['score'], reverse=True)
+                final_results = all_results[:limit]
+                
+                return {
+                    "success": True,
+                    "results": final_results,
+                    "count": len(final_results),
+                    "queries_used": queries,
+                    "min_score": min_score
+                }
+
             # Execute all queries and combine results
             all_results = []
             dedupe_set = set()
@@ -129,6 +269,11 @@ class PlaybookTools:
                             results_to_add.append(r)
                             dedupe_set.add(dedupe_key)
                     results = results_to_add
+                
+                # Map _distance to score (1 - distance)
+                for r in results:
+                    if "_distance" in r and "score" not in r:
+                        r["score"] = 1.0 - r["_distance"]
                 
                 all_results.extend(results)
             
@@ -298,6 +443,320 @@ class PlaybookTools:
         except Exception as e:
             return {"error": str(e), "files": [], "count": 0}
 
+    async def search_catalogs(self, params: dict) -> dict:
+        """Search across repository catalogs.
+        
+        Args:
+            params: {
+                query: str,
+                repo_id: str (optional),
+                limit: int (optional)
+            }
+        """
+        try:
+            query = params["query"]
+            repo_id = params.get("repo_id")
+            limit = params.get("limit", 10)
+            
+            if not self.embedder:
+                return {"error": "No embedder available", "results": [], "count": 0}
+                
+            query_emb = self.embedder.encode_query(query)
+            
+            # New Flow: Search chunks -> Dedupe -> Fetch Full
+            # Optimization: Only fetch necessary columns from LanceDB to save bandwidth
+            chunk_results = self.lance.search_catalogs(
+                query_emb, 
+                repo_id=repo_id, 
+                limit=limit*3,
+                columns=["repo_id", "repo_name", "chunk_text"]
+            )
+            
+            final_results = []
+            seen_repos = set()
+            
+            for item in chunk_results:
+                rid = item['repo_id']
+                if rid in seen_repos:
+                    continue
+                
+                # Fetch full content
+                full_content = ""
+                metadata = {}
+                
+                if self.db:
+                    try:
+                        with self.db.get_session() as session:
+                             cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
+                             if cat_entry:
+                                 full_content = cat_entry.content
+                                 metadata = cat_entry.metadata_json or {}
+                             else:
+                                 full_content = item.get("chunk_text") or item.get("result", "")
+                    except Exception:
+                        full_content = item.get("chunk_text") or item.get("result", "")
+                else:
+                     full_content = item.get("chunk_text") or item.get("result", "")
+
+                seen_repos.add(rid)
+                
+                # Format for API response - include all enriched metadata
+                import json
+                try:
+                    content_obj = json.loads(full_content)
+                except:
+                    content_obj = {}
+                
+                score = 1.0 - item.get("_distance", 1.0)
+                
+                # Build enriched result text with all fields
+                repo_name = content_obj.get("repo_name", metadata.get("repo_name", item.get("repo_name", rid)))
+                result_parts = [content_obj.get("description", full_content)]
+                
+                high_level = metadata.get("summary_high_level", "")
+                if high_level:
+                    result_parts.append(f"Summary: {high_level}")
+                if metadata.get("architecture"):
+                    result_parts.append(f"Architecture: {metadata['architecture']}")
+                if metadata.get("tech_stack"):
+                    result_parts.append(f"Tech Stack: {metadata['tech_stack']}")
+                if metadata.get("category"):
+                    result_parts.append(f"Category: {metadata['category']}")
+                
+                final_results.append({
+                    "repo_id": rid,
+                    "repo_name": repo_name,
+                    "result": "\n".join(result_parts),
+                    "metadata": json.dumps(metadata),
+                    "score": score,
+                    "chunk_match": item.get("chunk_text")  # debugging
+                })
+                
+                if len(final_results) >= limit:
+                    break
+            
+            return {"success": True, "results": final_results, "count": len(final_results)}
+        except Exception as e:
+            return {"error": str(e), "results": [], "count": 0}
+
+    @staticmethod
+    def _normalize_catalog_params(params: dict) -> dict:
+        """Normalize nested LLM output to flat save_catalog_entry format.
+        
+        The LLM may output nested structures like:
+            {name, url, purpose: {short_summary, detailed_explanation},
+             architecture: {layers, design_patterns, data_flow},
+             tech_stack: {backend_languages, frameworks, ...},
+             quality_assessment: {score, pros, cons},
+             specification: {api_base_path, endpoints, models}}
+             
+        This normalizes to flat format:
+            {repo_name, repo_url, description, summary_detailed,
+             architecture (str), tech_stack (str), quality_score (int),
+             pros (list), cons (list), specification (str), topics (list)}
+        """
+        import json
+        
+        normalized = dict(params)  # shallow copy
+        
+        # name → repo_name
+        if "name" in normalized and "repo_name" not in normalized:
+            normalized["repo_name"] = normalized.pop("name")
+        
+        # url → repo_url 
+        if "url" in normalized and "repo_url" not in normalized:
+            normalized["repo_url"] = normalized.pop("url")
+        
+        # purpose → description + summary_detailed
+        purpose = normalized.pop("purpose", None)
+        if isinstance(purpose, dict):
+            if "description" not in normalized:
+                normalized["description"] = purpose.get("short_summary", "")
+            if "summary_detailed" not in normalized:
+                normalized["summary_detailed"] = purpose.get("detailed_explanation", "")
+            if "summary_high_level" not in normalized:
+                normalized["summary_high_level"] = purpose.get("short_summary", "")
+        
+        # architecture → stringify if nested
+        arch = normalized.get("architecture")
+        if isinstance(arch, dict):
+            parts = []
+            if arch.get("layers"):
+                parts.append("Layers: " + ", ".join(arch["layers"]))
+            if arch.get("design_patterns"):
+                parts.append("Patterns: " + ", ".join(arch["design_patterns"]))
+            if arch.get("data_flow"):
+                parts.append("Data Flow: " + arch["data_flow"])
+            normalized["architecture"] = "\n".join(parts) if parts else json.dumps(arch)
+        
+        # tech_stack → stringify if nested
+        ts = normalized.get("tech_stack")
+        if isinstance(ts, dict):
+            all_tech = []
+            for key, val in ts.items():
+                if isinstance(val, list):
+                    all_tech.extend(val)
+                elif isinstance(val, dict):
+                    for sub_key, sub_val in val.items():
+                        if isinstance(sub_val, list):
+                            all_tech.extend(sub_val)
+                        elif isinstance(sub_val, str):
+                            all_tech.append(sub_val)
+                elif isinstance(val, str):
+                    all_tech.append(val)
+            normalized["tech_stack"] = ", ".join(all_tech) if all_tech else json.dumps(ts)
+        elif isinstance(ts, list):
+            normalized["tech_stack"] = ", ".join(ts)
+        
+        # quality_assessment → quality_score, pros, cons
+        qa = normalized.pop("quality_assessment", None)
+        if isinstance(qa, dict):
+            if "quality_score" not in normalized:
+                normalized["quality_score"] = qa.get("score", 0)
+            if "pros" not in normalized and qa.get("pros"):
+                normalized["pros"] = qa["pros"]
+            if "cons" not in normalized and qa.get("cons"):
+                normalized["cons"] = qa["cons"]
+        
+        # specification → stringify if nested
+        spec = normalized.get("specification")
+        if isinstance(spec, dict):
+            normalized["specification"] = json.dumps(spec, indent=2)
+        
+        # Ensure description exists
+        if "description" not in normalized:
+            normalized["description"] = normalized.get("summary_detailed", normalized.get("summary_high_level", ""))
+        
+        return normalized
+
+    async def save_catalog_entry(self, params: dict) -> dict:
+        """Save or update a catalog entry for a repository.
+        
+        Persists full content to SQLite and searchable chunks to LanceDB.
+        Handles both flat and nested LLM output formats.
+        """
+        try:
+            # Normalize nested LLM output to flat format
+            params = self._normalize_catalog_params(params)
+            print(f"[TOOLS] Normalized params keys: {list(params.keys())}")
+            
+            repo_id = params["repo_id"]
+            description = params["description"]
+            # Use detailed summary as the main content if available, else description
+            main_content = params.get("summary_detailed", description)
+            
+            if not self.embedder:
+                 return {"error": "No embedder available"}
+
+            # --- 1. Construct Metadata & Content ---
+            import json
+            import uuid
+            
+            metadata_dict = {
+                "architecture": params.get("architecture", ""),
+                "tech_stack": params.get("tech_stack", ""),
+                "topics": params.get("topics", []),
+                "repo_name": params.get("repo_name", ""),
+                "repo_url": params.get("repo_url", ""),
+                "branch": params.get("branch", ""),
+                "summary_high_level": params.get("summary_high_level", ""),
+                "category": params.get("category", "Uncategorized"),
+                "quality_score": params.get("quality_score", 0),
+                "specification": params.get("specification", ""),
+                "pros": params.get("pros", []),
+                "cons": params.get("cons", [])
+            }
+            
+            # Full content includes everything for the LLM to read
+            full_entry = {
+                "description": description,
+                "summary_detailed": main_content,
+                **metadata_dict
+            }
+            full_content_str = json.dumps(full_entry, indent=2)
+            
+            # --- 2. Persist to SQLite (Full Content) ---
+            if self.db:
+                try:
+                    with self.db.get_session() as session:
+                        # Check existence
+                        existing = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+                        if existing:
+                            existing.content = full_content_str
+                            existing.metadata_json = metadata_dict
+                            existing.repo_name = params.get("repo_name")
+                            existing.updated_at = int(datetime.now(UTC).timestamp())
+                        else:
+                            new_entry = CatalogStore(
+                                repo_id=repo_id,
+                                repo_name=params.get("repo_name"),
+                                content=full_content_str,
+                                metadata_json=metadata_dict,
+                                created_at=int(datetime.now(UTC).timestamp()),
+                                updated_at=int(datetime.now(UTC).timestamp())
+                            )
+                            session.add(new_entry)
+                        session.commit()
+                        print(f"[TOOLS] Saved full catalog entry to SQLite for {repo_id}")
+                except Exception as e:
+                    print(f"[TOOLS] SQLite save failed: {e}")
+                    # Continue to LanceDB? Yes, partial success is better than fail.
+            
+            # --- 3. Chunk & Embed for LanceDB ---
+            # Chunking strategy: 
+            # 1. Metadata chunk (high priority)
+            # 2. Description chunks (sliding window)
+            
+            chunks = []
+            
+            # Chunk 1: Metadata + High Level Summary
+            meta_text = (
+                f"Repo: {params.get('repo_name', repo_id)}\n"
+                f"Topics: {', '.join(metadata_dict['topics'])}\n"
+                f"Stack: {metadata_dict['tech_stack']}\n"
+                f"Summary: {metadata_dict['summary_high_level']}\n"
+                f"Category: {metadata_dict['category']}"
+            )
+            chunks.append(meta_text)
+            
+            # Chunk 2+: Split main content into ~1000 char chunks with overlap
+            # Simple text splitter
+            text_to_split = main_content
+            chunk_size = 1000
+            overlap = 200
+            
+            start = 0
+            while start < len(text_to_split):
+                end = start + chunk_size
+                chunk_text = text_to_split[start:end]
+                chunks.append(chunk_text)
+                start += (chunk_size - overlap)
+                
+            # Embed all chunks
+            embeddings = self.embedder.provider.encode_batch(chunks)
+            
+            # Prepare LanceDB rows
+            lance_rows = []
+            for i, (txt, emb) in enumerate(zip(chunks, embeddings)):
+                lance_rows.append({
+                    "catalog_id": str(uuid.uuid4()),
+                    "chunk_id": f"{repo_id}_chunk_{i}",
+                    "repo_id": repo_id,
+                    "repo_name": params.get("repo_name", repo_id),
+                    "chunk_text": txt,
+                    "metadata": json.dumps(metadata_dict), # Store metadata in every chunk for filtering
+                    "created_at": datetime.now(UTC),
+                    "embedding": emb.tolist() if hasattr(emb, "tolist") else emb
+                })
+                
+            self.lance.store_catalog_chunks(lance_rows)
+            
+            return {"success": True, "message": f"Catalog entry saved for {repo_id} (SQLite + {len(lance_rows)} chunks)"}
+            
+        except Exception as e:
+            traceback.print_exc()
+            return {"error": str(e)}
+
     async def execute_tool(self, tool_name: str, params: dict) -> dict:
         """Dispatch a tool call by name.
         
@@ -316,6 +775,8 @@ class PlaybookTools:
             "get_callees": self.get_callees,
             "get_dependencies": self.get_dependencies,
             "list_files": self.list_files,
+            "search_catalogs": self.search_catalogs,
+            "save_catalog_entry": self.save_catalog_entry,
         }
 
         if tool_name not in tools:
@@ -361,5 +822,15 @@ class PlaybookTools:
                 "name": "list_files",
                 "description": "List files in the repository matching a pattern or file type.",
                 "parameters": "repo_id (str), pattern (str, optional), file_type (str, optional)"
+            },
+            {
+                "name": "search_catalogs",
+                "description": "Search across high-level documentation catalogs. Use to find relevant repositories or architectural summaries.",
+                "parameters": "query (str), repo_id (str, optional), limit (int, optional)"
+            },
+            {
+                "name": "save_catalog_entry",
+                "description": "Save a comprehensive catalog entry documenting a repository's purpose, architecture, quality, and metadata.",
+                "parameters": "repo_id (str), repo_name (str), repo_url (str), branch (str), description (str), summary_high_level (str), summary_detailed (str), category (str), quality_score (int 1-100), architecture (str), tech_stack (str), specification (str), topics (list[str]), pros (list[str]), cons (list[str])"
             },
         ]

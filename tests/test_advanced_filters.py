@@ -4,10 +4,28 @@ Test script for advanced filter features.
 Run this after indexing a repository to test all filter types.
 """
 
+import socket
 import requests
 import json
+import pytest
 
 BASE_URL = "http://localhost:8000"
+
+
+def _server_is_running() -> bool:
+    """Check if the API server is reachable."""
+    try:
+        s = socket.create_connection(("localhost", 8000), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_is_running(),
+    reason="API server not running on localhost:8000",
+)
 
 # Replace with your actual repo_id
 REPO_ID = "5d0cf96ff9e69e48"  # Update this!

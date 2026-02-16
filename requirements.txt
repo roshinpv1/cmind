@@ -24,7 +24,7 @@ torch>=2.1.0
 numpy>=1.24.0
 
 # --- Graph Database ---
-kuzu>=0.3.0                      # Kùzu graph DB (replaces neo4j)
+
 
 # --- AST Parsing (Tree-sitter) ---
 tree-sitter>=0.21.0

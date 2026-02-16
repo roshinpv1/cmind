@@ -21,7 +21,9 @@ class PlannerState(TypedDict):
     
     # === Input ===
     goal: str  # User's natural language goal
-    repo_id: str  # Repository to work with
+    goal: str  # User's natural language goal
+    repo_id: Optional[str]  # Repository to work with (None for global)
+    allowed_playbooks: Optional[list[str]]  # Whitelist of playbooks (None = all)
     
     # === Planning ===
     plan: list[dict]  # Current plan: [{"playbook": "...", "params": {...}}]

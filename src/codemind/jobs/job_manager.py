@@ -32,6 +32,9 @@ class JobModel(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     repo_path: Mapped[str] = mapped_column(String, index=True)
+    repo_url: Mapped[str | None] = mapped_column(String, nullable=True)  # Git URL (if remote)
+    branch: Mapped[str] = mapped_column(String, default="main")
+    repo_id: Mapped[str | None] = mapped_column(String, nullable=True)  # Computed repo ID
     status: Mapped[JobStatus] = mapped_column(
         SQLEnum(JobStatus), default=JobStatus.PENDING, index=True
     )
@@ -53,12 +56,25 @@ class JobManager:
         self.db = Database(db_path)
         self.db.init_db()
 
-    def create_job(self, repo_path: str) -> str:
+    def create_job(
+        self,
+        repo_path: str,
+        repo_url: str | None = None,
+        branch: str = "main",
+        repo_id: str | None = None,
+    ) -> str:
         """Create new indexing job."""
         job_id = str(uuid.uuid4())
 
         with self.db.get_session() as session:
-            job = JobModel(id=job_id, repo_path=repo_path, status=JobStatus.PENDING)
+            job = JobModel(
+                id=job_id,
+                repo_path=repo_path,
+                repo_url=repo_url,
+                branch=branch,
+                repo_id=repo_id,
+                status=JobStatus.PENDING,
+            )
             session.add(job)
             session.commit()
 

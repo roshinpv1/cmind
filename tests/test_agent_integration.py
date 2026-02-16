@@ -18,11 +18,29 @@ Requires:
 """
 
 import asyncio
+import socket
 import sys
 import os
 import json
+import pytest
 from datetime import datetime
 from pathlib import Path
+
+
+def _llm_is_running() -> bool:
+    """Check if a local LLM server is reachable."""
+    try:
+        s = socket.create_connection(("localhost", 1234), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _llm_is_running(),
+    reason="LLM server not running on localhost:1234",
+)
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))

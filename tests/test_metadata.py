@@ -4,9 +4,15 @@ import os
 import shutil
 from pathlib import Path
 from datetime import datetime
+import pytest
 
 # Add src to path
 sys.path.append(os.path.join(os.getcwd(), "src"))
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("RUN_NETWORK_TESTS") != "1",
+    reason="Requires network access; set RUN_NETWORK_TESTS=1 to run",
+)
 
 from codemind.utils.git_utils import GitRepoManager
 

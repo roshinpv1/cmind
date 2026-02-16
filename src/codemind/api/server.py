@@ -10,14 +10,13 @@ load_dotenv()  # Load .env before anything reads os.environ
 from contextlib import asynccontextmanager
 
 from datetime import UTC, datetime
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from codemind.jobs import JobManager, JobStatus
 from codemind.llm.factory import get_llm_client
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
-from codemind.workflows import IndexingState, IndexingWorkflow
 
 
 # Request/Response models
@@ -90,22 +89,23 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources."""
-    from codemind.graph import KuzuGraphDB
+    from codemind.graph import SQLiteGraphAdapter
     from codemind.graph.graph_query import GraphQueryService
 
     # Initialize services
     app.state.manifest = ManifestManager()
     app.state.lance_storage = LanceDBStorage()
-    app.state.graph_db = KuzuGraphDB()  # Persistent Kùzu graph
-    app.state.graph_query = GraphQueryService(app.state.graph_db)  # Graph query service
     app.state.job_manager = JobManager()
-    app.state.workflow = IndexingWorkflow(
-        app.state.manifest, app.state.lance_storage, app.state.graph_db
-    )
+    
+    # Graph DB (SQLite Adapter) - Reuse connection from job_manager
+    app.state.graph_db = SQLiteGraphAdapter(app.state.job_manager.db)
+    app.state.graph_query = GraphQueryService(app.state.graph_db)  # Graph query service
 
     # Initialize agent services (existing doc generator)
     from . import agents as agents_module
-    agents_module.init_agent_services(app.state.lance_storage, app.state.graph_db, app.state.workflow.embedder)
+    from codemind.indexer.embedder import EmbeddingGenerator
+    app.state.embedder = EmbeddingGenerator()
+    agents_module.init_agent_services(app.state.lance_storage, app.state.graph_db, app.state.embedder)
     app.include_router(agents_module.router)
     print("[SERVER] ✅ Agent system initialized")
     
@@ -115,7 +115,9 @@ async def lifespan(app: FastAPI):
         app.state.lance_storage,
         app.state.graph_query,
         get_llm_client(),
-        app.state.workflow.embedder
+        app.state.embedder,
+        app.state.manifest,  # Pass manifest manager
+        app.state.job_manager.db # Pass DB instance
     )
     app.include_router(autonomous_router)
     print("[SERVER] ✅ Autonomous agent system initialized")
@@ -129,94 +131,50 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CodeMind API", version="0.1.0", lifespan=lifespan)
 
 
-def run_indexing_job(
-    job_id: str,
-    repo_path: str | None,
-    repo_url: str | None,
-    branch: str,
-    repo_id: str,
-):
-    """Background task to run indexing."""
-    from codemind.utils.git_utils import GitRepoManager
-
-    job_manager: JobManager = app.state.job_manager
-    workflow: IndexingWorkflow = app.state.workflow
-
-    try:
-        # Update job to running
-        job_manager.update_job(job_id, status=JobStatus.RUNNING, stage="starting")
-
-        # Handle git URL if provided
-        if repo_url:
-            import os
-            git_token = os.environ.get("GIT_ACCESS_TOKEN")
-            
-            git_manager = GitRepoManager()
-            local_path, computed_repo_id, _ = git_manager.ensure_repo(repo_url, branch, token=git_token)
-            actual_repo_path = str(local_path)
-            # Use the computed repo_id from GitRepoManager
-            actual_repo_id = computed_repo_id
-            
-            # Update job with actual path so get_status works correctly
-            job_manager.update_job(job_id, repo_path=actual_repo_path)
-        else:
-            actual_repo_path = repo_path
-            actual_repo_id = repo_id
-
-        # Create state
-        state = IndexingState(repo_path=actual_repo_path, repo_id=actual_repo_id, job_id=job_id)
-
-        # Run workflow
-        final_state = workflow.run(state)
-
-        # Update job based on result
-        if final_state.error:
-            job_manager.update_job(
-                job_id,
-                status=JobStatus.FAILED,
-                stage=final_state.stage,
-                error=final_state.error,
-            )
-        else:
-            job_manager.update_job(
-                job_id, status=JobStatus.COMPLETED, stage="completed", progress=100
-            )
-
-    except Exception as e:
-        job_manager.update_job(job_id, status=JobStatus.FAILED, error=str(e), progress=0)
-
-
 @app.post("/api/v1/index", response_model=IndexResponse)
-async def index_repository(request: IndexRequest, background_tasks: BackgroundTasks):
-    """Start indexing a repository (async)."""
+async def index_repository(request: IndexRequest):
+    """Start indexing a repository (queues a job for the worker)."""
     job_manager: JobManager = app.state.job_manager
     manifest: ManifestManager = app.state.manifest
 
     # Determine identifier for job tracking
     identifier = request.repo_url or request.repo_path
 
-    # Compute repo_id upfront
-    if request.repo_path:
-        repo_id = manifest._compute_repo_id(request.repo_path)
-    else:
-        # For Git URLs, use a temporary ID based on URL
-        # The actual repo_id will be determined after cloning
-        from codemind.utils.git_utils import GitRepoManager
+    # Try to find existing repo ID to ensure stability
+    repo_id = None
+    
+    if request.repo_url:
+        existing_repo = manifest.get_repository_by_url_and_branch(
+            request.repo_url, 
+            branch=request.branch or "main"
+        )
+        if existing_repo:
+            repo_id = existing_repo.repo_id
+            print(f"[SERVER] Found existing repo ID {repo_id} for URL {request.repo_url}")
 
-        git_manager = GitRepoManager()
-        repo_id = git_manager._get_repo_id(request.repo_url)
+    if not repo_id and request.repo_path:
+        existing_repo = manifest.get_repository(request.repo_path)
+        if existing_repo:
+            repo_id = existing_repo.repo_id
+            print(f"[SERVER] Found existing repo ID {repo_id} for path {request.repo_path}")
 
-    # Create job
-    job_id = job_manager.create_job(identifier)
+    # If still no ID, compute/generate one
+    if not repo_id:
+        if request.repo_path:
+            repo_id = manifest._compute_repo_id(request.repo_path)
+        else:
+            # For Git URLs, use a temporary ID based on URL
+            from codemind.utils.git_utils import GitRepoManager
+            git_manager = GitRepoManager()
+            repo_id = git_manager._get_repo_id(request.repo_url)
+        print(f"[SERVER] Generated new repo ID {repo_id}")
 
-    # Queue background task
-    background_tasks.add_task(
-        run_indexing_job,
-        job_id,
-        request.repo_path,
-        request.repo_url,
-        request.branch,
-        repo_id,
+    # Create job with all parameters — the worker will pick this up
+    job_id = job_manager.create_job(
+        repo_path=identifier,
+        repo_url=request.repo_url,
+        branch=request.branch,
+        repo_id=repo_id,
     )
 
     return IndexResponse(job_id=job_id, status="pending", repo_id=repo_id)
@@ -258,7 +216,7 @@ async def semantic_search(request: SearchRequest):
     """Perform semantic or hybrid search over code."""
     lance_storage: LanceDBStorage = app.state.lance_storage
     graph_query = app.state.graph_query
-    embedder = app.state.workflow.embedder
+    embedder = app.state.embedder
 
     # Generate query embedding with proper task prefix
     query_embedding = embedder.encode_query(request.query)
@@ -396,7 +354,7 @@ async def semantic_search(request: SearchRequest):
             chunk_text=r["chunk_text"],
             file_path=r["file_path"],
             start_line=r["start_line"],
-            score=r.get("_distance", 0.0),
+            score=1.0 - r.get("_distance", 1.0),
             context=context
         ))
 
@@ -406,8 +364,7 @@ async def semantic_search(request: SearchRequest):
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint with embedding model info."""
-    workflow: IndexingWorkflow = app.state.workflow
-    embedder = workflow.embedder
+    embedder = app.state.embedder
     
     return HealthResponse(
         status="healthy",
@@ -425,6 +382,7 @@ class RepoListItem(BaseModel):
     name: str | None = None
     branch: str | None = None
     path: str
+    repo_url: str | None = None  # New field
     status: str
     total_files: int
     last_indexed: str
@@ -468,6 +426,7 @@ async def list_repos():
             name=name or "unknown",
             branch=branch or "unknown",
             path=r.repo_path,
+            repo_url=r.repo_url,
             status="indexed",
             total_files=r.total_files_indexed,
             last_indexed=r.last_indexed_at.isoformat(),
@@ -590,7 +549,7 @@ async def create_catalog_entry(request: CatalogCreateRequest):
 
     manifest: ManifestManager = app.state.manifest
     lance_storage: LanceDBStorage = app.state.lance_storage
-    embedder = app.state.workflow.embedder
+    embedder = app.state.embedder
     
     # 1. Fetch Repository Metadata
     repo = manifest.get_repository_by_id(request.repo_id)
@@ -645,46 +604,87 @@ async def create_catalog_entry(request: CatalogCreateRequest):
     
     execution_result = result["outputs"].get("result", "")
     
-    # 3. Generate Embedding for the result content
-    # Note: Using encode_document for document content
-    embedding = embedder.encode_document(execution_result)
+    # 3. Retrieve the full content from SQLite
+    # The playbook's tool 'save_catalog_entry' has already persisted it to SQLite and LanceDB(chunks).
+    # We just need to fetch it to return it to the user.
     
-    # 4. Store in LanceDB
-    catalog_item = {
-        "catalog_id": str(uuid.uuid4()),
-        "repo_id": request.repo_id,
-        "repo_name": repo_metadata["name"],
-        "playbook_name": request.playbook_name,
-        "result": execution_result,
-        "metadata": json.dumps(repo_metadata),
-        "created_at": datetime.now(UTC),
-        "embedding": embedding
-    }
+    full_catalog_data = {}
+    catalog_status = "created"
     
-    lance_storage.store_catalog_item(catalog_item)
-    
+    # We can trust the tool saved it under request.repo_id
+    try:
+        from codemind.storage.database import CatalogStore
+        db = app.state.job_manager.db
+        if db:
+            with db.get_session() as session:
+                entry = session.query(CatalogStore).filter_by(repo_id=request.repo_id).first()
+                if entry:
+                    import json
+                    try:
+                        # Return the parsed JSON content
+                        full_content = json.loads(entry.content)
+                        full_catalog_data = full_content
+                        # Add timestamps
+                        full_catalog_data["created_at"] = entry.created_at
+                        full_catalog_data["updated_at"] = entry.updated_at
+                    except:
+                        full_catalog_data = {"raw_content": entry.content}
+                else:
+                    catalog_status = "tool_failed_no_entry"
+                    full_catalog_data = {"error": "Catalog entry not found in storage after playbook execution."}
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch catalog entry: {e}")
+        full_catalog_data = {"error": f"Failed to fetch entry: {str(e)}", "partial_result": execution_result}
+
     return {
-        "status": "created",
-        "catalog_id": catalog_item["catalog_id"],
-        "result": execution_result
+        "status": catalog_status,
+        "repo_id": request.repo_id,
+        "catalog_entry": full_catalog_data,
+        "llm_response": execution_result # Keep the original text response just in case
     }
 
 @app.get("/api/v1/catalogs/{repo_id}")
 async def get_catalog_entries(repo_id: str):
     """Get catalog entries for a repository."""
     manifest: ManifestManager = app.state.manifest
-    if not manifest.get_repository_by_id(repo_id):
-         raise HTTPException(status_code=404, detail=f"Repository {repo_id} not found")
+    try:
+        # We allow fetching even if not in manifest (it might be a detached repo)
+        # But good to validate if possible.
+        pass
+    except:
+        pass
 
-    lance_storage: LanceDBStorage = app.state.lance_storage
-    return lance_storage.get_catalog_items(repo_id=repo_id)
+    # Fetch from SQLite
+    try:
+        from codemind.storage.database import CatalogStore
+        db = app.state.job_manager.db
+        if db:
+            with db.get_session() as session:
+                entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+                if entry:
+                    import json
+                    try:
+                        content = json.loads(entry.content)
+                        # Inject timestamps
+                        content["created_at"] = entry.created_at
+                        content["updated_at"] = entry.updated_at
+                        # Return as a list because the endpoint name suggests plurality/LanceDB legacy
+                        return [content]
+                    except:
+                        # Fallback for raw text
+                        return [{"result": entry.content, "error": "Failed to parse JSON content"}]
+        
+        return []
+    except Exception as e:
+        print(f"[ERROR] Failed to get catalog entries: {e}")
+        return []
 
 
 @app.post("/api/v1/catalogs/search")
 async def search_catalog(request: CatalogSearchRequest):
     """Semantic search over catalog entries."""
     lance_storage: LanceDBStorage = app.state.lance_storage
-    embedder = app.state.workflow.embedder
+    embedder = app.state.embedder
     
     # Validate repo_id if provided
     if request.repo_id:

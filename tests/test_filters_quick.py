@@ -3,10 +3,28 @@
 Quick test to verify filter implementation.
 """
 
+import socket
 import requests
 import json
+import pytest
 
 BASE_URL = "http://localhost:8000"
+
+
+def _server_is_running() -> bool:
+    """Check if the API server is reachable."""
+    try:
+        s = socket.create_connection(("localhost", 8000), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_is_running(),
+    reason="API server not running on localhost:8000",
+)
 REPO_ID = "1dd450cb2ecd63a9"  # Update to your repo
 
 

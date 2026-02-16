@@ -19,18 +19,19 @@ from datetime import datetime
 router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
 
 # Global state
-# Global state
 planner_agent = None
 playbook_executor = None
 playbook_selector = None
+manifest_manager = None
 autonomous_jobs = {}
 
 
 class AutonomousRequest(BaseModel):
     """Request to execute autonomous agent."""
     goal: str = Field(..., description="Natural language goal", min_length=5)
-    repo_id: str = Field(..., description="Repository identifier")
+    repo_id: Optional[str] = Field(None, description="Repository identifier (optional for global search)")
     max_iterations: int = Field(10, description="Maximum iterations", ge=1, le=50)
+    allowed_playbooks: Optional[list[str]] = Field(None, description="Restrict agent to specific playbooks")
 
 
 class AutonomousJobResponse(BaseModel):
@@ -46,7 +47,6 @@ class AutonomousJobStatus(BaseModel):
     job_id: str
     status: str  # pending, running, completed, failed
     created_at: str
-    goal: str
     goal: str
     iterations: Optional[int] = None
     steps_taken: Optional[int] = None
@@ -80,29 +80,34 @@ class PlaybookResponse(BaseModel):
     logs: list[str] = []
 
 
-def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
+def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder, manifest_mgr=None, db=None):
     """
     Initialize autonomous agent system.
     
+    Args:
     Args:
         lance_storage: LanceDB storage instance
         graph_service: GraphQueryService instance
         llm_client: LLM client for generation
         embedder: Embedder for query encoding
+        manifest_mgr: ManifestManager instance (optional)
+        db: Database instance (optional)
     """
-    global planner_agent, playbook_executor, playbook_selector
+    global planner_agent, playbook_executor, playbook_selector, manifest_manager
     
     from ..playbooks import PlaybookRegistry, PlaybookExecutor, PlaybookTools
     from ..agents import PlannerAgent, PlaybookSelector
     
     print("[AUTONOMOUS] Initializing autonomous agent system...")
     
+    manifest_manager = manifest_mgr
+
     # Initialize playbook system
     registry = PlaybookRegistry()
     print(f"[AUTONOMOUS] ✓ Loaded {len(registry)} playbooks")
     
     # Initialize tools (only search_codebase now)
-    tools = PlaybookTools(lance_storage, graph_service, embedder)
+    tools = PlaybookTools(lance_storage, graph_service, embedder, db)
     
     # Initialize executor (now needs LLM for prompt-based execution)
     executor = PlaybookExecutor(registry, tools, llm_client)
@@ -118,7 +123,13 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder):
     print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
-async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iterations: int):
+async def run_autonomous_task(
+    job_id: str, 
+    goal: str, 
+    repo_id: Optional[str], 
+    max_iterations: int,
+    allowed_playbooks: Optional[list[str]] = None
+):
     """
     Background task for autonomous execution.
     Runs as a concurrent coroutine via asyncio.create_task().
@@ -138,7 +149,7 @@ async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iteratio
             # Construct a simple log for now (can be richer later)
             logs = []
             for t in thoughts:
-                logs.append(f"Thinking: {t[:100]}...")
+                logs.append(f"Thinking: {t[:500]}...")
             
             for i, action in enumerate(actions):
                 name = action.get("playbook") or action.get("tool")
@@ -153,7 +164,8 @@ async def run_autonomous_task(job_id: str, goal: str, repo_id: str, max_iteratio
             goal, 
             repo_id, 
             max_iterations, 
-            on_update=update_job_state
+            on_update=update_job_state,
+            allowed_playbooks=allowed_playbooks
         )
         
         # Update job with result
@@ -203,7 +215,8 @@ async def execute_autonomous(request: AutonomousRequest):
             job_id=job_id,
             goal=request.goal,
             repo_id=request.repo_id,
-            max_iterations=request.max_iterations
+            max_iterations=request.max_iterations,
+            allowed_playbooks=request.allowed_playbooks
         )
     )
     
@@ -225,9 +238,6 @@ async def get_autonomous_status(job_id: str):
     
     return AutonomousJobStatus(
         job_id=job_id,
-        status=job["status"],
-        created_at=job["created_at"],
-        goal=job["goal"],
         status=job["status"],
         created_at=job["created_at"],
         goal=job["goal"],
@@ -303,14 +313,36 @@ async def execute_playbook(request: PlaybookRequest):
         if playbook_def and playbook_def.default_prompt:
              prompt = playbook_def.default_prompt
         else:
-             raise HTTPException(status_code=400, detail="Prompt is required (no default found for playbook)")
+             # If no prompt and no default, we proceed with empty prompt as requested
+             prompt = ""
+
+    # Fetch Repository Metadata if available
+    repo_metadata = {}
+    if request.repo_id and manifest_manager:
+        repo = manifest_manager.get_repository_by_id(request.repo_id)
+        if repo:
+            repo_metadata = {
+                "repo_id": repo.repo_id,
+                "name": repo.repo_path.split("/")[-2] if len(repo.repo_path.split("/")) > 2 else "unknown",
+                "path": repo.repo_path,
+                "first_author": repo.first_author,
+                "total_commits": repo.total_commits,
+                "last_pr_title": repo.last_pr_title,
+                "last_pr_user": repo.last_pr_user,
+                "last_pr_merged_at": repo.last_pr_merged_at,
+                "last_indexed": repo.last_indexed_at.isoformat(),
+                "repo_url": repo.repo_url,
+                "branch": repo.branch
+            }
 
     # Construct input for the playbook
     # We map 'prompt' to both 'query' and 'goal' to cover different playbook expectations
+    # And inject context for tools to pick up
     user_input = {
         "query": prompt,
         "goal": prompt,
-        "repo_id": request.repo_id
+        "repo_id": request.repo_id,
+        "context": repo_metadata
     }
     
     # Execute

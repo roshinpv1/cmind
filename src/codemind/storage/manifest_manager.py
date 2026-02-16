@@ -70,9 +70,36 @@ class ManifestManager:
         with self.db.get_session() as session:
             return session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
 
+    def get_repository_by_url_and_branch(
+        self, 
+        repo_url: str, 
+        branch: str = "main"
+    ) -> RepositoryManifest | None:
+        """
+        Get repository manifest by URL and branch.
+
+        Args:
+            repo_url: Repository URL
+            branch: Repository branch
+
+        Returns:
+            Repository manifest or None if not found
+        """
+        with self.db.get_session() as session:
+            # Note: We filter by repo_url and branch
+            return (
+                session.query(RepositoryManifest)
+                .filter(RepositoryManifest.repo_url == repo_url)
+                .filter(RepositoryManifest.branch == branch)
+                .first()
+            )
+
     def create_repository(
         self,
         repo_path: str,
+        repo_id: str | None = None,
+        repo_url: str | None = None,
+        branch: str = "main",  # Added branch
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_version: int = 1,
     ) -> RepositoryManifest:
@@ -81,28 +108,32 @@ class ManifestManager:
 
         Args:
             repo_path: Path to repository
+            repo_id: Optional explicit repository ID (if not provided, computed from path)
+            repo_url: Optional repository URL
+            branch: Optional branch name
             embedding_model: Name of embedding model
             embedding_version: Version of embeddings
 
         Returns:
             Created repository manifest
         """
-        repo_id = self._compute_repo_id(repo_path)
+        if not repo_id:
+            repo_id = self._compute_repo_id(repo_path)
+        
         abs_path = str(Path(repo_path).resolve())
 
         with self.db.get_session() as session:
             repo = RepositoryManifest(
                 repo_path=abs_path,
                 repo_id=repo_id,
+                repo_url=repo_url,
+                branch=branch,
                 last_indexed_at=datetime.now(UTC),
                 embedding_model=embedding_model,
                 embedding_version=embedding_version,
             )
             session.add(repo)
             session.commit()
-            session.refresh(repo)
-            return repo
-
             session.refresh(repo)
             return repo
 
@@ -119,8 +150,10 @@ class ManifestManager:
     def update_repository(
         self,
         repo_id: str,
+        repo_url: str | None = None,
+        branch: str | None = None,  # Added branch
         last_commit_hash: str | None = None,
-                total_files: int | None = None,
+        total_files: int | None = None,
         embedding_version: int | None = None,
         # New metadata fields
         metadata: dict | None = None,
@@ -130,6 +163,8 @@ class ManifestManager:
 
         Args:
             repo_id: Repository ID
+            repo_url: Repository URL
+            branch: Repository branch
             last_commit_hash: Latest Git commit hash
             total_files: Total number of indexed files
             embedding_version: Embedding version
@@ -144,6 +179,10 @@ class ManifestManager:
             if not repo:
                 return None
 
+            if repo_url is not None:
+                repo.repo_url = repo_url
+            if branch is not None:
+                repo.branch = branch
             if last_commit_hash is not None:
                 repo.last_commit_hash = last_commit_hash
             if total_files is not None:

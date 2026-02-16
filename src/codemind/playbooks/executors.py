@@ -176,7 +176,7 @@ class PlaybookExecutor:
             }
         
         except Exception as e:
-            print(f"[EXECUTOR] Playbook execution failed: {e}")
+            print(f"[EXECUTOR] Playbook execution failed: {e}", flush=True)
             traceback.print_exc()
             return {
                 "success": False,
@@ -194,16 +194,18 @@ class PlaybookExecutor:
         """
         graph = StateGraph(PlaybookExecutionState)
         
-        # Node 1: Search for code
+            # Node 1: Search for code
         async def search_code(state: PlaybookExecutionState):
             """
             Search for code using playbook's search strategy.
-            Handles both simple queries and phased search strategies.
+            Handles both simple queries and phases.
             """
-            state["logs"].append(f"Searching code for: {playbook.name}")
+            state["logs"].append(f"Running playbook: {playbook.name}")
+
             strategy = playbook.search_strategy
             user_input = state["user_input"]
             repo_id = user_input.get("repo_id")
+            print(f"[EXECUTOR] Playbook '{playbook.name}' - search params: repo_id={repo_id}")
             
             # Extract queries - support both direct queries and phases
             queries = []
@@ -233,15 +235,15 @@ class PlaybookExecutor:
             search_params = {
                 "queries": queries,
                 "repo_id": repo_id,
-                "limit": getattr(strategy, 'limit', 10),
+                "limit": getattr(strategy, "limit", 100 if playbook.name == "code_analyzer" else 10),
                 "mode": getattr(strategy, 'mode', 'semantic'),
                 "file_types": getattr(strategy, 'file_types', []),
                 "graph_filters": getattr(strategy, 'graph_filters', {}),
                 "min_score": getattr(strategy, 'min_score', 0.0)
             }
             
-            state["logs"].append(f"  Extracted {len(queries)} queries from search strategy")
-            state["logs"].append(f"  Search mode: {search_params['mode']}, limit: {search_params['limit']}")
+            state["logs"].append(f"  Extracted {len(queries)} queries: {queries}")
+            state["logs"].append(f"  Search mode: {search_params['mode']}, limit: {search_params['limit']}, min_score: {search_params['min_score']}")
             
             try:
                 result = await self.tools.search_codebase(search_params)
@@ -265,7 +267,7 @@ class PlaybookExecutor:
             
             return state
         
-        # Node 2: LLM generates output
+            # Node 2: LLM generates output
         async def llm_generate(state: PlaybookExecutionState):
             """
             Generate output using LLM with system/user message split.
@@ -304,11 +306,74 @@ class PlaybookExecutor:
                 if total_tokens <= MAX_CONTEXT:
                     code_context = format_code_chunks_for_llm(code_chunks, max_tokens=code_context_tokens)
                     
+                    prompt_suffix = "Generate your output based on the instructions and code:"
+                    
+                    # Force JSON for catalog_generator
+                    # Force JSON for catalog_generator and catalog_search
+
+                    if playbook.name == "catalog_generator":
+                        prompt_suffix += "\n\nIMPORTANT: You MUST output a JSON block invoking 'save_catalog_entry'. Do not output any other text."
+                    elif playbook.name == "catalog_search":
+                        schema_hint = """
+{
+  "requirement_summary": "string",
+  "capabilities": {"functional": [], "non_functional": []},
+  "decomposition": {"core_modules": [], "supporting_modules": [], "cross_cutting": []},
+  "catalog_matches": [{
+    "capability": "string",
+    "component_name": "string",
+    "match_type": "Full Match | Partial Match | No Match",
+    "confidence_score": 0-100,
+    "reasoning": "string",
+    "catalog_entry": {
+      "repo_name": "string",
+      "repo_url": "string",
+      "description": "string",
+      "topics": [],
+      "tech_stack": "string",
+      "architecture": "string",
+      "category": "string",
+      "quality_score": 0-100,
+      "pros": [],
+      "cons": []
+    }
+  }],
+  "architecture_composition": "string",
+  "gaps": [],
+  "risks": [],
+  "overall_confidence_score": 0-100
+}
+"""
+                        prompt_suffix += (
+                            f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object matching the following schema exactly:\n{schema_hint}\n"
+                            "Wrap it in a markdown code block (```json ... ```).\n"
+                            "Do NOT use keys 'project' or 'recommendation'.\n"
+                            "IMPORTANT: Do NOT generate a generic project plan. If NO catalog matches found, return empty 'catalog_matches' list in the JSON.\n"
+                            "IMPORTANT: Each match in `catalog_matches` MUST include `capability`, `match_type`, `confidence_score` and `reasoning`, NOT JUST `catalog_entry`.\n"
+                            "CRITICAL: The `catalog_entry` data MUST come ONLY from the RETRIEVED CODE context above. "
+                            "Copy the actual repo_name, repo_url, description, architecture, tech_stack, topics, category, quality_score, pros, and cons from each CATALOG ENTRY in the context. "
+                            "Do NOT invent or hallucinate component names, URLs, or details. If a field is not in the context, set it to empty string or empty list."
+                        )
+                    elif playbook.name == "code_analyzer":
+                        schema_hint = """
+{
+  "summary": "string",
+  "analysis": "string",
+  "key_insights": [],
+  "strategic_implications": [],
+  "suggestions": []
+}
+"""
+                        prompt_suffix += f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object matching the following schema exactly:\n{schema_hint}\n\nWrap it in a markdown code block (```json ... ```)."
+
+
                     user_msg = (
                         "USER REQUEST:\n" + user_goal + "\n\n"
                         "RETRIEVED CODE:\n" + code_context + "\n\n"
-                        "Generate your output based on the instructions and code:"
+                        + prompt_suffix
                     )
+                    # print(f"[EXECUTOR] Full User Message:\n{user_msg}")
+                    # print(f"[DEBUG] User Msg: {user_msg[:500]}...")
                     
                     output = await self.llm.generate(
                         user_msg,
@@ -372,16 +437,154 @@ class PlaybookExecutor:
             
             return state
         
-        # Node 3: Format output
+        # Node 3: Format output & Execute Tools
         async def format_output(state: PlaybookExecutionState):
-            """Format LLM output into structured result."""
+            """Format LLM output and execute any embedded tool calls."""
             if state["error"]:
                 return state
             
-            state["logs"] = [f"Success: {playbook.name}"]
+            output_text = state["llm_output"]
+            
+            # Check for JSON tool call block
+            import re
+            import json
+            
+            tool_executed = False
+            tool_result = None
+            
+            # Pattern to extract JSON block: ```json ... ``` or just {...}
+            # We look for the specific structure: "tool": "name"
+            try:
+                # Find JSON block
+                json_match = re.search(r'```json\s*({.*?})\s*```', output_text, re.DOTALL)
+                if not json_match:
+                     # Try finding raw JSON object if no markdown code block
+                     # We accept any object starting with { and having "tool" or "description" (for loose params)
+                     json_match = re.search(r'({[\s\S]*})', output_text)
+
+                if json_match:
+                    json_str = json_match.group(1)
+                    # Use a library to find the first valid json object if simple regex captures too much
+                    # But for now assume regex is okay. 
+                    # Actually regex '({[\s\S]*})' is greedy. 
+                    
+                    try:
+                        data = json.loads(json_str)
+                        
+                        # Fix for catalog_search structure issues:
+                        # If catalog_matches elements are missing wrapper fields but have catalog_entry, wrap them.
+                        if playbook.name == "catalog_search" and "catalog_matches" in data:
+                            matches = data["catalog_matches"]
+                            fixed_matches = []
+                            for m in matches:
+                                if "catalog_entry" in m and "match_type" not in m:
+                                    # Malformed: missing wrapper fields. detailed in issue #75
+                                    fixed_match = {
+                                        "capability": "inferred from catalog",
+                                        "component_name": m["catalog_entry"].get("repo_name", "Unknown"),
+                                        "match_type": "Partial Match", # Defaulting to partial
+                                        "confidence_score": 0, # Default to 0 if missing
+                                        "reasoning": "Result structure was malformed by LLM; inferred from catalog entry.",
+                                        "catalog_entry": m["catalog_entry"]
+                                    }
+                                    # Attempt to extract fields if they exist in the flat structure
+                                    for k in ["capability", "component_name", "match_type", "confidence_score", "reasoning"]:
+                                        if k in m:
+                                            fixed_match[k] = m[k]
+                                            
+                                    fixed_matches.append(fixed_match)
+                                else:
+                                    fixed_matches.append(m)
+                            data["catalog_matches"] = fixed_matches
+
+                        parsed_data = data # Capture for output
+                        
+                        # Case 1: Standard Wrapper
+                        if "tool" in data and "params" in data:
+                            tool_name = data["tool"]
+                            params = data["params"]
+                        # Case 2: Loose Params (Model skipped wrapper) - Only for catalog_generator
+                        elif playbook.name == "catalog_generator" and (
+                            "description" in data or "summary_detailed" in data
+                            or "purpose" in data or "name" in data
+                        ):
+                            # Assume save_catalog_entry if we see catalog fields (flat or nested)
+                            tool_name = "save_catalog_entry"
+                            params = data
+                        else:
+                            tool_name = None
+                            params = None
+
+                        if tool_name:
+                            # Execute tool
+                            if tool_name == "save_catalog_entry":
+                                state["logs"].append(f"Executing tool: {tool_name}")
+                                
+                                # inject repo_id if missing or template
+                                if params.get("repo_id") == "{{repo_id}}" or not params.get("repo_id"):
+                                    params["repo_id"] = state["user_input"].get("repo_id")
+                                
+                                # Inject metadata from context if available
+                                context = state["user_input"].get("context", {})
+                                if context:
+                                    # Fields to inject if missing or template or empty
+                                    fields_to_inject = ["repo_name", "repo_url", "branch"]
+                                    for field in fields_to_inject:
+                                        # Map 'name' from context to 'repo_name' in params
+                                        ctx_key = "name" if field == "repo_name" else field
+                                        
+                                        if not params.get(field) or params.get(field) == "{{" + field + "}}":
+                                            if ctx_key in context:
+                                                params[field] = context[ctx_key]
+                                    
+                                    # Also inject rich metadata into the 'metadata' JSON string if possible
+                                    # The tool expects 'metadata' as a string or dict. 
+                                    # If it's a string, we parse, update, stringify.
+                                    # If it's a dict, we update.
+                                    meta_param = params.get("metadata", {})
+                                    if isinstance(meta_param, str):
+                                        try:
+                                            meta_dict = json.loads(meta_param)
+                                        except:
+                                            meta_dict = {}
+                                    else:
+                                        meta_dict = meta_param
+                                    
+                                    # Merge context into metadata
+                                    for k, v in context.items():
+                                        if k not in meta_dict:
+                                            meta_dict[k] = v
+                                    
+                                    params["metadata"] = json.dumps(meta_dict)
+
+                                tool_result = await self.tools.save_catalog_entry(params)
+                                state["logs"].append(f"Tool result: {tool_result}")
+                                tool_executed = True
+                                
+                                # Clean up result text to be user friendly
+                                output_text = f"Catalog entry generated and saved for {params.get('repo_name', params['repo_id'])}."
+                            else:
+                                state["logs"].append(f"Unknown tool: {tool_name}")
+                                
+                    except json.JSONDecodeError:
+                        state["logs"].append("Failed to decode JSON tool block")
+            except Exception as e:
+                state["logs"].append(f"Tool execution failed: {e}")
+                traceback.print_exc()
+
+            state["logs"].append(f"Success: {playbook.name}")
+            
+            # If we parsed valid JSON but didn't execute a tool (e.g. catalog_search report),
+            # ensure the output result is the clean JSON string.
+            if not tool_executed and 'parsed_data' in locals() and parsed_data:
+                import json
+                output_text = json.dumps(parsed_data)
             
             state["outputs"] = {
-                "result": state["llm_output"],
+                "result": output_text,
+                "data": parsed_data if 'parsed_data' in locals() else None,  # Store structured JSON
+                "tool_executed": tool_executed,
+                "tool_result": tool_result,
                 "code_chunks_used": len(state["code_chunks"]),
                 "playbook": playbook.name
             }

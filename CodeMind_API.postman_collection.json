@@ -2,7 +2,7 @@
     "info": {
         "_postman_id": "codemind-api-collection",
         "name": "CodeMind API",
-        "description": "CodeMind v2 — AI-Powered Code Intelligence Platform with Autonomous Agents\n\nFeatures:\n- Repository indexing (local path + Git URL)\n- Semantic & hybrid code search\n- Autonomous LangGraph agents with skill-based reasoning\n- Kùzu graph queries (callers, callees, dependencies)\n- Catalogs for high-level repository documentation\n- System health & stats",
+        "description": "CodeMind v2 — AI-Powered Code Intelligence Platform\n\nArchitecture:\n- API Server: handles search, agents, graph queries, job queuing\n- Indexing Worker: standalone process that polls for pending jobs and executes indexing\n- MCP Server: exposes tools via Model Context Protocol for Claude Desktop / Cursor\n\nFeatures:\n- Repository indexing (local path + Git URL) via job queue\n- Semantic & hybrid code search\n- Autonomous LangGraph agents with playbook-based reasoning\n- SQLite graph queries (callers, callees, dependencies)\n- Catalogs for high-level repository documentation\n- System health & stats",
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
@@ -19,7 +19,7 @@
         {
             "key": "job_id",
             "value": "",
-            "description": "Job ID from indexing or agent execution"
+            "description": "Job ID from indexing"
         },
         {
             "key": "agent_job_id",
@@ -30,7 +30,7 @@
     "item": [
         {
             "name": "1. Indexing",
-            "description": "Index repositories from local folders or Git URLs. Returns a job_id for tracking.",
+            "description": "Index repositories from local folders or Git URLs.\n\nThe API queues a job and returns immediately. The standalone Indexing Worker picks up pending jobs and executes them.\n\nRun the worker: `python -m codemind.worker.index_worker`",
             "item": [
                 {
                     "name": "Index Local Folder",
@@ -74,7 +74,7 @@
                                 "index"
                             ]
                         },
-                        "description": "Index a local folder. The repo_path must be an absolute path to an existing directory.\n\nReturns job_id and repo_id. Use job_id to poll status."
+                        "description": "Queue indexing for a local folder. The repo_path must be an absolute path to an existing directory.\n\nReturns job_id and repo_id immediately. The Indexing Worker will pick up this job.\nUse 'Get Job Status' to poll progress."
                     }
                 },
                 {
@@ -119,7 +119,7 @@
                                 "index"
                             ]
                         },
-                        "description": "Index a Git repository by URL. The repo will be cloned locally.\n\nSupported: GitHub, GitLab, Bitbucket, or any Git URL.\nDefault branch: main"
+                        "description": "Queue indexing for a Git repository by URL. The Worker will clone the repo locally.\n\nSupported: GitHub, GitLab, Bitbucket, or any Git URL.\nDefault branch: main"
                     }
                 },
                 {
@@ -137,7 +137,7 @@
                                 "repos"
                             ]
                         },
-                        "description": "List all indexed repositories with metadata (status, file count, last indexed, commit info)."
+                        "description": "List all indexed repositories with metadata.\n\nResponse includes: repo_id, name, branch, path, repo_url, status, total_files, last_indexed, first_author, total_commits, last_pr_title, last_pr_user, last_pr_merged_at"
                     }
                 },
                 {
@@ -156,7 +156,7 @@
                                 "{{job_id}}"
                             ]
                         },
-                        "description": "Poll indexing job status.\n\nPossible statuses: pending, running, completed, failed\nIncludes: stage, progress (0-100), error (if failed), repo_id"
+                        "description": "Poll indexing job status.\n\nStatuses:\n- pending: queued, waiting for the Indexing Worker to pick up\n- running: Worker is actively indexing\n- completed: indexing finished successfully\n- failed: indexing failed (see error field)\n\nIncludes: stage, progress (0-100), error (if failed), repo_id"
                     }
                 }
             ]
@@ -190,7 +190,7 @@
                                 "search"
                             ]
                         },
-                        "description": "Pure semantic search using BAAI/bge-base-en-v1.5 (768d vectors).\n\nReturns: chunk_text, file_path, start_line, score, context (classes/functions)"
+                        "description": "Pure semantic search using embedding vectors.\n\nReturns: chunk_text, file_path, start_line, score (0-1, higher is better), context (classes/functions)"
                     }
                 },
                 {
@@ -205,7 +205,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"query\": \"API endpoints\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"hybrid\",\n  \"filters\": {\n    \"file_type\": \".py\",\n    \"file_patterns\": [\"api\", \"routes\"]\n  },\n  \"limit\": 10\n}"
+                            "raw": "{\n  \"query\": \"API endpoints\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"hybrid\",\n  \"filters\": {\n    \"file_types\": [\".py\"],\n    \"file_patterns\": [\"api\", \"routes\"],\n    \"exclude_patterns\": [\"test_\"]\n  },\n  \"limit\": 10\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/search",
@@ -218,7 +218,35 @@
                                 "search"
                             ]
                         },
-                        "description": "Hybrid search combining semantic vectors with graph-based structural filters.\n\nAvailable filters:\n- file_type: filter by extension (.py, .ts, .java, etc.)\n- file_patterns: filter by path patterns\n- class_name: filter by class\n- exclude_patterns: exclude paths matching patterns"
+                        "description": "Hybrid search combining semantic vectors with structural filters.\n\nAvailable filters:\n- file_types: list of extensions [\".py\", \".ts\"]\n- file_patterns: filter by path patterns\n- class_names: filter by class names\n- exclude_patterns: exclude paths matching patterns"
+                    }
+                },
+                {
+                    "name": "Structural Search",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"query\": \"graph related code\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"structural\",\n  \"filters\": {\n    \"file_types\": [\".py\"],\n    \"class_names\": [\"SQLiteGraphAdapter\"]\n  },\n  \"limit\": 5\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "search"
+                            ]
+                        },
+                        "description": "Pure structural search — graph-only, no semantic matching.\n\nReturns files matching the structural filters without vector similarity."
                     }
                 },
                 {
@@ -253,10 +281,10 @@
         },
         {
             "name": "3. Autonomous Agent",
-            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with 7 tools and playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
+            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
             "item": [
                 {
-                    "name": "Start Agent - Generate Architecture",
+                    "name": "Execute Agent - Architecture Analysis",
                     "event": [
                         {
                             "listen": "test",
@@ -297,11 +325,11 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects a high-level skill (code_analyzer) or tools (search, graph queries)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously (non-blocking)\n\nmax_iterations: caps the planner loop (default: 10)"
+                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects the best playbook (e.g. code_analyzer)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously\n\nmax_iterations: caps the planner loop (default: 10)\nallowed_playbooks: restrict to specific playbooks (null = all)"
                     }
                 },
                 {
-                    "name": "Start Agent - Generate Documentation",
+                    "name": "Execute Agent - Documentation",
                     "event": [
                         {
                             "listen": "test",
@@ -342,11 +370,11 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the 'code_analyzer' skill to analyze the codebase and produce structured output."
+                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the code_analyzer playbook to analyze the codebase and produce structured output."
                     }
                 },
                 {
-                    "name": "Start Agent - Answer Question",
+                    "name": "Execute Agent - Code Question",
                     "event": [
                         {
                             "listen": "test",
@@ -387,11 +415,11 @@
                                 "autonomous"
                             ]
                         },
-                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use the 'code_analyzer' skill, graph tools, and search to reason through the answer."
+                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use search tools, graph queries, and playbooks to reason through the answer."
                     }
                 },
                 {
-                    "name": "Start Agent - Find Dead Code",
+                    "name": "Execute Agent - Dead Code Finder",
                     "event": [
                         {
                             "listen": "test",
@@ -436,7 +464,23 @@
                     }
                 },
                 {
-                    "name": "Execute Playbook (Auto)",
+                    "name": "Execute Agent - Restricted Playbooks",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "exec": [
+                                    "var jsonData = pm.response.json();",
+                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
+                                    "pm.test('Agent started', function () {",
+                                    "    pm.response.to.have.status(200);",
+                                    "    pm.expect(jsonData.status).to.eql('pending');",
+                                    "});"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
                     "request": {
                         "method": "POST",
                         "header": [
@@ -447,10 +491,10 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"prompt\": \"Explain how the authentication middleware works\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                            "raw": "{\n  \"goal\": \"Search the catalog for microservices patterns\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 5,\n  \"allowed_playbooks\": [\"catalog_browser\"]\n}"
                         },
                         "url": {
-                            "raw": "{{base_url}}/api/v1/agents/playbook",
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
                             "host": [
                                 "{{base_url}}"
                             ],
@@ -458,39 +502,10 @@
                                 "api",
                                 "v1",
                                 "agents",
-                                "playbook"
+                                "autonomous"
                             ]
                         },
-                        "description": "Smart playbook execution. The system automatically selects the best playbook (e.g. code_analyzer) based on your prompt."
-                    }
-                },
-                {
-                    "name": "Execute Playbook (Explicit)",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"playbook_name\": \"code_analyzer\",\n  \"prompt\": \"Deep dive into the auth logic\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/playbook",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "playbook"
-                            ]
-                        },
-                        "description": "Directly execute a specific playbook by name."
+                        "description": "Start an agent restricted to specific playbooks.\n\nallowed_playbooks constrains the agent to only use the listed playbooks.\nAvailable: code_analyzer, catalog_generator, catalog_search, catalog_browser"
                     }
                 },
                 {
@@ -539,7 +554,7 @@
         },
         {
             "name": "4. Graph Queries",
-            "description": "Query the Kùzu code knowledge graph for structural relationships: files, classes, functions, symbols, callers, callees, and dependencies.",
+            "description": "Query the SQLite code knowledge graph for structural relationships: files, classes, functions, symbols, callers, callees, and dependencies.",
             "item": [
                 {
                     "name": "Find Files by Pattern",
@@ -732,7 +747,7 @@
         },
         {
             "name": "6. Catalogs",
-            "description": "Manage repository catalogs (high-level documentation and summaries generated by playbooks).",
+            "description": "Manage repository catalogs — high-level documentation and summaries generated by playbooks.\n\nDual-store: full content in SQLite, chunked embeddings in LanceDB for semantic search.",
             "item": [
                 {
                     "name": "Create Catalog Entry",
@@ -746,7 +761,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"playbook_name\": \"code_analyzer\",\n  \"prompt\": \"Analyze only the security module\"\n}"
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"playbook_name\": \"catalog_generator\",\n  \"prompt\": \"Generate a comprehensive architectural overview\"\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/catalogs",
@@ -759,7 +774,7 @@
                                 "catalogs"
                             ]
                         },
-                        "description": "Trigger a playbook to generate a catalog entry (summary) for a repository."
+                        "description": "Trigger a playbook to generate a catalog entry for a repository.\n\nAvailable playbooks: catalog_generator, code_analyzer"
                     }
                 },
                 {
@@ -778,7 +793,7 @@
                                 "{{repo_id}}"
                             ]
                         },
-                        "description": "Retrieve all catalog entries for a specific repository."
+                        "description": "Retrieve full catalog content for a specific repository.\n\nReturns the complete auto-generated summary stored in SQLite (not the chunked vectors)."
                     }
                 },
                 {
@@ -793,7 +808,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"query\": \"authentication system\",\n  \"limit\": 5\n}"
+                            "raw": "{\n  \"query\": \"authentication system\",\n  \"limit\": 5,\n  \"min_score\": 0.8\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/catalogs/search",
@@ -807,7 +822,36 @@
                                 "search"
                             ]
                         },
-                        "description": "Semantic search across all catalog entries (cross-repository search)."
+                        "description": "Semantic search across all catalog entries (cross-repository search).\n\nSearches chunked catalog embeddings in LanceDB and filters by min_score."
+                    }
+                },
+                {
+                    "name": "Search Catalogs (Scoped to Repo)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"query\": \"API design patterns\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"limit\": 5,\n  \"min_score\": 0.7\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "search"
+                            ]
+                        },
+                        "description": "Semantic search within a specific repository's catalog entries."
                     }
                 }
             ]

@@ -5,7 +5,7 @@ from ..llm.agents import LangGraphDocAgent
 from ..llm.factory import get_llm_client
 from ..storage.lancedb_storage import LanceDBStorage
 from ..graph.graph_query import GraphQueryService
-from ..graph.kuzu_graph import KuzuGraphDB
+from ..graph.graph_db import SQLiteGraphAdapter
 import uuid
 from datetime import datetime
 
@@ -40,11 +40,11 @@ class AgentResultResponse(BaseModel):
     error: Optional[str] = None
 
 
-def init_agent_services(lance: LanceDBStorage, kuzu: KuzuGraphDB, embedder=None):
+def init_agent_services(lance: LanceDBStorage, graph_db: SQLiteGraphAdapter, embedder=None):
     """Initialize services for agents."""
     global lance_storage, graph_service, agent_embedder
     lance_storage = lance
-    graph_service = GraphQueryService(kuzu)
+    graph_service = GraphQueryService(graph_db)
     agent_embedder = embedder
 
 

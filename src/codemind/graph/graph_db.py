@@ -1,13 +1,17 @@
 """
-Graph database integration for code relationships.
+Graph database adapter for SQLite.
 
-Uses Kùzu embedded graph database for persistent storage.
+Replaces the previous KuzuDB implementation with a lightweight, concurrent
+SQLite-based graph storage using Recursive CTEs for queries.
 """
 
-from dataclasses import dataclass
 from typing import Any
+from dataclasses import dataclass
 
-from .kuzu_graph import KuzuGraphDB
+from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.orm import Session
+
+from codemind.storage.database import Database, GraphEdge, GraphNode
 
 
 @dataclass
@@ -30,7 +34,7 @@ class Edge:
 
 
 class GraphDB:
-    """Simple in-memory graph database (legacy - use KuzuGraphDB instead)."""
+    """Simple in-memory graph database (legacy)."""
 
     def __init__(self):
         """Initialize graph."""
@@ -77,182 +81,170 @@ class GraphDB:
         self.edges.clear()
 
 
-class GraphBuilder:
-    """Builds code graph from AST and imports."""
+class SQLiteGraphAdapter:
+    """Adapter for graph operations on SQLite."""
 
-    def __init__(self, graph_db: KuzuGraphDB | GraphDB):
-        """Initialize builder."""
-        self.graph = graph_db
-        self.is_kuzu = isinstance(graph_db, KuzuGraphDB)
+    def __init__(self, db: Database | None = None):
+        """Initialize adapter."""
+        self.db = db or Database()
 
-    def build_repository_node(self, repo_id: str, repo_path: str) -> None:
-        """Create or update repository node."""
-        print(f"[KUZU] Creating repository node: {repo_id}")
-        if self.is_kuzu:
-            self.graph.add_repository(repo_id, repo_path)
-        else:
-            node = Node(
-                id=f"repo:{repo_id}",
-                type="Repository",
-                properties={"path": repo_path, "repo_id": repo_id},
+    def _upsert_node(self, node_id: str, node_type: str, repo_id: str, 
+                     name: str, file_path: str, properties: dict | None = None,
+                     start_line: int = 0, end_line: int = 0):
+        """Insert or update a node."""
+        with self.db.get_session() as session:
+            stmt = insert(GraphNode).values(
+                id=node_id,
+                type=node_type,
+                repo_id=repo_id,
+                name=name,
+                file_path=file_path,
+                properties=properties,
+                start_line=start_line,
+                end_line=end_line,
             )
-            self.graph.add_node(node)
-        print(f"[KUZU] ✅ Repository node created")
-
-    def build_file_node(self, repo_id: str, file_path: str, relative_path: str) -> None:
-        """Build file node and extract structure."""
-        print(f"[KUZU] Building file node: {relative_path}")
-        
-        # Create file node
-        if self.is_kuzu:
-            self.graph.add_file(repo_id, file_path)
-            print(f"[KUZU] Created file node for: {relative_path}")
-        else:
-            file_id = f"file:{repo_id}:{file_path}"
-            node = Node(
-                id=file_id,
-                type="File",
-                properties={"path": file_path, "repo_id": repo_id},
-            )
-            self.graph.add_node(node)
-
-            # Link to repository
-            edge = Edge(
-                from_id=f"repo:{repo_id}",
-                to_id=file_id,
-                type="CONTAINS",
-                properties={},
-            )
-            self.graph.add_edge(edge)
-            print(f"[KUZU] Created file node: {file_id}")
-
-        # The following AST extraction logic is not part of the original GraphBuilder and would require
-        # an ast_extractor to be initialized. For now, it's commented out to maintain
-        # syntactic correctness and avoid introducing undeclared dependencies.
-        # If this functionality is intended, the GraphBuilder's __init__ method
-        # and potentially other helper methods would need to be updated.
-
-        # # Extract AST structure
-        # try:
-        #     structure = self.ast_extractor.extract(file_path)
-            
-        #     # Create class nodes
-        #     classes_created = 0
-        #     for cls in structure.get("classes", []):
-        #         class_id = f"{file_id}:{cls['name']}"
-        #         self.create_class_node(
-        #             repo_id, class_id, cls["name"], cls.get("docstring")
-        #         )
-        #         self.create_relationship(file_id, "DECLARES_CLASS", class_id)
-        #         classes_created += 1
-
-        #         # Create method nodes
-        #         methods_created = 0
-        #         for method in cls.get("methods", []):
-        #             method_id = f"{class_id}:{method['name']}"
-        #             self.create_function_node(
-        #                 repo_id,
-        #                 method_id,
-        #                 method["name"],
-        #                 method.get("docstring"),
-        #                 method.get("parameters", []),
-        #             )
-        #             self.create_relationship(class_id, "HAS_METHOD", method_id)
-        #             methods_created += 1
-                
-        #         if methods_created > 0:
-        #             print(f"[KUZU]   Created {methods_created} methods for class {cls['name']}")
-
-        #     # Create function nodes
-        #     functions_created = 0
-        #     for func in structure.get("functions", []):
-        #         func_id = f"{file_id}:{func['name']}"
-        #         self.create_function_node(
-        #             repo_id,
-        #             func_id,
-        #             func["name"],
-        #             func.get("docstring"),
-        #             func.get("parameters", []),
-        #         )
-        #         self.create_relationship(file_id, "DECLARES_FUNCTION", func_id)
-        #         functions_created += 1
-
-        #     if classes_created > 0 or functions_created > 0:
-        #         print(f"[KUZU] ✅ Extracted structure: {classes_created} classes, {functions_created} functions")
-        # except Exception as e:
-        #     print(f"[KUZU] ⚠️  AST extraction failed for {relative_path}: {e}")
-        #     # Continue without structure
-        #     pass
-
-    def build_class_node(self, repo_id: str, file_path: str, class_name: str):
-        """Create class node and link to file."""
-        if self.is_kuzu:
-            self.graph.add_class(repo_id, file_path, class_name)
-        else:
-            file_id = f"file:{repo_id}:{file_path}"
-            class_id = f"class:{repo_id}:{file_path}:{class_name}"
-
-            node = Node(
-                id=class_id,
-                type="Class",
-                properties={"name": class_name, "file_path": file_path},
-            )
-            self.graph.add_node(node)
-
-            # Link to file
-            edge = Edge(from_id=file_id, to_id=class_id, type="DECLARES", properties={})
-            self.graph.add_edge(edge)
-
-    def build_function_node(
-        self,
-        repo_id: str,
-        file_path: str,
-        function_name: str,
-        parent_class: str | None = None,
-    ):
-        """Create function node and link to file or class."""
-        if self.is_kuzu:
-            self.graph.add_function(repo_id, file_path, function_name, parent_class)
-        else:
-            func_id = f"func:{repo_id}:{file_path}:{function_name}"
-
-            node = Node(
-                id=func_id,
-                type="Function",
-                properties={
-                    "name": function_name,
-                    "file_path": file_path,
-                    "parent_class": parent_class,
+            # Do update on conflict to ensure idempotency
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "name": name,
+                    "properties": properties,
+                    "start_line": start_line,
+                    "end_line": end_line,
                 },
             )
-            self.graph.add_node(node)
+            session.execute(stmt)
+            session.commit()
 
-            # Link to parent (file or class)
-            if parent_class:
-                parent_id = f"class:{repo_id}:{file_path}:{parent_class}"
-            else:
-                parent_id = f"file:{repo_id}:{file_path}"
+    def _add_edge(self, source_id: str, target_id: str, edge_type: str, properties: dict | None = None):
+        """Add an edge if it doesn't exist."""
+        with self.db.get_session() as session:
+            # Check if edge exists (to avoid unique constraint error spam)
+            # Although INSERT OR IGNORE is better
+            stmt = insert(GraphEdge).values(
+                source_id=source_id,
+                target_id=target_id,
+                type=edge_type,
+                properties=properties,
+            )
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["source_id", "target_id", "type"]
+            )
+            session.execute(stmt)
+            session.commit()
 
-            edge = Edge(from_id=parent_id, to_id=func_id, type="DECLARES", properties={})
-            self.graph.add_edge(edge)
+    # -- Public Interface (matches previous KuzuGraphDB) --
 
-    # -- Cross-file relationship builders --
+    def add_repository(self, repo_id: str, repo_path: str):
+        node_id = f"repo:{repo_id}"
+        self._upsert_node(node_id, "Repository", repo_id, repo_id, repo_path, 
+                          properties={"path": repo_path})
+
+    def add_file(self, repo_id: str, file_path: str):
+        node_id = f"file:{repo_id}:{file_path}"
+        self._upsert_node(node_id, "File", repo_id, file_path.split("/")[-1], file_path,
+                          properties={"path": file_path})
+        
+        # Link to repo
+        repo_node_id = f"repo:{repo_id}"
+        self._add_edge(repo_node_id, node_id, "CONTAINS")
+
+    def add_class(self, repo_id: str, file_path: str, class_name: str, start_line: int = 0, end_line: int = 0):
+        node_id = f"class:{repo_id}:{file_path}:{class_name}"
+        file_node_id = f"file:{repo_id}:{file_path}"
+        
+        self._upsert_node(node_id, "Class", repo_id, class_name, file_path, 
+                          start_line=start_line, end_line=end_line)
+        self._add_edge(file_node_id, node_id, "DECLARES")
+
+    def add_function(self, repo_id: str, file_path: str, function_name: str, 
+                     parent_class: str | None = None, start_line: int = 0, end_line: int = 0):
+        node_id = f"func:{repo_id}:{file_path}:{function_name}"
+        if parent_class:
+            node_id = f"func:{repo_id}:{file_path}:{parent_class}.{function_name}"
+            
+        self._upsert_node(node_id, "Function", repo_id, function_name, file_path,
+                          start_line=start_line, end_line=end_line,
+                          properties={"parent_class": parent_class})
+        
+        # Link to parent
+        if parent_class:
+            parent_id = f"class:{repo_id}:{file_path}:{parent_class}"
+            self._add_edge(parent_id, node_id, "HAS_METHOD")
+        else:
+            parent_id = f"file:{repo_id}:{file_path}"
+            self._add_edge(parent_id, node_id, "DECLARES")
+
+    def add_import_edge(self, repo_id: str, from_file: str, to_file: str):
+        # We assume import is file-to-file for simplicity or node-to-node
+        # Previous Kuzu was add_import_edge(repo_id, from_file, to_file, import_name)
+        # We'll link file nodes
+        from_id = f"file:{repo_id}:{from_file}"
+        to_id = f"file:{repo_id}:{to_file}"
+        self._add_edge(from_id, to_id, "IMPORTS")
+
+    def add_call_edge(self, repo_id: str, caller_file: str, caller_func: str,
+                      callee_file: str, callee_func: str, line: int = 0):
+        # Try to resolve IDs. Caller func might be in a class, which makes ID generation tricky without context.
+        # For MVP, we presume flat function names or simple generation.
+        # If accurate ID fails, we might skip. But graph builder usually knows context.
+        # Here we accept the raw strings and try to construct IDs.
+        # NOTE: This implies caller_func is unique in file or we use a convention.
+        caller_id = f"func:{repo_id}:{caller_file}:{caller_func}"
+        callee_id = f"func:{repo_id}:{callee_file}:{callee_func}"
+        
+        self._add_edge(caller_id, callee_id, "CALLS", properties={"line": line})
+
+    def add_inheritance_edge(self, repo_id: str, child_file: str, child_class: str,
+                             parent_file: str, parent_class: str):
+        child_id = f"class:{repo_id}:{child_file}:{child_class}"
+        parent_id = f"class:{repo_id}:{parent_file}:{parent_class}"
+        self._add_edge(child_id, parent_id, "INHERITS_FROM")
+
+
+    def close(self):
+        """Close graph database connection."""
+        # No-op as we share the engine/session with app
+        pass
+
+
+class GraphBuilder:
+    """Builds code graph from AST and imports using SQLite adapter."""
+
+    def __init__(self, graph_db: SQLiteGraphAdapter | None):
+        """Initialize builder. graph_db may be None."""
+        self.graph = graph_db
+        self.is_noop = graph_db is None
+
+    def build_repository_node(self, repo_id: str, repo_path: str) -> None:
+        if self.is_noop: return
+        print(f"[GRAPH] Creating repository node: {repo_id}")
+        self.graph.add_repository(repo_id, repo_path)
+
+    def build_file_node(self, repo_id: str, file_path: str, relative_path: str) -> None:
+        if self.is_noop: return
+        print(f"[GRAPH] Building file node: {relative_path}")
+        self.graph.add_file(repo_id, file_path)
+
+    def build_class_node(self, repo_id: str, file_path: str, class_name: str):
+        if self.is_noop: return
+        self.graph.add_class(repo_id, file_path, class_name)
+
+    def build_function_node(self, repo_id: str, file_path: str, function_name: str, 
+                            parent_class: str | None = None):
+        if self.is_noop: return
+        self.graph.add_function(repo_id, file_path, function_name, parent_class)
 
     def build_import_edges(self, repo_id: str, from_file: str, to_file: str, import_name: str):
-        """Create IMPORTS edge between two files."""
-        if self.is_kuzu:
-            self.graph.add_import_edge(repo_id, from_file, to_file, import_name)
+        if self.is_noop: return
+        self.graph.add_import_edge(repo_id, from_file, to_file)
 
     def build_call_edges(self, repo_id: str, caller_file: str, caller_func: str,
                          callee_file: str, callee_func: str, line: int = 0):
-        """Create CALLS edge between two functions."""
-        if self.is_kuzu:
-            self.graph.add_call_edge(repo_id, caller_file, caller_func,
-                                     callee_file, callee_func, line)
+        if self.is_noop: return
+        self.graph.add_call_edge(repo_id, caller_file, caller_func, callee_file, callee_func, line)
 
     def build_inheritance_edges(self, repo_id: str, child_file: str, child_class: str,
                                 parent_file: str, parent_class: str):
-        """Create INHERITS edge between two classes."""
-        if self.is_kuzu:
-            self.graph.add_inheritance_edge(repo_id, child_file, child_class,
-                                            parent_file, parent_class)
+        if self.is_noop: return
+        self.graph.add_inheritance_edge(repo_id, child_file, child_class, parent_file, parent_class)

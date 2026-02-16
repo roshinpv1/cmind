@@ -262,58 +262,52 @@ class LanceDBStorage:
         """Create catalogs table if it doesn't exist."""
         if table_name not in self.db.table_names():
             schema = pa.schema([
-                pa.field("catalog_id", pa.string()),
+                pa.field("catalog_id", pa.string()), # UUID for the chunk entry
+                pa.field("chunk_id", pa.string()),   # ID of the chunk (0, 1, 2...)
                 pa.field("repo_id", pa.string()),
                 pa.field("repo_name", pa.string()),
-                pa.field("playbook_name", pa.string()),
-                pa.field("result", pa.string()),
-                pa.field("metadata", pa.string()),  # JSON string
+                pa.field("chunk_text", pa.string()), # The actual chunk content
+                pa.field("metadata", pa.string()),   # Minimal metadata for filtering
                 pa.field("created_at", pa.timestamp("us")),
                 pa.field("embedding", pa.list_(pa.float32(), self.embedding_dim)),
             ])
             self.db.create_table(table_name, schema=schema, mode="create")
 
-    def store_catalog_item(self, item: dict, table_name: str = "catalogs"):
+    def store_catalog_chunks(self, chunks: list[dict], table_name: str = "catalogs"):
         """
-        Store a processed catalog item.
+        Store catalog chunks.
         
         Args:
-            item: Dictionary with catalog fields
+            chunks: List of dictionaries with catalog chunk fields
             table_name: Table name
         """
-        print(f"[LANCEDB] Storing catalog item for repo {item.get('repo_id')}")
+        if not chunks:
+            return
+
+        print(f"[LANCEDB] Storing {len(chunks)} catalog chunks for repo {chunks[0].get('repo_id')}")
         
         # Ensure table exists (will create with new schema if missing)
         self.create_catalog_table(table_name)
         
         # Add timestamp if missing
-        if "created_at" not in item:
-            item["created_at"] = datetime.now(UTC)
+        now = datetime.now(UTC)
+        for item in chunks:
+            if "created_at" not in item:
+                item["created_at"] = now
             
         try:
             table = self.db.open_table(table_name)
-            table.add([item])
-            print(f"[LANCEDB] ✅ Catalog item stored")
-        except NotImplementedError:
-             # Schema mismatch likely
-            print(f"[LANCEDB] Schema mismatch likely, dropping table and recreating...")
-            self.db.drop_table(table_name)
+            table.add(chunks)
+            print(f"[LANCEDB] ✅ Catalog chunks stored")
+        except Exception as e:
+            # Handle schema mismatch or table issues by recreating
+            print(f"[LANCEDB] Issue linking table ({e}), recreating...")
+            if table_name in self.db.table_names():
+                self.db.drop_table(table_name)
             self.create_catalog_table(table_name)
             table = self.db.open_table(table_name)
-            table.add([item])
-            print(f"[LANCEDB] ✅ Recreated table and stored item")
-        except Exception as e:
-            if "not found in target schema" in str(e) or "doesn't exist" in str(e):
-                print(f"[LANCEDB] Schema/Table issue ({e}), dropping table and recreating...")
-                if table_name in self.db.table_names():
-                    self.db.drop_table(table_name)
-                self.create_catalog_table(table_name)
-                table = self.db.open_table(table_name)
-                table.add([item])
-                print(f"[LANCEDB] ✅ Recreated table and stored item")
-            else:
-                print(f"[LANCEDB] Failed to store catalog item: {e}")
-                raise
+            table.add(chunks)
+            print(f"[LANCEDB] ✅ Recreated table and stored chunks")
 
     def get_catalog_items(self, repo_id: str | None = None, table_name: str = "catalogs") -> list[dict]:
         """Get catalog items."""
@@ -334,6 +328,7 @@ class LanceDBStorage:
         repo_id: str | None = None,
         limit: int = 10,
         table_name: str = "catalogs",
+        columns: list[str] | None = None,
     ) -> list[dict]:
         """
         Semantic search over catalog entries.
@@ -347,6 +342,9 @@ class LanceDBStorage:
 
         if repo_id:
             query = query.where(f"repo_id = '{repo_id}'")
+            
+        if columns:
+            query = query.select(columns)
 
         return query.to_list()
 

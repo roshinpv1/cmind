@@ -8,6 +8,7 @@ Prerequisites:
 Run with: pytest tests/test_search_integration.py -v
 """
 
+import socket
 import pytest
 import requests
 from typing import Any
@@ -15,6 +16,22 @@ from typing import Any
 # Configuration
 BASE_URL = "http://localhost:8000"
 REPO_ID = "1dd450cb2ecd63a9"  # Update to your indexed repo
+
+
+def _server_is_running() -> bool:
+    """Check if the API server is reachable."""
+    try:
+        s = socket.create_connection(("localhost", 8000), timeout=1)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_is_running(),
+    reason="API server not running on localhost:8000",
+)
 
 
 class TestSemanticSearch:

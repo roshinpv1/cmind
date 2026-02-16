@@ -34,6 +34,17 @@ class PlannerAgent:
         self.executor = executor
         self.llm = llm_client
         self.workflow = self._build_workflow()
+
+    def _get_fallback_playbook(self, allowed_playbooks: list[str] | None = None) -> str:
+        """Get the best fallback playbook, respecting allowed_playbooks constraint."""
+        if allowed_playbooks:
+            return allowed_playbooks[0]
+        # Pick from registry: prefer catalog_search, then first available
+        available = self.registry.list_playbooks()
+        for preferred in ["catalog_search", "code_analyzer"]:
+            if preferred in available:
+                return preferred
+        return available[0] if available else "catalog_search"
     
     def _build_workflow(self) -> StateGraph:
         """Build the think-act-observe workflow."""
@@ -90,8 +101,9 @@ class PlannerAgent:
             state["iteration"] += 1
             return state
         
-        playbooks_desc = self._format_playbooks_for_prompt()
-        tools_desc = self._format_tools_for_prompt()
+        allowed = state.get("allowed_playbooks")
+        playbooks_desc = self._format_playbooks_for_prompt(allowed)
+        tools_desc = self._format_tools_for_prompt(allowed)
         history_desc = self._format_history(state)
         
         if has_data:
@@ -141,19 +153,40 @@ class PlannerAgent:
             # Parse LLM output — try standard format first, then model-specific
             action = self._parse_action(thought, has_data, state)
             
+            fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
+
             if action["type"] == "tool":
-                print(f"[PLANNER] Selected tool: {action['name']}")
-                state["plan"] = [{"tool": action["name"], "params": action["params"]}]
+                # Enforce allowed_playbooks: if constrained, redirect tool calls
+                # to the appropriate playbook instead of raw tool dispatch
+                allowed = state.get("allowed_playbooks")
+                if allowed:
+                    # Extract query from tool params
+                    params = action.get("params", {})
+                    if params.get("query"):
+                        query = params["query"]
+                    elif isinstance(params.get("queries"), list) and params["queries"]:
+                        query = params["queries"][0]
+                    else:
+                        query = state["goal"]
+                    print(f"[PLANNER] Tool '{action['name']}' requested but allowed_playbooks={allowed}, redirecting to playbook {fallback_pb}")
+                    state["plan"] = [{"playbook": fallback_pb, "params": {"query": query}}]
+                else:
+                    print(f"[PLANNER] Selected tool: {action['name']}")
+                    state["plan"] = [{"tool": action["name"], "params": action["params"]}]
             
             elif action["type"] == "playbook":
                 if self.registry.get_playbook(action["name"]):
-                    print(f"[PLANNER] Selected playbook: {action['name']}")
-                    state["plan"] = [{"playbook": action["name"], "params": action["params"]}]
+                    # Enforce allowed_playbooks constraint
+                    allowed = state.get("allowed_playbooks")
+                    if allowed and action["name"] not in allowed:
+                        print(f"[PLANNER] Playbook '{action['name']}' not in allowed list {allowed}, using {fallback_pb}")
+                        state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
+                    else:
+                        print(f"[PLANNER] Selected playbook: {action['name']}")
+                        state["plan"] = [{"playbook": action["name"], "params": action["params"]}]
                 else:
-                    available = self.registry.list_playbooks()
-                    print(f"[PLANNER] Playbook '{action['name']}' not found. Available: {available}")
-                    # Auto-correct to code_analyzer playbook
-                    state["plan"] = [{"playbook": "code_analyzer", "params": action["params"]}]
+                    print(f"[PLANNER] Playbook '{action['name']}' not found, using {fallback_pb}")
+                    state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
             
             elif action["type"] == "finish":
                 state["finished"] = True
@@ -161,14 +194,15 @@ class PlannerAgent:
                 print(f"[PLANNER] Agent decided to finish")
             
             elif action["type"] == "fallback":
-                print(f"[PLANNER] Using fallback: qa playbook with extracted query")
-                state["plan"] = [{"playbook": "qa", "params": action["params"]}]
+                print(f"[PLANNER] Using fallback playbook: {fallback_pb}")
+                state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
         
         except Exception as e:
             print(f"[PLANNER] Think error: {e}")
             if not has_data:
-                state["plan"] = [{"playbook": "qa", "params": {"query": state["goal"]}}]
-                state["thoughts"] = state.get("thoughts", []) + [f"Think error: {e}. Falling back to qa."]
+                fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
+                state["plan"] = [{"playbook": fallback_pb, "params": {"query": state["goal"]}}]
+                state["thoughts"] = state.get("thoughts", []) + [f"Think error: {e}. Falling back to {fallback_pb}."]
             else:
                 state["finished"] = True
                 state["final_result"] = f"Error in planning: {e}"
@@ -185,15 +219,33 @@ class PlannerAgent:
                 print("[PLANNER] Failed to parse PARAMS json")
         return {}
 
+    # Mapping from model-native channel targets to tools/playbooks
+    _CHANNEL_TO_TOOL = {
+        "search_codebase": {"type": "tool", "name": "search_codebase"},
+        "read_file":       {"type": "tool", "name": "read_file"},
+        "search_symbol":   {"type": "tool", "name": "search_symbol"},
+        "get_callers":     {"type": "tool", "name": "get_callers"},
+        "get_callees":     {"type": "tool", "name": "get_callees"},
+        "get_dependencies": {"type": "tool", "name": "get_dependencies"},
+        "list_files":      {"type": "tool", "name": "list_files"},
+        "save_catalog_entry": {"type": "tool", "name": "save_catalog_entry"},
+    }
+
+    _CHANNEL_TO_PLAYBOOK = {
+        "search_catalogs":   "catalog_search",
+        "catalog_search":    "catalog_search",
+        "catalog_generator": "catalog_generator",
+    }
+
     def _parse_action(self, thought: str, has_data: bool, state: dict) -> dict:
         """
         Parse LLM output into an action dict.
         
         Tries formats in order:
         1. Standard PLAYBOOK:/TOOL:/FINISH: format
-        2. Model-native <|channel|>/<|message|> format (openai/gpt-oss-20b)
+        2. Model-native <|channel|> to=X format → maps to correct tool/playbook
         3. Raw JSON extraction
-        4. Fallback to qa playbook with the user's goal
+        4. Fallback to best available playbook
         """
         # 1. Try standard format: TOOL: / PLAYBOOK: / FINISH:
         tool_match = re.search(r'TOOL:\s*(.+)', thought)
@@ -214,30 +266,67 @@ class PlannerAgent:
         if finish_match and not has_data:
             return {"type": "fallback", "params": {"query": state["goal"]}}
         
-        # 2. Try model-native format: <|message|>{"query":"..."} or <|channel|>...
+        # 2. Try model-native format: <|channel|>commentary to=X <|message|>{"query":"..."}
+        # Extract the target from to=<target>
+        channel_match = re.search(r'to=(\w+)', thought)
         msg_match = re.search(r'<\|message\|>\s*(\{[^}]+\})', thought)
+        
+        if channel_match:
+            target = channel_match.group(1)
+            # Extract params from <|message|> JSON if present
+            params = {}
+            if msg_match:
+                try:
+                    params = json.loads(msg_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+            query = params.get("query", params.get("search", state["goal"]))
+
+            # Check if target maps to a known tool
+            if target in self._CHANNEL_TO_TOOL:
+                mapping = self._CHANNEL_TO_TOOL[target]
+                tool_params = params if params else {"queries": [query]}
+                print(f"[PLANNER] Model-native → tool '{mapping['name']}', query: {query[:100]}")
+                return {"type": "tool", "name": mapping["name"], "params": tool_params}
+
+            # Check if target maps to a known playbook
+            if target in self._CHANNEL_TO_PLAYBOOK:
+                playbook_name = self._CHANNEL_TO_PLAYBOOK[target]
+                allowed = state.get("allowed_playbooks")
+                if allowed and playbook_name not in allowed:
+                    print(f"[PLANNER] Model-native → playbook '{playbook_name}' not in allowed {allowed}")
+                    # Fall through to fallback
+                else:
+                    print(f"[PLANNER] Model-native → playbook '{playbook_name}', query: {query[:100]}")
+                    return {"type": "playbook", "name": playbook_name, "params": {"query": query}}
+
+            # Unknown target — use as fallback query
+            print(f"[PLANNER] Model-native target '{target}' unrecognized, using query: {query[:100]}")
+            return {"type": "fallback", "params": {"query": query}}
+
+        # 3. If <|message|> exists without <|channel|>, extract query
         if msg_match:
             try:
                 params = json.loads(msg_match.group(1))
                 query = params.get("query", params.get("search", state["goal"]))
-                print(f"[PLANNER] Parsed model-native format, query: {query[:100]}")
+                print(f"[PLANNER] Parsed model-native message, query: {query[:100]}")
                 return {"type": "fallback", "params": {"query": query}}
             except json.JSONDecodeError:
                 pass
         
-        # 3. Try to extract any JSON with a "query" key
+        # 4. Try to extract any JSON with a "query" key
         json_match = re.search(r'\{[^{}]*"query"\s*:\s*"([^"]+)"[^{}]*\}', thought)
         if json_match:
             query = json_match.group(1)
             print(f"[PLANNER] Extracted query from JSON: {query[:100]}")
             return {"type": "fallback", "params": {"query": query}}
         
-        # 4. If we already have data and format is unrecognized, finish
+        # 5. If we already have data and format is unrecognized, finish
         if has_data:
             print(f"[PLANNER] Data gathered + unrecognized format -> finishing")
             return {"type": "finish", "result": "Analysis complete based on gathered data."}
         
-        # 5. Last resort: use goal as query for qa playbook
+        # 6. Last resort: fallback to best available playbook
         return {"type": "fallback", "params": {"query": state["goal"]}}
 
     def _has_gathered_data(self, state: PlannerState) -> bool:
@@ -449,8 +538,9 @@ class PlannerAgent:
         
         if not state["plan"]:
             if not self._has_gathered_data(state):
-                print(f"[PLANNER] No plan but no data yet. Forcing qa playbook.")
-                state["plan"] = [{"playbook": "qa", "params": {"query": state["goal"]}}]
+                fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
+                print(f"[PLANNER] No plan but no data yet. Forcing {fallback_pb} playbook.")
+                state["plan"] = [{"playbook": fallback_pb, "params": {"query": state["goal"]}}]
                 return "act"
             
             print(f"[PLANNER] No plan, finishing")
@@ -504,36 +594,60 @@ class PlannerAgent:
         
         return "\n".join(history) if history else "No actions taken yet."
 
-    def _format_playbooks_for_prompt(self) -> str:
+    def _format_playbooks_for_prompt(self, allowed: list[str] = None) -> str:
         """Format playbooks concisely."""
         playbooks = []
         for name in self.registry.list_playbooks():
+            if allowed and name not in allowed:
+                continue
             playbook = self.registry.get_playbook(name)
             playbooks.append(f"- {name}: {playbook.when_to_use[:200]}")
         return "\n".join(playbooks)
 
-    def _format_tools_for_prompt(self) -> str:
-        """Format tool descriptions for the thinking prompt."""
+    # Tools that are relevant when specific playbooks are constrained
+    _PLAYBOOK_RELEVANT_TOOLS = {
+        "catalog_search": {"search_catalogs"},
+        "catalog_generator": {"search_codebase", "save_catalog_entry"},
+        "code_analyzer": {"search_codebase", "read_file", "search_symbol", "get_callers", "get_callees", "get_dependencies", "list_files"},
+    }
+
+    def _format_tools_for_prompt(self, allowed_playbooks: list[str] | None = None) -> str:
+        """Format tool descriptions for the thinking prompt.
+        
+        When allowed_playbooks is set, only show tools relevant to those playbooks.
+        """
         from codemind.playbooks.tools import PlaybookTools
         tools = PlaybookTools.get_tool_descriptions()
+        
+        # Filter tools if playbooks are constrained
+        if allowed_playbooks:
+            relevant_tools = set()
+            for pb in allowed_playbooks:
+                relevant_tools |= self._PLAYBOOK_RELEVANT_TOOLS.get(pb, set())
+            if relevant_tools:
+                tools = [t for t in tools if t["name"] in relevant_tools]
+        
         lines = []
         for t in tools:
             lines.append(f"- {t['name']}: {t['description']}")
         return "\n".join(lines)
 
-    async def execute(self, goal: str, repo_id: str, max_iterations: int = 10, on_update=None) -> dict:
+    async def execute(self, goal: str, repo_id: str | None = None, max_iterations: int = 10, on_update=None, allowed_playbooks: list[str] = None) -> dict:
         """Execute planner for a goal."""
         self.on_update = on_update  # Register callback
         
         print(f"\n{'='*60}")
         print(f"[PLANNER] Starting autonomous execution")
         print(f"[PLANNER] Goal: {goal}")
-        print(f"[PLANNER] Repo: {repo_id}")
+        print(f"[PLANNER] Repo: {repo_id or 'ALL'}")
+        if allowed_playbooks:
+             print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
         print(f"{'='*60}")
         
         initial_state: PlannerState = {
             "goal": goal,
-            "repo_id": repo_id,
+            "repo_id": repo_id,  # Can be None now
+            "allowed_playbooks": allowed_playbooks,
             "plan": [],
             "current_step": 0,
             "thoughts": [],

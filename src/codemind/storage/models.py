@@ -20,6 +20,8 @@ class RepositoryManifest(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     repo_path: Mapped[str] = mapped_column(String, unique=True, index=True)
     repo_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    branch: Mapped[str | None] = mapped_column(String, nullable=True)  # New field for uniqueness
     last_indexed_at: Mapped[datetime] = mapped_column(DateTime)
     last_commit_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     embedding_model: Mapped[str] = mapped_column(String, default="all-MiniLM-L6-v2")
@@ -28,8 +30,6 @@ class RepositoryManifest(Base):
     
     # New metadata fields
     first_commit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    first_author: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_authors: Mapped[str | None] = mapped_column(String, nullable=True, comment="JSON list of last 4 authors")
     first_author: Mapped[str | None] = mapped_column(String, nullable=True)
     last_authors: Mapped[str | None] = mapped_column(String, nullable=True, comment="JSON list of last 4 authors")
     total_commits: Mapped[int] = mapped_column(Integer, default=0)
