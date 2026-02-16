@@ -12,8 +12,10 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 
 *   **Beyond RegEx**: We don't just grep strings. We understand *classes*, *functions*, *calls*, and *dependencies* across 20+ languages via Tree-sitter.
 *   **Agentic Reasoning**: Our autonomous agents don't just answer questions; they **plan**, **explore**, and **reason**. They can "Find all controllers using Auth v1, check their tests, and propose a migration plan."
+*   **LangChain-Native**: Built on **LangChain Core** + **LangGraph** — the industry-standard agent framework. Structured output via Pydantic, `bind_tools()`, `ToolNode`, and `MemorySaver` checkpointing.
 *   **Scalable Architecture**: Built on **LanceDB** (vectors) and **SQLite** (graph + metadata), with WAL-mode concurrency, CodeMind scales to millions of lines of code without slowing down.
 *   **Privacy First**: Runs 100% locally or in your private cloud. Your code never leaves your infrastructure unless you configure it to.
+*   **Observable**: Optional **LangSmith** integration for tracing all LLM calls, tool invocations, and graph transitions in production.
 *   **MCP-Ready**: Ships with a built-in Model Context Protocol server — use CodeMind from Claude Desktop, Cursor, or VS Code Copilot.
 
 ---
@@ -23,10 +25,12 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 - **⚡ Batch Indexing** — Process multiple repositories in parallel
 - **🚀 Non-Blocking API** — Asynchronous execution with a standalone worker process
 - **🔍 Hybrid Search** — Semantic + structural filtering with advanced file patterns
-- **🤖 Autonomous Agents** — LangGraph-based Think → Act → Observe loop
-- **📚 Repository Catalogs** — Auto-generated summaries with chunked vector search
+- **🤖 Autonomous Agents** — LangGraph-based Think → Act → Observe loop with `ToolNode` + `bind_tools()`
+- **📚 Repository Catalogs** — Auto-generated summaries with chunked vector search & Pydantic-validated output
 - **🔄 Incremental Indexing** — LangGraph workflow with 7 pipeline stages
 - **🔗 MCP Server** — Expose tools and resources to any MCP-compatible client
+- **💾 Checkpointing** — LangGraph `MemorySaver` for agent state persistence per job
+- **📊 Tracing** — Optional LangSmith integration for full observability
 
 **Perfect for:**
 - Onboarding new developers
@@ -34,6 +38,7 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 - Understanding legacy code
 - Impact analysis and refactoring
 - Cross-file dependency tracing
+- Enterprise software catalog management
 
 ---
 
@@ -68,21 +73,46 @@ POST /api/v1/search
 
 ### 2. Autonomous Agents 🤖
 
-CodeMind features a **Planner-Executor Autonomous Agent** powered by [LangGraph](https://github.com/langchain-ai/langgraph) that uses a **Think → Act → Observe** loop to solve complex problems.
+CodeMind features a **Planner-Executor Autonomous Agent** powered by [LangGraph](https://github.com/langchain-ai/langgraph) that uses a **Think → Act → Observe** loop with native LangChain tool calling.
+
+**Architecture:**
+- **`CmindChatModel`** — LangChain `BaseChatModel` wrapper around any LLM driver (Local, Ollama, Apigee, Enterprise)
+- **`bind_tools()`** — Prompt-based tool calling (injects tool schemas into prompts, parses JSON tool calls from output)
+- **`ToolNode`** — LangGraph native tool execution node (replaces custom parsing)
+- **`MemorySaver`** — In-memory checkpointing per agent job (thread_id = job_id)
 
 **Capabilities:**
 - ✅ **Multi-Step Planning** — Breaks down goals into tool/playbook steps
-- ✅ **7 Specialized Tools** — Search, read files, trace callers/callees, resolve dependencies
-- ✅ **Playbook Integration** — Invokes specialized playbooks (catalog_generator, catalog_search)
+- ✅ **11 Tools** — search_codebase, read_file, search_symbol, get_callers, get_callees, get_dependencies, list_files, search_catalogs, save_catalog_entry + playbook meta-tools
+- ✅ **Playbook Integration** — Invokes specialized playbooks as LangChain tools
 - ✅ **Self-Correction** — Retries on failure and adjusts strategy
-- ✅ **Auto-Finish** — Automatically detects when the goal is met after 3 successful data retrievals
+- ✅ **Auto-Finish** — Automatically detects when the goal is met
 - ✅ **Allowed Playbooks** — Restrict agent to a whitelist of playbooks per request
+- ✅ **Checkpointing** — State saved at each node transition via `MemorySaver`
 
 **Workflow:**
 ```
 1. POST /api/v1/agents/autonomous      → Start agent, get job_id
 2. GET  /api/v1/agents/autonomous/{id}/status → Poll for progress
 3. GET  /api/v1/agents/autonomous/{id}/result → Get final answer
+```
+
+**Agent Architecture (LangGraph):**
+```
+            ┌──────────┐
+            │  think   │ ← CmindChatModel.bind_tools()
+            └────┬─────┘
+                 │
+        ┌────────▼────────┐
+        │  route (cond.)  │ ← Has tool_calls? → "tools"
+        └───┬─────────┬───┘   No tool_calls? → "finish"
+            │         │
+      ┌─────▼──┐  ┌───▼────┐
+      │ tools  │  │ finish │
+      │(ToolNode) └────────┘
+      └────┬───┘
+           │
+           └──→ back to "think"
 ```
 
 **Example Request:**
@@ -100,17 +130,26 @@ POST /api/v1/agents/autonomous
 
 Playbooks are high-level strategies defined in Markdown that guide the Agent or LLM on how to solve specific tasks. They are auto-discovered from `*.md` files in the `playbooks/` directory.
 
-| Playbook | Purpose |
-|----------|---------|
-| `catalog_generator` | Generates rich catalog summaries with metadata (tech stack, architecture, dependencies) |
-| `catalog_search` | Searches across all repository catalogs with strict JSON output schema |
+| Playbook | Purpose | Output Schema |
+|----------|---------|---------------|
+| `catalog_generator` | Generates rich catalog summaries with metadata (tech stack, architecture, dependencies) | `CatalogGeneratorOutput` |
+| `catalog_search` | Searches across all repository catalogs with strict JSON output schema | `CatalogSearchOutput` |
+
+**Structured Output:** All playbook outputs are validated against **Pydantic schemas** defined in `structured_schemas.py`. The executor uses `CmindChatModel.with_structured_output()` for schema-driven prompt generation and JSON validation.
 
 ### 4. Repository Catalogs 📚
 
 Catalogs are high-level summaries and documentation generated automatically by playbooks. They use a **dual-store architecture** for optimal retrieval:
 
-- **SQLite** — Stores full catalog content (avoids context window limits)
+- **SQLite** — Stores full catalog content + enriched metadata (architecture, tech_stack, quality_score, pros, cons)
 - **LanceDB** — Stores chunked embeddings for semantic search
+
+**Catalog Search Flow:**
+```
+User Query → Embed → LanceDB vector search (chunks) → Dedupe by repo_id
+→ Fetch full content from SQLite → Build rich_text with ALL fields
+→ Inject as RETRIEVED CODE into LLM prompt → Pydantic-validated JSON output
+```
 
 ```bash
 # Generate a catalog
@@ -160,6 +199,18 @@ EOF
 ./run_batch_indexer.sh batch_config.json --wait
 ```
 
+### 7. LangSmith Tracing 📊
+
+Optional observability for all LangChain/LangGraph operations. When enabled, every LLM call, tool invocation, and graph state transition is automatically traced.
+
+```env
+# Enable in .env
+LANGSMITH_API_KEY=your-api-key
+LANGSMITH_PROJECT=cmind
+```
+
+No code changes required — tracing is configured at server startup via `codemind.llm.tracing.configure_tracing()`.
+
 ---
 
 ## 🏗️ Architecture
@@ -174,13 +225,15 @@ graph TD
     API --> Agent[Autonomous Agent]
     API --> Worker[Index Worker]
     
-    subgraph "Agent Core"
-        Planner["Planner Agent<br/>(LangGraph)"] <--> Executor[Playbook Executor]
-        Planner <--> Tools["7 Tools"]
+    subgraph "Agent Core (LangGraph)"
+        Planner["Planner Agent<br/>(StateGraph + ToolNode)"] <--> Executor["Playbook Executor<br/>(Pydantic schemas)"]
+        Planner <--> Tools["11 LangChain Tools"]
+        Planner --> CM["CmindChatModel<br/>(bind_tools)"]
+        Planner --> CP["MemorySaver<br/>(Checkpointing)"]
     end
     
     subgraph "Storage Layer"
-        SQLite[("SQLite<br/>Graph + Metadata + Jobs")]
+        SQLite[("SQLite<br/>Graph + Metadata + Jobs + Catalogs")]
         LanceDB[("LanceDB<br/>Vector Embeddings")]
     end
     
@@ -190,6 +243,13 @@ graph TD
     Worker --> LanceDB
     
     Executor --> LLM[LLM Engine]
+    CM --> LLM
+    
+    subgraph "Observability"
+        LS["LangSmith<br/>(Optional)"]
+    end
+    
+    CM -.->|traces| LS
 ```
 
 ### Triple-Process Architecture
@@ -204,16 +264,33 @@ CodeMind uses a **triple-process model** for safe concurrent access:
 
 The API Server and Index Worker share SQLite in **WAL mode** (Write-Ahead Logging) with `busy_timeout=5000ms` for safe concurrent reads and writes. The MCP Server is a thin HTTP proxy that forwards MCP tool calls to the API Server.
 
+### LangChain / LangGraph Integration
+
+CodeMind is built natively on LangChain Core and LangGraph:
+
+| Component | LangChain Feature | Purpose |
+|-----------|-------------------|---------|
+| `CmindChatModel` | `BaseChatModel` | Wraps any LLM driver as a LangChain chat model |
+| `bind_tools()` | Prompt-based tool binding | Injects tool schemas into prompts, parses JSON tool calls |
+| `with_structured_output()` | Pydantic schema validation | Schema-driven prompts + JSON parsing + validation |
+| `ToolNode` | LangGraph prebuilt | Native tool execution node (replaces custom dispatch) |
+| `MemorySaver` | LangGraph checkpoint | In-memory state persistence per agent job |
+| `StateGraph` | LangGraph core | Agent workflow orchestration (think → tools → finish) |
+| `@tool` decorator | LangChain tools | Playbook meta-tools and data tools |
+| LangSmith | Tracing | Optional end-to-end observability |
+
 ### Technology Stack
 
 | Layer | Technology |
 |-------|------------|
 | **API** | [FastAPI](https://fastapi.tiangolo.com/) |
-| **Agent** | [LangGraph](https://github.com/langchain-ai/langgraph) |
+| **Agent Framework** | [LangGraph](https://github.com/langchain-ai/langgraph) + [LangChain Core](https://github.com/langchain-ai/langchain) |
+| **Structured Output** | [Pydantic](https://docs.pydantic.dev/) schemas |
 | **Vector DB** | [LanceDB](https://lancedb.com/) (append-only) |
 | **Graph + Metadata** | [SQLite](https://sqlite.org/) via SQLAlchemy (WAL mode) |
 | **AST Parsing** | [Tree-sitter](https://tree-sitter.github.io/) (20+ languages) |
 | **Embeddings** | [BAAI/bge-base-en-v1.5](https://huggingface.co/BAAI/bge-base-en-v1.5) (768d) |
+| **Observability** | [LangSmith](https://smith.langchain.com/) (optional) |
 | **MCP** | [Model Context Protocol](https://modelcontextprotocol.io/) via FastMCP + httpx |
 | **Frontend** | React + Vite |
 
@@ -275,6 +352,10 @@ EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 # EMBEDDING_API_URL=http://localhost:11434/v1
 # EMBEDDING_API_KEY=ollama
 # EMBEDDING_MODEL=nomic-embed-text
+
+# LangSmith Tracing (optional — auto-enabled when key is set)
+# LANGSMITH_API_KEY=your-api-key
+# LANGSMITH_PROJECT=cmind
 
 # MCP Server
 # CODEMIND_API_URL=http://localhost:8000    # default
@@ -424,34 +505,48 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```
 cmind/
 ├── src/codemind/
-│   ├── agents/          # PlannerAgent, PlannerState, PlaybookSelector
-│   ├── api/             # FastAPI server, autonomous agent endpoints
-│   ├── batch/           # Batch indexing CLI
-│   ├── graph/           # SQLite graph adapter, GraphBuilder, GraphQueryService
-│   ├── indexer/         # AST extraction, chunking, embedding generation
-│   ├── jobs/            # Job management (queue, status tracking)
-│   ├── llm/             # Multi-provider LLM clients (Local, Ollama, Apigee, Enterprise)
-│   ├── mcp/             # MCP server (Model Context Protocol proxy)
-│   ├── playbooks/       # Playbook registry, executor, parser, tools
-│   ├── storage/         # SQLAlchemy database, LanceDB, ManifestManager
-│   ├── utils/           # Git utilities, GitHub client
-│   ├── worker/          # Standalone IndexWorker process
-│   └── workflows/       # LangGraph indexing pipeline (7 stages)
-├── playbooks/           # Markdown playbook definitions
+│   ├── agents/              # PlannerAgent (LangGraph), PlannerState, PlaybookSelector
+│   │   ├── planner.py       # StateGraph + ToolNode + MemorySaver workflow
+│   │   ├── planner_state.py # PlannerState (extends MessagesState)
+│   │   └── playbook_selector.py
+│   ├── api/                 # FastAPI server, autonomous agent endpoints
+│   │   ├── server.py        # Lifespan: tracing → services → chat_model → agents
+│   │   └── autonomous_agents.py  # Job-based agent execution
+│   ├── batch/               # Batch indexing CLI
+│   ├── graph/               # SQLite graph adapter, GraphBuilder, GraphQueryService
+│   ├── indexer/             # AST extraction, chunking, embedding generation
+│   ├── jobs/                # Job management (queue, status tracking)
+│   ├── llm/                 # LLM abstraction layer
+│   │   ├── chat_wrapper.py  # CmindChatModel (BaseChatModel), bind_tools, with_structured_output
+│   │   ├── factory.py       # get_llm_client(), get_chat_model()
+│   │   ├── providers.py     # LocalDriver, OllamaDriver, ApigeeDriver, EnterpriseDriver
+│   │   └── tracing.py       # LangSmith tracing configuration
+│   ├── mcp/                 # MCP server (Model Context Protocol proxy)
+│   ├── playbooks/           # Playbook engine
+│   │   ├── executors.py     # PlaybookExecutor (LangGraph StateGraph)
+│   │   ├── structured_schemas.py  # Pydantic output schemas per playbook
+│   │   ├── langchain_tools.py     # @tool-wrapped data tools + playbook meta-tools
+│   │   ├── registry.py      # Auto-discovery from playbooks/*.md
+│   │   └── tools.py         # PlaybookTools (search, catalogs, graph)
+│   ├── storage/             # SQLAlchemy database, LanceDB, ManifestManager
+│   ├── utils/               # Git utilities, GitHub client
+│   ├── worker/              # Standalone IndexWorker process
+│   └── workflows/           # LangGraph indexing pipeline (7 stages)
+├── playbooks/               # Markdown playbook definitions
 │   ├── catalog_generator.md
 │   └── catalog_search.md
-├── frontend/            # React + Vite frontend
-├── tests/               # 82 tests (unit, E2E, MCP, integration)
-│   ├── test_api/        # FastAPI TestClient E2E tests
-│   ├── test_agents/     # PlannerAgent + PlaybookExecutor tests
-│   ├── test_indexer/    # Chunker, file filter tests
-│   ├── test_mcp/        # MCP server tool + resource tests
-│   ├── test_storage/    # Database, LanceDB tests
-│   └── conftest.py      # MockLLMDriver, MockEmbedder, in-memory DB fixtures
-├── docs/                # Architecture docs, API reference, guides
+├── frontend/                # React + Vite frontend
+├── tests/                   # 82 tests (unit, E2E, MCP, integration)
+│   ├── test_api/            # FastAPI TestClient E2E tests
+│   ├── test_agents/         # PlannerAgent + PlaybookExecutor tests
+│   ├── test_indexer/        # Chunker, file filter tests
+│   ├── test_mcp/            # MCP server tool + resource tests
+│   ├── test_storage/        # Database, LanceDB tests
+│   └── conftest.py          # MockLLMDriver, MockEmbedder, in-memory DB fixtures
+├── docs/                    # Architecture docs, API reference, guides
 ├── CodeMind_API.postman_collection.json  # Postman collection (26 requests)
-├── pyproject.toml       # Project config (black, ruff, mypy, pytest)
-└── .env.example         # Configuration template
+├── pyproject.toml           # Project config (black, ruff, mypy, pytest)
+└── .env.example             # Configuration template
 ```
 
 ---
@@ -469,6 +564,23 @@ cmind/
 | **Total** | **82 passed, 23 skipped** | **~38% overall** |
 
 All unit and E2E tests run without external dependencies (no server, no LLM, no GPU).
+
+---
+
+## 📦 Key Dependencies
+
+```
+langchain-core        # BaseChatModel, @tool, messages
+langgraph             # StateGraph, ToolNode, MemorySaver
+pydantic              # Structured output schemas
+fastapi               # HTTP API server
+lancedb               # Vector embeddings storage
+sqlalchemy            # SQLite ORM (graph, metadata, catalogs, jobs)
+tree-sitter           # AST extraction (20+ languages)
+sentence-transformers # Local embedding generation
+langsmith             # Tracing (optional)
+fastmcp               # MCP server
+```
 
 ---
 

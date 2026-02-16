@@ -12,7 +12,10 @@ All playbooks use same flow, different prompts.
 from typing import TypedDict, Annotated, Optional, Any
 from langgraph.graph import StateGraph, END
 import operator
+import json
 import traceback
+
+from .structured_schemas import get_schema_for_playbook
 
 
 class PlaybookExecutionState(TypedDict):
@@ -249,7 +252,27 @@ class PlaybookExecutor:
                 result = await self.tools.search_codebase(search_params)
                 
                 if result.get("success"):
-                    state["code_chunks"] = result.get("results", [])
+                    chunks = result.get("results", [])
+                    
+                    # Filter out test files for catalog_generator
+                    if playbook.name == "catalog_generator":
+                        import re
+                        test_pattern = re.compile(
+                            r'(^|/)tests?/|/test_[^/]+$|/_test\.py$|/conftest\.py$|'
+                            r'/testing/|\.test\.(js|ts|jsx|tsx)$|\.spec\.(js|ts|jsx|tsx)$|'
+                            r'__tests__/',
+                            re.IGNORECASE
+                        )
+                        before = len(chunks)
+                        chunks = [
+                            c for c in chunks
+                            if not test_pattern.search(c.get("file_path", ""))
+                        ]
+                        filtered = before - len(chunks)
+                        if filtered:
+                            state["logs"].append(f"  Excluded {filtered} test file chunks for catalog generation")
+                    
+                    state["code_chunks"] = chunks
                     state["logs"].append(f"  Found {len(state['code_chunks'])} code chunks")
                 else:
                     error_msg = result.get("error", "Unknown search error")
@@ -308,72 +331,38 @@ class PlaybookExecutor:
                     
                     prompt_suffix = "Generate your output based on the instructions and code:"
                     
-                    # Force JSON for catalog_generator
-                    # Force JSON for catalog_generator and catalog_search
-
+                    # Use structured schema for prompt generation
+                    output_schema = get_schema_for_playbook(playbook.name)
+                    
                     if playbook.name == "catalog_generator":
                         prompt_suffix += "\n\nIMPORTANT: You MUST output a JSON block invoking 'save_catalog_entry'. Do not output any other text."
-                    elif playbook.name == "catalog_search":
-                        schema_hint = """
-{
-  "requirement_summary": "string",
-  "capabilities": {"functional": [], "non_functional": []},
-  "decomposition": {"core_modules": [], "supporting_modules": [], "cross_cutting": []},
-  "catalog_matches": [{
-    "capability": "string",
-    "component_name": "string",
-    "match_type": "Full Match | Partial Match | No Match",
-    "confidence_score": 0-100,
-    "reasoning": "string",
-    "catalog_entry": {
-      "repo_name": "string",
-      "repo_url": "string",
-      "description": "string",
-      "topics": [],
-      "tech_stack": "string",
-      "architecture": "string",
-      "category": "string",
-      "quality_score": 0-100,
-      "pros": [],
-      "cons": []
-    }
-  }],
-  "architecture_composition": "string",
-  "gaps": [],
-  "risks": [],
-  "overall_confidence_score": 0-100
-}
-"""
+                    elif output_schema:
+                        # Auto-generate schema hint from Pydantic model
+                        schema_json = json.dumps(output_schema.model_json_schema(), indent=2)
                         prompt_suffix += (
-                            f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object matching the following schema exactly:\n{schema_hint}\n"
-                            "Wrap it in a markdown code block (```json ... ```).\n"
-                            "Do NOT use keys 'project' or 'recommendation'.\n"
-                            "IMPORTANT: Do NOT generate a generic project plan. If NO catalog matches found, return empty 'catalog_matches' list in the JSON.\n"
-                            "IMPORTANT: Each match in `catalog_matches` MUST include `capability`, `match_type`, `confidence_score` and `reasoning`, NOT JUST `catalog_entry`.\n"
-                            "CRITICAL: The `catalog_entry` data MUST come ONLY from the RETRIEVED CODE context above. "
-                            "Copy the actual repo_name, repo_url, description, architecture, tech_stack, topics, category, quality_score, pros, and cons from each CATALOG ENTRY in the context. "
-                            "Do NOT invent or hallucinate component names, URLs, or details. If a field is not in the context, set it to empty string or empty list."
+                            f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object "
+                            f"matching the following schema:\n```json\n{schema_json}\n```\n"
+                            f"Wrap it in a markdown code block (```json ... ```).\n"
                         )
-                    elif playbook.name == "code_analyzer":
-                        schema_hint = """
-{
-  "summary": "string",
-  "analysis": "string",
-  "key_insights": [],
-  "strategic_implications": [],
-  "suggestions": []
-}
-"""
-                        prompt_suffix += f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object matching the following schema exactly:\n{schema_hint}\n\nWrap it in a markdown code block (```json ... ```)."
-
+                        # Add playbook-specific instructions
+                        if playbook.name == "catalog_search":
+                            prompt_suffix += (
+                                "Do NOT use keys 'project' or 'recommendation'.\n"
+                                "Do NOT generate a generic project plan. If NO catalog matches found, return empty 'catalog_matches' list.\n"
+                                "Each match in `catalog_matches` MUST include `capability`, `match_type`, `confidence_score` and `reasoning`.\n"
+                                "CRITICAL: The `catalog_entry` data MUST come ONLY from the RETRIEVED CODE context above. "
+                                "Do NOT invent or hallucinate component names, URLs, or details.\n"
+                                "SCORING: For each catalog match, set `confidence_score` = the Relevance Score from the context × 100 (rounded to integer).\n"
+                                "COPY THESE FIELDS from each CATALOG ENTRY in the context into `catalog_entry`: "
+                                "repo_name, repo_url, description, architecture, tech_stack, topics, category, quality_score, pros, cons. "
+                                "The Quality Score line in the context (e.g. 'Quality Score: 85/100') MUST be copied as an integer into `catalog_entry.quality_score`.\n"
+                            )
 
                     user_msg = (
                         "USER REQUEST:\n" + user_goal + "\n\n"
                         "RETRIEVED CODE:\n" + code_context + "\n\n"
                         + prompt_suffix
                     )
-                    # print(f"[EXECUTOR] Full User Message:\n{user_msg}")
-                    # print(f"[DEBUG] User Msg: {user_msg[:500]}...")
                     
                     output = await self.llm.generate(
                         user_msg,
@@ -447,10 +436,20 @@ class PlaybookExecutor:
             
             # Check for JSON tool call block
             import re
-            import json
             
             tool_executed = False
             tool_result = None
+            
+            # Try Pydantic schema validation first
+            output_schema = get_schema_for_playbook(playbook.name)
+            validated_data = None
+            if output_schema and playbook.name != "catalog_generator":
+                try:
+                    from ..llm.chat_wrapper import _parse_structured_output
+                    validated_data = _parse_structured_output(output_text, output_schema)
+                    state["logs"].append(f"  ✅ Output validated against {output_schema.__name__}")
+                except (ValueError, Exception) as e:
+                    state["logs"].append(f"  ⚠️ Schema validation failed, falling back to raw parsing: {e}")
             
             # Pattern to extract JSON block: ```json ... ``` or just {...}
             # We look for the specific structure: "tool": "name"
@@ -580,9 +579,17 @@ class PlaybookExecutor:
                 import json
                 output_text = json.dumps(parsed_data)
             
+            # Determine best structured data to use
+            final_data = None
+            if validated_data is not None:
+                # Pydantic-validated data is available — use it
+                final_data = validated_data.model_dump() if hasattr(validated_data, 'model_dump') else validated_data
+            elif 'parsed_data' in locals() and parsed_data:
+                final_data = parsed_data
+            
             state["outputs"] = {
                 "result": output_text,
-                "data": parsed_data if 'parsed_data' in locals() else None,  # Store structured JSON
+                "data": final_data,
                 "tool_executed": tool_executed,
                 "tool_result": tool_result,
                 "code_chunks_used": len(state["code_chunks"]),

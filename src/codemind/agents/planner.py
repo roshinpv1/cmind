@@ -1,73 +1,200 @@
 """
-Autonomous Planner Agent - LLM-powered playbook selection and execution.
+Autonomous Planner Agent — LangGraph + LangChain powered.
 
 The planner:
 1. Interprets user goals
-2. Selects appropriate playbooks or tools
-3. Executes via executor (playbooks) or direct dispatch (tools)
-4. Observes results
-5. Iterates until goal satisfied (requires at least 1 data retrieval step)
-6. Returns final answer grounded in codebase data
+2. Uses LLM with bound tools to select playbooks/tools
+3. LangGraph ToolNode auto-dispatches tool calls
+4. Observes results and iterates until goal satisfied
+5. Synthesizes final answer grounded in codebase data
 
-This is the "brain" of the autonomous agent system.
+Replaces custom _parse_action / _CHANNEL_TO_TOOL parsing with
+LangGraph's native tool calling via CmindChatModel.bind_tools().
 """
 
-from typing import Literal
+from typing import Literal, Optional
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import (
+    AIMessage, HumanMessage, SystemMessage, ToolMessage
+)
 import asyncio
 import json
-import re
+import uuid
 
 from .planner_state import PlannerState
 
 
+def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
+    """Create LangChain tools that wrap playbook execution.
+    
+    Each playbook becomes a callable tool that the planner LLM can invoke.
+    This replaces the old PLAYBOOK:/TOOL: format parsing.
+    """
+    from langchain_core.tools import tool
+    from pydantic import BaseModel, Field
+    
+    meta_tools = []
+    
+    for name in registry.list_playbooks():
+        if allowed_playbooks and name not in allowed_playbooks:
+            continue
+        
+        playbook = registry.get_playbook(name)
+        if not playbook:
+            continue
+        
+        # Create a tool for each playbook dynamically
+        pb_name = name
+        pb_desc = playbook.when_to_use[:500] if playbook.when_to_use else f"Execute {name} playbook"
+        
+        class PlaybookInput(BaseModel):
+            """Input for playbook execution."""
+            query: str = Field(description="Search query or goal for the playbook")
+            repo_id: Optional[str] = Field(default=None, description="Repository ID (optional)")
+        
+        # We need a factory to capture pb_name in closure
+        def make_pb_tool(pb_name_inner, pb_desc_inner):
+            @tool(f"playbook_{pb_name_inner}", args_schema=PlaybookInput)
+            async def run_playbook(query: str, repo_id: Optional[str] = None) -> str:
+                f"""Execute the {pb_name_inner} playbook. {pb_desc_inner}"""
+                user_input = {"query": query, "goal": query}
+                if repo_id:
+                    user_input["repo_id"] = repo_id
+                
+                try:
+                    result = await executor.execute(pb_name_inner, user_input)
+                    if result.get("success"):
+                        outputs = result.get("outputs", {})
+                        # Return the result text or a summary of outputs
+                        if outputs.get("result"):
+                            return outputs["result"][:4000]
+                        return json.dumps(outputs, default=str)[:4000]
+                    else:
+                        return json.dumps({"error": result.get("error", "Playbook failed")})
+                except Exception as e:
+                    return json.dumps({"error": str(e)})
+            
+            # Override the docstring and description after creation
+            run_playbook.description = f"Execute the {pb_name_inner} playbook. {pb_desc_inner}"
+            return run_playbook
+        
+        meta_tools.append(make_pb_tool(pb_name, pb_desc))
+    
+    return meta_tools
+
+
 class PlannerAgent:
     """
-    Autonomous planner that selects and executes playbooks to achieve goals.
+    Autonomous planner that uses LangGraph ToolNode for action dispatch.
     
-    Uses LLM for reasoning and playbook selection.
-    Uses PlaybookExecutor for deterministic execution.
+    The LLM decides what to do by making tool calls. Each tool call is 
+    automatically dispatched by ToolNode. Playbooks are exposed as 
+    "meta-tools" (playbook_catalog_search, playbook_code_analyzer, etc.).
+    
+    This eliminates:
+    - _parse_action() regex parsing
+    - _CHANNEL_TO_TOOL / _CHANNEL_TO_PLAYBOOK mappings
+    - _format_tools_for_prompt() manual schema generation
+    - Model-native format handling
     """
     
     def __init__(self, registry, executor, llm_client):
         self.registry = registry
         self.executor = executor
-        self.llm = llm_client
-        self.workflow = self._build_workflow()
-
-    def _get_fallback_playbook(self, allowed_playbooks: list[str] | None = None) -> str:
-        """Get the best fallback playbook, respecting allowed_playbooks constraint."""
-        if allowed_playbooks:
-            return allowed_playbooks[0]
-        # Pick from registry: prefer catalog_search, then first available
-        available = self.registry.list_playbooks()
-        for preferred in ["catalog_search", "code_analyzer"]:
-            if preferred in available:
-                return preferred
-        return available[0] if available else "catalog_search"
+        self.llm = llm_client  # Legacy LLMDriver (kept for _finish synthesis)
+        
+        # CmindChatModel for tool calling — created lazily per execute() call
+        # because allowed_playbooks changes which tools are available
+        self._chat_model = None
     
-    def _build_workflow(self) -> StateGraph:
-        """Build the think-act-observe workflow."""
+    def _get_chat_model(self):
+        """Get or create the CmindChatModel wrapper."""
+        if self._chat_model is None:
+            from ..llm.chat_wrapper import CmindChatModel
+            self._chat_model = CmindChatModel(driver=self.llm)
+        return self._chat_model
+    
+    def _create_tools(self, allowed_playbooks=None):
+        """Create all available tools (data tools + playbook meta-tools)."""
+        from ..playbooks.langchain_tools import create_langchain_tools
+        
+        # Data tools (search_codebase, read_file, etc.)
+        data_tools = create_langchain_tools(self.executor.tools)
+        
+        # Playbook meta-tools
+        playbook_tools = create_playbook_meta_tools(
+            self.registry, self.executor, allowed_playbooks
+        )
+        
+        # If playbooks are constrained, only include relevant data tools
+        if allowed_playbooks:
+            relevant = set()
+            PLAYBOOK_TOOLS = {
+                "catalog_search": {"search_catalogs"},
+                "catalog_generator": {"search_codebase", "save_catalog_entry"},
+                "code_analyzer": {"search_codebase", "read_file", "search_symbol",
+                                 "get_callers", "get_callees", "get_dependencies", "list_files"},
+            }
+            for pb in allowed_playbooks:
+                relevant |= PLAYBOOK_TOOLS.get(pb, set())
+            
+            if relevant:
+                data_tools = [t for t in data_tools if t.name in relevant]
+        
+        return data_tools + playbook_tools
+    
+    def _build_workflow(self, tools):
+        """Build the LangGraph workflow with ToolNode."""
+        chat_model = self._get_chat_model()
+        self._llm_with_tools = chat_model.bind_tools(tools)
+        
         graph = StateGraph(PlannerState)
         
         graph.add_node("think", self._think)
-        graph.add_node("act", self._act)
-        graph.add_node("observe", self._observe)
+        graph.add_node("tools", ToolNode(tools))
         graph.add_node("finish", self._finish)
         
         graph.set_entry_point("think")
         
         graph.add_conditional_edges(
             "think",
-            self._should_continue,
-            {"act": "act", "finish": "finish"}
+            self._route,
+            {"tools": "tools", "finish": "finish"}
         )
         
-        graph.add_edge("act", "observe")
-        graph.add_edge("observe", "think")
+        # After tool execution → back to think
+        graph.add_edge("tools", "think")
         graph.add_edge("finish", END)
         
-        return graph.compile()
+        # Compile with MemorySaver for checkpointing
+        self._checkpointer = MemorySaver()
+        return graph.compile(checkpointer=self._checkpointer)
+    
+    def _route(self, state: PlannerState) -> Literal["tools", "finish"]:
+        """Route based on LLM's decision."""
+        if state.get("finished"):
+            return "finish"
+        
+        # Enforce max_iterations
+        iteration = state.get("iteration", 0)
+        max_iter = state.get("max_iterations", 10)
+        if iteration >= max_iter:
+            print(f"[PLANNER] Max iterations ({max_iter}) reached")
+            state["finished"] = True
+            state["final_result"] = "Maximum iterations reached"
+            return "finish"
+        
+        # Check if the last message has tool calls
+        messages = state.get("messages", [])
+        if messages and isinstance(messages[-1], AIMessage):
+            last = messages[-1]
+            if hasattr(last, 'tool_calls') and last.tool_calls:
+                return "tools"
+        
+        # No tool calls means the LLM wants to finish
+        return "finish"
     
     async def _emit_update(self, state: PlannerState):
         """Emit state update if callback is registered."""
@@ -77,377 +204,196 @@ class PlannerAgent:
             except Exception as e:
                 print(f"[PLANNER] Callback error: {e}")
     
-    async def _think(self, state: PlannerState) -> PlannerState:
+    async def _think(self, state: PlannerState) -> dict:
         """
         Agent thinks about what to do next.
-        Auto-finishes after 3 successful data retrievals.
+        
+        Uses LLM with bound tools — the LLM's response will contain
+        either tool_calls (to act) or plain text (to finish).
         """
-        print(f"\n[PLANNER] 🤔 Think (iteration {state['iteration']})")
-        await asyncio.sleep(0)  # Yield to event loop
+        iteration = state.get("iteration", 0)
+        print(f"\n[PLANNER] 🤔 Think (iteration {iteration})")
+        await asyncio.sleep(0)
         await self._emit_update(state)
-
-        # Count successful data retrievals
+        
+        # Count successful observations (legacy format)
         successful_runs = sum(
             1 for obs in state.get("observations", [])
             if obs.get("success") and obs.get("outputs")
         )
+        
+        # Also count ToolMessages in state.messages (new format from ToolNode)
+        tool_messages = [
+            m for m in state.get("messages", [])
+            if isinstance(m, ToolMessage) and m.content and len(m.content) > 5
+        ]
+        successful_runs += len(tool_messages)
         has_data = successful_runs > 0
         
-        # Auto-finish after 10 successful playbook/tool runs — no need to ask LLM
+        # Auto-finish after many successful runs
         if successful_runs >= 10:
             print(f"[PLANNER] Auto-finishing: {successful_runs} successful data retrievals")
-            state["finished"] = True
-            state["final_result"] = "Auto-finish: sufficient data gathered."
-            state["iteration"] += 1
-            return state
+            return {
+                "finished": True,
+                "final_result": "Auto-finish: sufficient data gathered.",
+                "iteration": iteration + 1,
+            }
         
-        allowed = state.get("allowed_playbooks")
-        playbooks_desc = self._format_playbooks_for_prompt(allowed)
-        tools_desc = self._format_tools_for_prompt(allowed)
+        # Build the system prompt
         history_desc = self._format_history(state)
         
         if has_data:
-            finish_opt = (
-                "FINISH: <your comprehensive answer based on gathered data>\n\n"
-                "IMPORTANT: You already have data from " + str(successful_runs) + " successful queries. "
-                "You SHOULD finish now unless you need fundamentally different data. "
-                "Do NOT repeat the same playbook with similar queries."
+            finish_instruction = (
+                f"\nYou already have data from {successful_runs} successful queries. "
+                "If you have enough information to answer the goal, respond with a final text answer "
+                "(do NOT call any tool). If you need more data, call a tool.\n"
+                "Do NOT repeat the same tool with similar queries."
             )
         else:
-            finish_opt = "FINISH is NOT allowed yet. You MUST use a PLAYBOOK or TOOL first."
+            finish_instruction = (
+                "\nYou MUST call a tool or playbook first — you have no data yet. "
+                "Do NOT respond with a text answer yet."
+            )
         
-        # System prompt sent as a system message
-        system_prompt = (
-            "You are a code analysis agent. Respond with EXACTLY one action.\n\n"
-            "PLAYBOOKS (LLM analysis):\n" + playbooks_desc + "\n\n"
-            "TOOLS (direct data lookup):\n" + tools_desc + "\n\n"
-            "RESPONSE FORMAT - reply with ONLY one of these:\n\n"
-            "PLAYBOOK: <name>\n"
-            'PARAMS: {"query": "<search query>"}\n\n'
-            "TOOL: <name>\n"
-            'PARAMS: {"<param>": "<value>"}\n\n'
-            + finish_opt
-        )
-
-        # User prompt - just goal + history
-        user_prompt = (
-            "Goal: " + state["goal"] + "\n\n"
-            "History:\n" + history_desc + "\n\n"
-            "Your action:"
-        )
+        system_msg = SystemMessage(content=(
+            "You are a code analysis agent. You have tools available to search code, "
+            "analyze repositories, and retrieve information.\n\n"
+            "Use the available tools to gather information needed to answer the user's goal.\n"
+            + finish_instruction
+        ))
+        
+        # Build the user message with goal + history
+        user_content = f"Goal: {state['goal']}\n\n"
+        if state.get("repo_id"):
+            user_content += f"Repository ID: {state['repo_id']}\n\n"
+        user_content += f"History:\n{history_desc}\n\nYour action:"
+        
+        user_msg = HumanMessage(content=user_content)
+        
+        # Collect messages: system + conversation history + current
+        messages = [system_msg]
+        
+        # Add existing messages from state (previous tool calls/results)
+        existing = state.get("messages", [])
+        # Only add recent messages to avoid context overflow
+        if existing:
+            messages.extend(existing[-6:])  # Keep last 3 exchanges
+        
+        messages.append(user_msg)
         
         try:
-            # Use config max_tokens: ~5% for thinking (short action output)
-            think_tokens = max(256, self.llm.config.max_tokens // 20)
-            thought = await self.llm.generate(
-                user_prompt,
-                system_prompt=system_prompt,
+            # Invoke LLM with tools
+            config = getattr(self.llm, 'config', None)
+            think_tokens = max(256, (config.max_tokens if config else 4096) // 20)
+            
+            response = await self._llm_with_tools.ainvoke(
+                messages,
                 max_tokens=think_tokens,
                 temperature=0.1
             )
-            print(f"[PLANNER] Thought: {thought[:200]}...")
             
-            state["thoughts"] = state.get("thoughts", []) + [thought]
-            state["iteration"] += 1
+            # response is an AIMessage (possibly with tool_calls)
+            content = response.content or ""
+            has_tool_calls = hasattr(response, 'tool_calls') and response.tool_calls
             
-            # Parse LLM output — try standard format first, then model-specific
-            action = self._parse_action(thought, has_data, state)
+            print(f"[PLANNER] Response: {content[:200]}...")
+            if has_tool_calls:
+                for tc in response.tool_calls:
+                    print(f"[PLANNER] Tool call: {tc['name']}({json.dumps(tc.get('args', {}))[:100]})")
             
-            fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
-
-            if action["type"] == "tool":
-                # Enforce allowed_playbooks: if constrained, redirect tool calls
-                # to the appropriate playbook instead of raw tool dispatch
-                allowed = state.get("allowed_playbooks")
-                if allowed:
-                    # Extract query from tool params
-                    params = action.get("params", {})
-                    if params.get("query"):
-                        query = params["query"]
-                    elif isinstance(params.get("queries"), list) and params["queries"]:
-                        query = params["queries"][0]
-                    else:
-                        query = state["goal"]
-                    print(f"[PLANNER] Tool '{action['name']}' requested but allowed_playbooks={allowed}, redirecting to playbook {fallback_pb}")
-                    state["plan"] = [{"playbook": fallback_pb, "params": {"query": query}}]
-                else:
-                    print(f"[PLANNER] Selected tool: {action['name']}")
-                    state["plan"] = [{"tool": action["name"], "params": action["params"]}]
+            # Track thoughts
+            thoughts = state.get("thoughts", []) + [content[:500]]
             
-            elif action["type"] == "playbook":
-                if self.registry.get_playbook(action["name"]):
-                    # Enforce allowed_playbooks constraint
-                    allowed = state.get("allowed_playbooks")
-                    if allowed and action["name"] not in allowed:
-                        print(f"[PLANNER] Playbook '{action['name']}' not in allowed list {allowed}, using {fallback_pb}")
-                        state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
-                    else:
-                        print(f"[PLANNER] Selected playbook: {action['name']}")
-                        state["plan"] = [{"playbook": action["name"], "params": action["params"]}]
-                else:
-                    print(f"[PLANNER] Playbook '{action['name']}' not found, using {fallback_pb}")
-                    state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
+            # Build return updates
+            updates = {
+                "messages": [response],  # MessagesState appends this
+                "thoughts": [content[:500]],
+                "iteration": iteration + 1,
+            }
             
-            elif action["type"] == "finish":
-                state["finished"] = True
-                state["final_result"] = action.get("result", "")
-                print(f"[PLANNER] Agent decided to finish")
+            # If no tool calls and no data yet, force a fallback
+            if not has_tool_calls and not has_data:
+                print("[PLANNER] No tool call but no data yet — forcing fallback")
+                fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
+                # Create a synthetic tool call
+                from langchain_core.messages import AIMessage as AI
+                fallback_msg = AI(
+                    content="I need to gather data first.",
+                    tool_calls=[{
+                        "name": f"playbook_{fallback_pb}",
+                        "args": {"query": state["goal"], "repo_id": state.get("repo_id")},
+                        "id": f"fallback_{iteration}",
+                        "type": "tool_call",
+                    }]
+                )
+                updates["messages"] = [fallback_msg]
             
-            elif action["type"] == "fallback":
-                print(f"[PLANNER] Using fallback playbook: {fallback_pb}")
-                state["plan"] = [{"playbook": fallback_pb, "params": action["params"]}]
-        
+            # If no tool calls and has data — agent wants to finish
+            elif not has_tool_calls and has_data:
+                print("[PLANNER] LLM chose to finish (no tool calls)")
+                updates["finished"] = True
+                updates["final_result"] = content
+            
+            return updates
+            
         except Exception as e:
             print(f"[PLANNER] Think error: {e}")
+            import traceback
+            traceback.print_exc()
+            
             if not has_data:
                 fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
-                state["plan"] = [{"playbook": fallback_pb, "params": {"query": state["goal"]}}]
-                state["thoughts"] = state.get("thoughts", []) + [f"Think error: {e}. Falling back to {fallback_pb}."]
+                from langchain_core.messages import AIMessage as AI
+                fallback_msg = AI(
+                    content=f"Think error: {e}. Falling back.",
+                    tool_calls=[{
+                        "name": f"playbook_{fallback_pb}",
+                        "args": {"query": state["goal"], "repo_id": state.get("repo_id")},
+                        "id": f"error_fallback_{iteration}",
+                        "type": "tool_call",
+                    }]
+                )
+                return {
+                    "messages": [fallback_msg],
+                    "thoughts": [f"Think error: {e}. Falling back to {fallback_pb}."],
+                    "iteration": iteration + 1,
+                }
             else:
-                state["finished"] = True
-                state["final_result"] = f"Error in planning: {e}"
-        
-        return state
+                return {
+                    "finished": True,
+                    "final_result": f"Error in planning: {e}",
+                    "iteration": iteration + 1,
+                }
     
-    def _parse_params(self, text: str) -> dict:
-        """Parse PARAMS JSON from LLM output."""
-        params_match = re.search(r'PARAMS:\s*(\{.*?\})', text, re.DOTALL)
-        if params_match:
-            try:
-                return json.loads(params_match.group(1).strip())
-            except json.JSONDecodeError:
-                print("[PLANNER] Failed to parse PARAMS json")
-        return {}
-
-    # Mapping from model-native channel targets to tools/playbooks
-    _CHANNEL_TO_TOOL = {
-        "search_codebase": {"type": "tool", "name": "search_codebase"},
-        "read_file":       {"type": "tool", "name": "read_file"},
-        "search_symbol":   {"type": "tool", "name": "search_symbol"},
-        "get_callers":     {"type": "tool", "name": "get_callers"},
-        "get_callees":     {"type": "tool", "name": "get_callees"},
-        "get_dependencies": {"type": "tool", "name": "get_dependencies"},
-        "list_files":      {"type": "tool", "name": "list_files"},
-        "save_catalog_entry": {"type": "tool", "name": "save_catalog_entry"},
-    }
-
-    _CHANNEL_TO_PLAYBOOK = {
-        "search_catalogs":   "catalog_search",
-        "catalog_search":    "catalog_search",
-        "catalog_generator": "catalog_generator",
-    }
-
-    def _parse_action(self, thought: str, has_data: bool, state: dict) -> dict:
-        """
-        Parse LLM output into an action dict.
-        
-        Tries formats in order:
-        1. Standard PLAYBOOK:/TOOL:/FINISH: format
-        2. Model-native <|channel|> to=X format → maps to correct tool/playbook
-        3. Raw JSON extraction
-        4. Fallback to best available playbook
-        """
-        # 1. Try standard format: TOOL: / PLAYBOOK: / FINISH:
-        tool_match = re.search(r'TOOL:\s*(.+)', thought)
-        playbook_match = re.search(r'PLAYBOOK:\s*(.+)', thought)
-        finish_match = re.search(r'FINISH:\s*(.+)', thought, re.DOTALL)
-        
-        if tool_match and not finish_match:
-            tool_name = tool_match.group(1).strip().strip('"\'')
-            return {"type": "tool", "name": tool_name, "params": self._parse_params(thought)}
-        
-        if playbook_match and not finish_match:
-            playbook_name = playbook_match.group(1).strip().strip('"\'')
-            return {"type": "playbook", "name": playbook_name, "params": self._parse_params(thought)}
-        
-        if finish_match and has_data:
-            return {"type": "finish", "result": finish_match.group(1).strip()}
-        
-        if finish_match and not has_data:
-            return {"type": "fallback", "params": {"query": state["goal"]}}
-        
-        # 2. Try model-native format: <|channel|>commentary to=X <|message|>{"query":"..."}
-        # Extract the target from to=<target>
-        channel_match = re.search(r'to=(\w+)', thought)
-        msg_match = re.search(r'<\|message\|>\s*(\{[^}]+\})', thought)
-        
-        if channel_match:
-            target = channel_match.group(1)
-            # Extract params from <|message|> JSON if present
-            params = {}
-            if msg_match:
-                try:
-                    params = json.loads(msg_match.group(1))
-                except json.JSONDecodeError:
-                    pass
-            query = params.get("query", params.get("search", state["goal"]))
-
-            # Check if target maps to a known tool
-            if target in self._CHANNEL_TO_TOOL:
-                mapping = self._CHANNEL_TO_TOOL[target]
-                tool_params = params if params else {"queries": [query]}
-                print(f"[PLANNER] Model-native → tool '{mapping['name']}', query: {query[:100]}")
-                return {"type": "tool", "name": mapping["name"], "params": tool_params}
-
-            # Check if target maps to a known playbook
-            if target in self._CHANNEL_TO_PLAYBOOK:
-                playbook_name = self._CHANNEL_TO_PLAYBOOK[target]
-                allowed = state.get("allowed_playbooks")
-                if allowed and playbook_name not in allowed:
-                    print(f"[PLANNER] Model-native → playbook '{playbook_name}' not in allowed {allowed}")
-                    # Fall through to fallback
-                else:
-                    print(f"[PLANNER] Model-native → playbook '{playbook_name}', query: {query[:100]}")
-                    return {"type": "playbook", "name": playbook_name, "params": {"query": query}}
-
-            # Unknown target — use as fallback query
-            print(f"[PLANNER] Model-native target '{target}' unrecognized, using query: {query[:100]}")
-            return {"type": "fallback", "params": {"query": query}}
-
-        # 3. If <|message|> exists without <|channel|>, extract query
-        if msg_match:
-            try:
-                params = json.loads(msg_match.group(1))
-                query = params.get("query", params.get("search", state["goal"]))
-                print(f"[PLANNER] Parsed model-native message, query: {query[:100]}")
-                return {"type": "fallback", "params": {"query": query}}
-            except json.JSONDecodeError:
-                pass
-        
-        # 4. Try to extract any JSON with a "query" key
-        json_match = re.search(r'\{[^{}]*"query"\s*:\s*"([^"]+)"[^{}]*\}', thought)
-        if json_match:
-            query = json_match.group(1)
-            print(f"[PLANNER] Extracted query from JSON: {query[:100]}")
-            return {"type": "fallback", "params": {"query": query}}
-        
-        # 5. If we already have data and format is unrecognized, finish
-        if has_data:
-            print(f"[PLANNER] Data gathered + unrecognized format -> finishing")
-            return {"type": "finish", "result": "Analysis complete based on gathered data."}
-        
-        # 6. Last resort: fallback to best available playbook
-        return {"type": "fallback", "params": {"query": state["goal"]}}
-
-    def _has_gathered_data(self, state: PlannerState) -> bool:
-        """Check if agent has gathered any codebase data via tools/playbooks."""
-        for obs in state.get("observations", []):
-            if obs.get("success"):
-                return True
-        return False
+    def _get_fallback_playbook(self, allowed_playbooks=None):
+        """Get the best fallback playbook, respecting allowed_playbooks constraint."""
+        if allowed_playbooks:
+            return allowed_playbooks[0]
+        available = self.registry.list_playbooks()
+        for preferred in ["catalog_search", "code_analyzer"]:
+            if preferred in available:
+                return preferred
+        return available[0] if available else "catalog_search"
     
-    async def _act(self, state: PlannerState) -> PlannerState:
-        """Execute the selected playbook or tool."""
-        print(f"\n[PLANNER] Act")
-        await asyncio.sleep(0)  # Yield to event loop
-        await self._emit_update(state)
-        
-        if not state["plan"]:
-            print(f"[PLANNER] No plan to execute")
-            state["observations"] = state.get("observations", []) + [{"error": "No action selected"}]
-            return state
-        
-        action = state["plan"][0]
-        
-        if "tool" in action:
-            # Direct tool call (no LLM, fast)
-            tool_name = action["tool"]
-            params = action.get("params", {})
-            if "repo_id" not in params:
-                params["repo_id"] = state["repo_id"]
-            
-            print(f"[PLANNER] Executing tool: {tool_name}")
-            try:
-                tools = self.executor.tools
-                result = await tools.execute_tool(tool_name, params)
-                
-                state["actions"] = state.get("actions", []) + [action]
-                state["observations"] = state.get("observations", []) + [{
-                    "success": "error" not in result,
-                    "outputs": result,
-                    "source": "tool",
-                }]
-                print(f"[PLANNER] Tool returned: {list(result.keys())}")
-            except Exception as e:
-                print(f"[PLANNER] Tool error: {e}")
-                state["actions"] = state.get("actions", []) + [action]
-                state["observations"] = state.get("observations", []) + [{
-                    "success": False, "error": str(e), "outputs": {}
-                }]
-        else:
-            # Playbook call (LLM-powered)
-            playbook_name = action["playbook"]
-            user_input = action.get("params", {})
-            user_input["goal"] = state["goal"]
-            if "repo_id" not in user_input:
-                user_input["repo_id"] = state["repo_id"]
-            
-            print(f"[PLANNER] Executing playbook: {playbook_name}")
-            try:
-                result = await self.executor.execute(playbook_name, user_input)
-                state["actions"] = state.get("actions", []) + [action]
-                state["observations"] = state.get("observations", []) + [result]
-                
-                if result["success"]:
-                    print(f"[PLANNER] Playbook succeeded")
-                else:
-                    print(f"[PLANNER] Playbook failed: {result.get('error')}")
-            except Exception as e:
-                print(f"[PLANNER] Execution error: {e}")
-                state["actions"] = state.get("actions", []) + [action]
-                state["observations"] = state.get("observations", []) + [{
-                    "success": False, "error": str(e), "outputs": {}
-                }]
-        
-        return state
-    
-    async def _observe(self, state: PlannerState) -> PlannerState:
-        """Process observation from playbook/tool execution."""
-        print(f"\n[PLANNER] Observe")
-        await asyncio.sleep(0)  # Yield to event loop
-        await self._emit_update(state)
-        
-        if state["observations"]:
-            obs = state["observations"][-1]
-            success = obs.get("success", False)
-            
-            if success:
-                outputs = obs.get("outputs", {})
-                if isinstance(outputs, dict):
-                    for key, val in outputs.items():
-                        if isinstance(val, str):
-                            print(f"[PLANNER] [{key}]: {len(val)} chars")
-                        elif isinstance(val, list):
-                            print(f"[PLANNER] [{key}]: {len(val)} items")
-                        else:
-                            print(f"[PLANNER] [{key}]: {type(val).__name__}")
-                else:
-                    print(f"[PLANNER] Observed: {type(outputs).__name__}")
-            else:
-                print(f"[PLANNER] Error: {obs.get('error')}")
-        
-        return state
-    
-    async def _finish(self, state: PlannerState) -> PlannerState:
+    async def _finish(self, state: PlannerState) -> dict:
         """
         Synthesize final answer from execution history.
         Uses playbook output directly when available, otherwise synthesizes.
         """
         print(f"\n[PLANNER] Finish")
-        await asyncio.sleep(0)  # Yield to event loop
+        await asyncio.sleep(0)
         await self._emit_update(state)
         
-        # Collect all successful outputs
+        # Collect successful outputs from observations AND tool messages
         playbook_output = None
         all_data = []
         
+        # Check observations (legacy format)
         for obs in state.get("observations", []):
             if obs.get("success") and obs.get("outputs"):
                 outputs = obs["outputs"]
-                
                 if isinstance(outputs, dict) and outputs.get("result"):
                     playbook_output = outputs["result"]
-                
                 if isinstance(outputs, dict):
                     for key, val in outputs.items():
                         if isinstance(val, str) and len(val) > 20:
@@ -455,25 +401,46 @@ class PlannerAgent:
                         elif isinstance(val, list):
                             all_data.append(str(val[:10]))
         
-        print(f"[PLANNER] Collected: playbook_output={'yes' if playbook_output else 'no'} ({len(playbook_output) if playbook_output else 0} chars), all_data={len(all_data)} items")
+        # Also collect data from tool messages in the message history
+        for msg in state.get("messages", []):
+            if isinstance(msg, ToolMessage):
+                content = msg.content
+                if isinstance(content, str) and len(content) > 20:
+                    # Check if it's a playbook result (JSON with "result" key)
+                    try:
+                        parsed = json.loads(content)
+                        if isinstance(parsed, dict) and parsed.get("result"):
+                            playbook_output = parsed["result"]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    all_data.append(content[:2000])
         
-        # Extract action names (handle both "playbook" and "tool" keys)
+        print(f"[PLANNER] Collected: playbook_output={'yes' if playbook_output else 'no'}, all_data={len(all_data)} items")
+        
+        # Extract action names
         actions_used = []
+        for msg in state.get("messages", []):
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    actions_used.append(tc.get("name", "unknown"))
+        # Also from legacy actions
         for a in state.get("actions", []):
             name = a.get("playbook") or a.get("tool") or "unknown"
             actions_used.append(name)
         
         if playbook_output:
-            print(f"[PLANNER] ✅ Using playbook output directly ({len(playbook_output)} chars) — no LLM call needed")
-            state["final_answer"] = {
-                "goal": state["goal"],
-                "answer": playbook_output,
-                "steps_taken": len(state["actions"]),
-                "iterations": state["iteration"],
-                "playbooks_used": actions_used
+            print(f"[PLANNER] ✅ Using playbook output directly ({len(playbook_output)} chars)")
+            return {
+                "final_answer": {
+                    "goal": state["goal"],
+                    "answer": playbook_output,
+                    "steps_taken": len(actions_used),
+                    "iterations": state.get("iteration", 0),
+                    "playbooks_used": actions_used,
+                }
             }
         elif all_data:
-            print(f"[PLANNER] 🔄 Synthesizing from {len(all_data)} data sources — calling LLM...")
+            print(f"[PLANNER] 🔄 Synthesizing from {len(all_data)} data sources")
             
             data_context = "\n---\n".join(all_data[:5])
             
@@ -486,167 +453,120 @@ class PlannerAgent:
             )
             
             try:
-                # Use config max_tokens: ~10% for synthesis
-                synth_tokens = max(512, self.llm.config.max_tokens // 10)
-                print(f"[PLANNER] LLM synthesis call: prompt={len(synthesis_prompt)} chars, max_tokens={synth_tokens}")
+                config = getattr(self.llm, 'config', None)
+                synth_tokens = max(512, (config.max_tokens if config else 4096) // 10)
                 answer_text = await self.llm.generate(
                     synthesis_prompt,
                     system_prompt="You are a helpful code analysis assistant. Answer questions based only on the provided data.",
                     max_tokens=synth_tokens
                 )
-                print(f"[PLANNER] ✅ LLM synthesis complete: {len(answer_text)} chars")
+                print(f"[PLANNER] ✅ Synthesis complete: {len(answer_text)} chars")
                 
-                state["final_answer"] = {
-                    "goal": state["goal"],
-                    "answer": answer_text,
-                    "steps_taken": len(state["actions"]),
-                    "iterations": state["iteration"],
-                    "playbooks_used": actions_used
+                return {
+                    "final_answer": {
+                        "goal": state["goal"],
+                        "answer": answer_text,
+                        "steps_taken": len(actions_used),
+                        "iterations": state.get("iteration", 0),
+                        "playbooks_used": actions_used,
+                    }
                 }
             except Exception as e:
                 print(f"[PLANNER] Synthesis error: {e}")
-                state["final_answer"] = {
-                    "goal": state["goal"],
-                    "answer": state.get("final_result", "Unable to complete goal"),
-                    "steps_taken": len(state["actions"]),
-                    "iterations": state["iteration"],
-                    "playbooks_used": actions_used,
-                    "error": str(e)
+                return {
+                    "final_answer": {
+                        "goal": state["goal"],
+                        "answer": state.get("final_result", "Unable to complete goal"),
+                        "steps_taken": len(actions_used),
+                        "iterations": state.get("iteration", 0),
+                        "playbooks_used": actions_used,
+                        "error": str(e),
+                    }
                 }
         else:
             print(f"[PLANNER] No data gathered, using final_result")
-            state["final_answer"] = {
-                "goal": state["goal"],
-                "answer": state.get("final_result", "Unable to gather information from the codebase."),
-                "steps_taken": len(state["actions"]),
-                "iterations": state["iteration"],
-                "playbooks_used": actions_used
+            return {
+                "final_answer": {
+                    "goal": state["goal"],
+                    "answer": state.get("final_result", "Unable to gather information from the codebase."),
+                    "steps_taken": len(actions_used),
+                    "iterations": state.get("iteration", 0),
+                    "playbooks_used": actions_used,
+                }
             }
-        
-        return state
-    
-    def _should_continue(self, state: PlannerState) -> Literal["act", "finish"]:
-        """Decide whether to continue executing or finish."""
-        if state["finished"]:
-            return "finish"
-        
-        if state["iteration"] >= state["max_iterations"]:
-            print(f"[PLANNER] Max iterations ({state['max_iterations']}) reached")
-            state["finished"] = True
-            state["final_result"] = "Maximum iterations reached"
-            return "finish"
-        
-        if not state["plan"]:
-            if not self._has_gathered_data(state):
-                fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
-                print(f"[PLANNER] No plan but no data yet. Forcing {fallback_pb} playbook.")
-                state["plan"] = [{"playbook": fallback_pb, "params": {"query": state["goal"]}}]
-                return "act"
-            
-            print(f"[PLANNER] No plan, finishing")
-            state["finished"] = True
-            state["final_result"] = "No plan available"
-            return "finish"
-        
-        return "act"
     
     def _format_history(self, state: PlannerState) -> str:
-        """Format history with action names AND result summaries."""
-        iteration = state["iteration"]
+        """Format history from message list + legacy observations."""
+        iteration = state.get("iteration", 0)
         
         if iteration == 0:
-            return "No actions taken yet. You MUST use a PLAYBOOK or TOOL first."
-        
-        actions = state.get("actions", [])
-        observations = state.get("observations", [])
-        
-        start_idx = max(0, len(actions) - 3)
-        recent_actions = actions[start_idx:]
-        recent_obs = observations[start_idx:]
+            return "No actions taken yet. You MUST use a tool or playbook first."
         
         history = []
-        for i, (action, obs) in enumerate(zip(recent_actions, recent_obs), start=start_idx + 1):
+        
+        # Format from messages (new style)
+        messages = state.get("messages", [])
+        tool_call_idx = 0
+        for msg in messages[-6:]:  # Last few messages
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_call_idx += 1
+                    history.append(f"{tool_call_idx}. [TOOL CALL] {tc['name']}({json.dumps(tc.get('args', {}))[:200]})")
+            elif isinstance(msg, ToolMessage):
+                content = msg.content[:300] if msg.content else "empty"
+                history.append(f"   Result: {content}...")
+        
+        # Also include legacy observations
+        actions = state.get("actions", [])
+        observations = state.get("observations", [])
+        start_idx = max(0, len(actions) - 3)
+        
+        for i, (action, obs) in enumerate(zip(actions[start_idx:], observations[start_idx:]), start=start_idx + 1):
             name = action.get("playbook") or action.get("tool") or "unknown"
             action_type = "PLAYBOOK" if "playbook" in action else "TOOL"
             success = "OK" if obs.get("success") else "FAIL"
             
-            line = f"{i}. [{action_type}] {name} ({success})"
-            
+            line = f"{i + tool_call_idx}. [{action_type}] {name} ({success})"
             if obs.get("success") and obs.get("outputs"):
                 outputs = obs["outputs"]
-                if isinstance(outputs, dict):
-                    result_text = outputs.get("result", "")
-                    if result_text:
-                        line += f"\n   Preview: {result_text[:300]}..."
-                    else:
-                        summaries = []
-                        for key, val in outputs.items():
-                            if isinstance(val, str):
-                                summaries.append(f"{key}: {len(val)} chars")
-                            elif isinstance(val, list):
-                                summaries.append(f"{key}: {len(val)} items")
-                        if summaries:
-                            line += f"\n   Data: {', '.join(summaries)}"
+                if isinstance(outputs, dict) and outputs.get("result"):
+                    line += f"\n   Preview: {outputs['result'][:300]}..."
             elif obs.get("error"):
                 line += f"\n   Error: {obs['error'][:200]}"
             
             history.append(line)
         
         return "\n".join(history) if history else "No actions taken yet."
-
-    def _format_playbooks_for_prompt(self, allowed: list[str] = None) -> str:
-        """Format playbooks concisely."""
-        playbooks = []
-        for name in self.registry.list_playbooks():
-            if allowed and name not in allowed:
-                continue
-            playbook = self.registry.get_playbook(name)
-            playbooks.append(f"- {name}: {playbook.when_to_use[:200]}")
-        return "\n".join(playbooks)
-
-    # Tools that are relevant when specific playbooks are constrained
-    _PLAYBOOK_RELEVANT_TOOLS = {
-        "catalog_search": {"search_catalogs"},
-        "catalog_generator": {"search_codebase", "save_catalog_entry"},
-        "code_analyzer": {"search_codebase", "read_file", "search_symbol", "get_callers", "get_callees", "get_dependencies", "list_files"},
-    }
-
-    def _format_tools_for_prompt(self, allowed_playbooks: list[str] | None = None) -> str:
-        """Format tool descriptions for the thinking prompt.
+    
+    async def execute(self, goal: str, repo_id: str | None = None,
+                      max_iterations: int = 10, on_update=None,
+                      allowed_playbooks: list[str] = None,
+                      thread_id: str | None = None) -> dict:
+        """Execute planner for a goal.
         
-        When allowed_playbooks is set, only show tools relevant to those playbooks.
+        Same interface as before — drop-in replacement.
         """
-        from codemind.playbooks.tools import PlaybookTools
-        tools = PlaybookTools.get_tool_descriptions()
-        
-        # Filter tools if playbooks are constrained
-        if allowed_playbooks:
-            relevant_tools = set()
-            for pb in allowed_playbooks:
-                relevant_tools |= self._PLAYBOOK_RELEVANT_TOOLS.get(pb, set())
-            if relevant_tools:
-                tools = [t for t in tools if t["name"] in relevant_tools]
-        
-        lines = []
-        for t in tools:
-            lines.append(f"- {t['name']}: {t['description']}")
-        return "\n".join(lines)
-
-    async def execute(self, goal: str, repo_id: str | None = None, max_iterations: int = 10, on_update=None, allowed_playbooks: list[str] = None) -> dict:
-        """Execute planner for a goal."""
-        self.on_update = on_update  # Register callback
+        self.on_update = on_update
         
         print(f"\n{'='*60}")
         print(f"[PLANNER] Starting autonomous execution")
         print(f"[PLANNER] Goal: {goal}")
         print(f"[PLANNER] Repo: {repo_id or 'ALL'}")
         if allowed_playbooks:
-             print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
+            print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
         print(f"{'='*60}")
         
+        # Create tools based on allowed_playbooks
+        tools = self._create_tools(allowed_playbooks)
+        print(f"[PLANNER] Available tools: {[t.name for t in tools]}")
+        
+        # Build workflow with these tools
+        workflow = self._build_workflow(tools)
+        
         initial_state: PlannerState = {
+            "messages": [],  # MessagesState field
             "goal": goal,
-            "repo_id": repo_id,  # Can be None now
+            "repo_id": repo_id,
             "allowed_playbooks": allowed_playbooks,
             "plan": [],
             "current_step": 0,
@@ -657,19 +577,29 @@ class PlannerAgent:
             "max_iterations": max_iterations,
             "finished": False,
             "final_result": "",
-            "final_answer": None
+            "final_answer": None,
         }
         
         try:
-            result = await self.workflow.ainvoke(initial_state)
+            # Generate thread_id for checkpointing if not provided
+            if not thread_id:
+                thread_id = str(uuid.uuid4())
+            config = {"configurable": {"thread_id": thread_id}}
+            print(f"[PLANNER] Thread ID: {thread_id}")
+            
+            result = await workflow.ainvoke(initial_state, config=config)
             
             print(f"\n{'='*60}")
             print(f"[PLANNER] Execution complete")
-            print(f"[PLANNER] Steps: {len(result['actions'])}")
-            print(f"[PLANNER] Iterations: {result['iteration']}")
+            print(f"[PLANNER] Iterations: {result.get('iteration', 0)}")
             print(f"{'='*60}\n")
             
-            return result["final_answer"]
+            return result.get("final_answer", {
+                "goal": goal,
+                "answer": result.get("final_result", "No result"),
+                "steps_taken": 0,
+                "iterations": result.get("iteration", 0),
+            })
         
         except Exception as e:
             print(f"\n[PLANNER] Execution failed: {e}")
@@ -681,5 +611,5 @@ class PlannerAgent:
                 "answer": f"Execution failed: {e}",
                 "steps_taken": 0,
                 "iterations": 0,
-                "error": str(e)
+                "error": str(e),
             }

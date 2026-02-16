@@ -4,6 +4,10 @@ Agent Planner Loop Tests.
 Tests the PlannerAgent's Think-Act-Observe-Finish loop with mocked
 LLM and tools. No real LLM or indexed data required.
 
+The new planner uses CmindChatModel.bind_tools() with prompt-based
+tool calling. Mock LLM responses must return JSON tool_calls format
+that _extract_tool_calls can parse.
+
 Run: pytest tests/test_agents/test_planner_agent.py -v
 """
 
@@ -17,15 +21,16 @@ from unittest.mock import MagicMock
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_think_response(action_type: str, name: str, params: dict | None = None) -> str:
-    """Create a mock LLM think response."""
-    p = json.dumps(params or {})
-    return f"THOUGHT: I need to analyze the codebase.\n{action_type}: {name}\nPARAMS: {p}"
+def make_tool_call_response(tool_name: str, args: dict) -> str:
+    """Create a mock LLM response with a tool call in JSON format."""
+    return json.dumps({
+        "tool_calls": [{"name": tool_name, "args": args}]
+    })
 
 
 def make_finish_response(answer: str = "Analysis complete.") -> str:
-    """Create a mock LLM finish response."""
-    return f"THOUGHT: I have enough information.\nFINISH: {answer}"
+    """Create a mock LLM finish response (plain text, no tool calls)."""
+    return answer
 
 
 def make_final_answer(answer: str = "The code uses FastAPI.", **kwargs) -> str:
@@ -48,19 +53,18 @@ class TestPlannerSingleIteration:
     """Test that the planner can complete in a single iteration."""
 
     def test_single_iteration_finish(self, mock_llm_with_responses, playbook_registry, playbook_tools):
-        """Agent thinks → acts → observes → finishes in 1 iteration."""
+        """Agent thinks → calls playbook tool → observes → finishes."""
         from codemind.playbooks import PlaybookExecutor
         from codemind.agents import PlannerAgent
 
-        # LLM calls: think → (executor: llm_generate) → observe → think(finish) → synthesize
         llm = mock_llm_with_responses([
-            # Think step: select code_analyzer
-            make_think_response("PLAYBOOK", "code_analyzer", {"query": "API endpoints"}),
-            # Executor's LLM generation (search_code finds nothing, so LLM runs on empty context)
+            # Think step: LLM outputs a tool call for playbook_catalog_search
+            make_tool_call_response("playbook_catalog_search", {"query": "API endpoints"}),
+            # Executor's LLM generation (for the playbook execution itself)
             json.dumps({"analysis": "No code available to analyze."}),
-            # Observe + Think: finish
+            # Think again: LLM finishes (plain text, no tool call)
             make_finish_response("I found no code to analyze."),
-            # Synthesize final answer
+            # Synthesis LLM call
             make_final_answer("No relevant code was found for this query."),
         ])
 
@@ -80,11 +84,13 @@ class TestPlannerMaxIterations:
         from codemind.playbooks import PlaybookExecutor
         from codemind.agents import PlannerAgent
 
-        # Always return a playbook action, never finish — forces max_iterations
+        # Always return a tool call, never finish — forces max_iterations
         responses = []
         for i in range(20):
-            responses.append(make_think_response("PLAYBOOK", "code_analyzer", {"query": f"query {i}"}))
-            responses.append(json.dumps({"analysis": f"Finding {i}: some code pattern."}))
+            responses.append(make_tool_call_response(
+                "playbook_catalog_search", {"query": f"query {i}"}
+            ))
+            responses.append(json.dumps({"analysis": f"Finding {i}: some pattern."}))
         responses.append(make_final_answer("Ran out of iterations."))
 
         llm = mock_llm_with_responses(responses)
@@ -101,13 +107,15 @@ class TestPlannerToolDispatch:
     """Test that the planner dispatches tools correctly."""
 
     def test_tool_dispatch_search(self, mock_llm_with_responses, playbook_registry, playbook_tools):
-        """Agent selects TOOL:search_codebase and the tool is called."""
+        """Agent selects search_codebase tool via JSON tool call."""
         from codemind.playbooks import PlaybookExecutor
         from codemind.agents import PlannerAgent
 
         llm = mock_llm_with_responses([
             # Think: use search tool
-            make_think_response("TOOL", "search_codebase", {"query": "auth", "repo_id": "test123"}),
+            make_tool_call_response("search_codebase", {
+                "queries": ["auth"], "repo_id": "test123"
+            }),
             # Think: finish after observing results
             make_finish_response("Auth module found at auth.py."),
             # Synthesize
@@ -130,8 +138,8 @@ class TestPlannerAllowedPlaybooks:
         from codemind.agents import PlannerAgent
 
         llm = mock_llm_with_responses([
-            # Think: try to use code_analyzer (which IS allowed)
-            make_think_response("PLAYBOOK", "code_analyzer", {"query": "endpoints"}),
+            # Think: call the allowed playbook
+            make_tool_call_response("playbook_catalog_search", {"query": "endpoints"}),
             # Executor LLM
             json.dumps({"analysis": "Found some endpoints."}),
             # Finish
@@ -146,7 +154,7 @@ class TestPlannerAllowedPlaybooks:
             "Find endpoints",
             repo_id="test123",
             max_iterations=5,
-            allowed_playbooks=["code_analyzer"]
+            allowed_playbooks=["catalog_search"]
         ))
 
         assert result is not None
@@ -161,10 +169,8 @@ class TestPlannerErrorRecovery:
         from codemind.agents import PlannerAgent
 
         llm = mock_llm_with_responses([
-            # Think: select nonexistent playbook (will be auto-corrected to code_analyzer)
-            make_think_response("PLAYBOOK", "nonexistent_playbook", {}),
-            # Executor LLM (for auto-corrected code_analyzer)
-            json.dumps({"analysis": "Recovered."}),
+            # Think: call a tool that may fail — the fallback will kick in
+            make_tool_call_response("search_codebase", {"queries": ["nonexistent"], "repo_id": "test123"}),
             # Think: recover and finish
             make_finish_response("Could not execute, but recovered."),
             # Synthesize
@@ -188,11 +194,11 @@ class TestPlannerStateAccumulation:
         from codemind.agents import PlannerAgent
 
         llm = mock_llm_with_responses([
-            # Iteration 1: Think → playbook
-            make_think_response("PLAYBOOK", "code_analyzer", {"query": "step 1"}),
-            # Iteration 1: Executor LLM
+            # Iteration 1: Think → playbook tool call
+            make_tool_call_response("playbook_catalog_search", {"query": "step 1"}),
+            # Executor LLM for playbook
             json.dumps({"analysis": "Step 1 complete."}),
-            # Iteration 2: Think → finish
+            # Iteration 2: Think → finish (plain text)
             make_finish_response("All done after 2 iterations."),
             # Synthesize
             make_final_answer("Completed in 2 iterations."),
@@ -205,7 +211,7 @@ class TestPlannerStateAccumulation:
 
         assert result is not None
         # The LLM was called multiple times
-        assert llm._call_count >= 3  # At least think + executor + finish
+        assert llm._call_count >= 2  # At least think + playbook executor
 
 
 class TestPlannerFinishBehavior:
@@ -218,9 +224,9 @@ class TestPlannerFinishBehavior:
 
         llm = mock_llm_with_responses([
             # Think: FINISH is NOT allowed on first call (no data yet)
-            # So the planner will force a playbook call
-            make_think_response("PLAYBOOK", "code_analyzer", {"query": "rare thing"}),
-            # Executor LLM
+            # The planner's fallback will force a playbook call
+            make_finish_response("I want to finish early"),
+            # Executor LLM (from fallback playbook)
             json.dumps({"analysis": "Nothing found."}),
             # Think: now can finish (has data from one run)
             make_finish_response("Unable to find relevant information."),

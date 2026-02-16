@@ -80,15 +80,14 @@ class PlaybookResponse(BaseModel):
     logs: list[str] = []
 
 
-def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder, manifest_mgr=None, db=None):
+def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, manifest_mgr=None, db=None):
     """
     Initialize autonomous agent system.
     
     Args:
-    Args:
         lance_storage: LanceDB storage instance
         graph_service: GraphQueryService instance
-        llm_client: LLM client for generation
+        chat_model: CmindChatModel instance (LangChain-compatible)
         embedder: Embedder for query encoding
         manifest_mgr: ManifestManager instance (optional)
         db: Database instance (optional)
@@ -109,17 +108,20 @@ def init_autonomous_agents(lance_storage, graph_service, llm_client, embedder, m
     # Initialize tools (only search_codebase now)
     tools = PlaybookTools(lance_storage, graph_service, embedder, db)
     
-    # Initialize executor (now needs LLM for prompt-based execution)
-    executor = PlaybookExecutor(registry, tools, llm_client)
+    # Extract raw LLMDriver for executor (uses .generate() directly)
+    llm_driver = chat_model.driver
+    
+    # Initialize executor with raw driver
+    executor = PlaybookExecutor(registry, tools, llm_driver)
     playbook_executor = executor
     
-    # Initialize planner
-    planner_agent = PlannerAgent(registry, executor, llm_client)
+    # Initialize planner with chat model (uses bind_tools/ToolNode)
+    planner_agent = PlannerAgent(registry, executor, llm_driver)
     
-    # Initialize selector
-    playbook_selector = PlaybookSelector(registry, llm_client)
+    # Initialize selector with raw driver
+    playbook_selector = PlaybookSelector(registry, llm_driver)
     
-    print(f"[AUTONOMOUS] ✓ Autonomous agent system ready")
+    print(f"[AUTONOMOUS] ✓ Autonomous agent system ready (LangChain chat model)")
     print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
@@ -165,7 +167,8 @@ async def run_autonomous_task(
             repo_id, 
             max_iterations, 
             on_update=update_job_state,
-            allowed_playbooks=allowed_playbooks
+            allowed_playbooks=allowed_playbooks,
+            thread_id=job_id
         )
         
         # Update job with result

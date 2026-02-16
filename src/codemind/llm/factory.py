@@ -71,3 +71,18 @@ def get_llm_client():
 
     # Final fallback to standard Local
     return LocalDriver(create_config(LLMProvider.LOCAL))
+
+
+def get_chat_model():
+    """Get LangChain-compatible chat model wrapping existing LLM driver.
+    
+    Returns a CmindChatModel that bridges our custom LLMDriver to
+    LangChain's BaseChatModel interface, enabling LangGraph features
+    like bind_tools(), ToolNode, and with_structured_output().
+    
+    The underlying LLM driver is selected by get_llm_client().
+    """
+    from .chat_wrapper import CmindChatModel
+    driver = get_llm_client()
+    return CmindChatModel(driver=driver)
+

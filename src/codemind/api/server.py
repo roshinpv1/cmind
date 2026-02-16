@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from codemind.jobs import JobManager, JobStatus
-from codemind.llm.factory import get_llm_client
+from codemind.llm.factory import get_llm_client, get_chat_model
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
 
@@ -92,6 +92,14 @@ async def lifespan(app: FastAPI):
     from codemind.graph import SQLiteGraphAdapter
     from codemind.graph.graph_query import GraphQueryService
 
+    # Configure LangSmith tracing (if API key is set)
+    from codemind.llm.tracing import configure_tracing
+    tracing_status = configure_tracing()
+    if tracing_status["enabled"]:
+        print(f"[SERVER] 📊 LangSmith tracing enabled → project: {tracing_status['project']}")
+    else:
+        print(f"[SERVER] 📊 LangSmith tracing disabled ({tracing_status['reason']})")
+
     # Initialize services
     app.state.manifest = ManifestManager()
     app.state.lance_storage = LanceDBStorage()
@@ -109,18 +117,18 @@ async def lifespan(app: FastAPI):
     app.include_router(agents_module.router)
     print("[SERVER] ✅ Agent system initialized")
     
-    # Initialize autonomous agent system (playbook-based)
+    # Initialize autonomous agent system (playbook-based, LangChain-native)
     from .autonomous_agents import init_autonomous_agents, router as autonomous_router
     init_autonomous_agents(
         app.state.lance_storage,
         app.state.graph_query,
-        get_llm_client(),
+        get_chat_model(),
         app.state.embedder,
         app.state.manifest,  # Pass manifest manager
         app.state.job_manager.db # Pass DB instance
     )
     app.include_router(autonomous_router)
-    print("[SERVER] ✅ Autonomous agent system initialized")
+    print("[SERVER] ✅ Autonomous agent system initialized (LangChain)")
 
     yield
 

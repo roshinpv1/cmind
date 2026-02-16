@@ -1,26 +1,27 @@
 """
 Planner state definition for autonomous agent execution.
 
-The planner uses this state to track:
-- Goal and context
-- Planning decisions
-- Execution history (thoughts, actions, observations)
-- Termination status
+Uses LangGraph's MessagesState for native tool calling support,
+extended with cmind-specific fields for goal tracking and control.
 """
 
-from typing import TypedDict, Annotated, Optional, Literal
+from typing import TypedDict, Annotated, Optional
+from langgraph.graph import MessagesState
 import operator
 
 
-class PlannerState(TypedDict):
+class PlannerState(MessagesState):
     """
     State for autonomous planner agent.
     
-    The planner iterates through think-act-observe until goal is satisfied.
+    Extends LangGraph's MessagesState (which provides a `messages` list)
+    with cmind-specific fields for goal tracking and execution control.
+    
+    The planner iterates through think → tool_call → observe until 
+    goal is satisfied.
     """
     
     # === Input ===
-    goal: str  # User's natural language goal
     goal: str  # User's natural language goal
     repo_id: Optional[str]  # Repository to work with (None for global)
     allowed_playbooks: Optional[list[str]]  # Whitelist of playbooks (None = all)

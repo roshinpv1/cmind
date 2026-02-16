@@ -221,6 +221,20 @@ class PlaybookTools:
                 all_results.sort(key=lambda x: x['score'], reverse=True)
                 final_results = all_results[:limit]
                 
+                # Debug: dump all rich_text to file
+                try:
+                    from datetime import datetime
+                    with open("/tmp/catalog_search_debug.txt", "w") as f:
+                        f.write(f"=== Catalog Search Debug — {datetime.now().isoformat()} ===\n")
+                        f.write(f"Queries: {queries}\n")
+                        f.write(f"Total matched: {len(all_results)}, Returned: {len(final_results)}\n\n")
+                        for i, r in enumerate(final_results, 1):
+                            f.write(f"--- Entry {i} (score={r['score']:.3f}, repo_id={r['repo_id']}) ---\n")
+                            f.write(r["chunk_text"] + "\n\n")
+                    print(f"[DEBUG] Catalog search debug written to /tmp/catalog_search_debug.txt ({len(final_results)} entries)")
+                except Exception as e:
+                    print(f"[DEBUG] Failed to write catalog debug: {e}")
+                
                 return {
                     "success": True,
                     "results": final_results,
