@@ -92,14 +92,6 @@ async def lifespan(app: FastAPI):
     from codemind.graph import SQLiteGraphAdapter
     from codemind.graph.graph_query import GraphQueryService
 
-    # Configure LangSmith tracing (if API key is set)
-    from codemind.llm.tracing import configure_tracing
-    tracing_status = configure_tracing()
-    if tracing_status["enabled"]:
-        print(f"[SERVER] 📊 LangSmith tracing enabled → project: {tracing_status['project']}")
-    else:
-        print(f"[SERVER] 📊 LangSmith tracing disabled ({tracing_status['reason']})")
-
     # Initialize services
     app.state.manifest = ManifestManager()
     app.state.lance_storage = LanceDBStorage()

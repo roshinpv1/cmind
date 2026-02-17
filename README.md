@@ -15,7 +15,7 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 *   **LangChain-Native**: Built on **LangChain Core** + **LangGraph** — the industry-standard agent framework. Structured output via Pydantic, `bind_tools()`, `ToolNode`, and `MemorySaver` checkpointing.
 *   **Scalable Architecture**: Built on **LanceDB** (vectors) and **SQLite** (graph + metadata), with WAL-mode concurrency, CodeMind scales to millions of lines of code without slowing down.
 *   **Privacy First**: Runs 100% locally or in your private cloud. Your code never leaves your infrastructure unless you configure it to.
-*   **Observable**: Optional **LangSmith** integration for tracing all LLM calls, tool invocations, and graph transitions in production.
+*   **Observable**: Standard structured logging and performance metrics for all LLM calls and tool invocations.
 *   **MCP-Ready**: Ships with a built-in Model Context Protocol server — use CodeMind from Claude Desktop, Cursor, or VS Code Copilot.
 
 ---
@@ -30,7 +30,7 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 - **🔄 Incremental Indexing** — LangGraph workflow with 7 pipeline stages
 - **🔗 MCP Server** — Expose tools and resources to any MCP-compatible client
 - **💾 Checkpointing** — LangGraph `MemorySaver` for agent state persistence per job
-- **📊 Tracing** — Optional LangSmith integration for full observability
+- **📊 Observability** — Standard structured logging for all LLM operations
 
 **Perfect for:**
 - Onboarding new developers
@@ -199,18 +199,6 @@ EOF
 ./run_batch_indexer.sh batch_config.json --wait
 ```
 
-### 7. LangSmith Tracing 📊
-
-Optional observability for all LangChain/LangGraph operations. When enabled, every LLM call, tool invocation, and graph state transition is automatically traced.
-
-```env
-# Enable in .env
-LANGSMITH_API_KEY=your-api-key
-LANGSMITH_PROJECT=cmind
-```
-
-No code changes required — tracing is configured at server startup via `codemind.llm.tracing.configure_tracing()`.
-
 ---
 
 ## 🏗️ Architecture
@@ -246,7 +234,7 @@ graph TD
     CM --> LLM
     
     subgraph "Observability"
-        LS["LangSmith<br/>(Optional)"]
+        LS["Logging"]
     end
     
     CM -.->|traces| LS
@@ -277,7 +265,7 @@ CodeMind is built natively on LangChain Core and LangGraph:
 | `MemorySaver` | LangGraph checkpoint | In-memory state persistence per agent job |
 | `StateGraph` | LangGraph core | Agent workflow orchestration (think → tools → finish) |
 | `@tool` decorator | LangChain tools | Playbook meta-tools and data tools |
-| LangSmith | Tracing | Optional end-to-end observability |
+| Logging | Structlog | Standard observability |
 
 ### Technology Stack
 
@@ -290,7 +278,7 @@ CodeMind is built natively on LangChain Core and LangGraph:
 | **Graph + Metadata** | [SQLite](https://sqlite.org/) via SQLAlchemy (WAL mode) |
 | **AST Parsing** | [Tree-sitter](https://tree-sitter.github.io/) (20+ languages) |
 | **Embeddings** | [BAAI/bge-base-en-v1.5](https://huggingface.co/BAAI/bge-base-en-v1.5) (768d) |
-| **Observability** | [LangSmith](https://smith.langchain.com/) (optional) |
+| **Observability** | Structlog |
 | **MCP** | [Model Context Protocol](https://modelcontextprotocol.io/) via FastMCP + httpx |
 | **Frontend** | React + Vite |
 
@@ -353,9 +341,6 @@ EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
 # EMBEDDING_API_KEY=ollama
 # EMBEDDING_MODEL=nomic-embed-text
 
-# LangSmith Tracing (optional — auto-enabled when key is set)
-# LANGSMITH_API_KEY=your-api-key
-# LANGSMITH_PROJECT=cmind
 
 # MCP Server
 # CODEMIND_API_URL=http://localhost:8000    # default
@@ -520,7 +505,6 @@ cmind/
 │   │   ├── chat_wrapper.py  # CmindChatModel (BaseChatModel), bind_tools, with_structured_output
 │   │   ├── factory.py       # get_llm_client(), get_chat_model()
 │   │   ├── providers.py     # LocalDriver, OllamaDriver, ApigeeDriver, EnterpriseDriver
-│   │   └── tracing.py       # LangSmith tracing configuration
 │   ├── mcp/                 # MCP server (Model Context Protocol proxy)
 │   ├── playbooks/           # Playbook engine
 │   │   ├── executors.py     # PlaybookExecutor (LangGraph StateGraph)
@@ -578,7 +562,6 @@ lancedb               # Vector embeddings storage
 sqlalchemy            # SQLite ORM (graph, metadata, catalogs, jobs)
 tree-sitter           # AST extraction (20+ languages)
 sentence-transformers # Local embedding generation
-langsmith             # Tracing (optional)
 fastmcp               # MCP server
 ```
 
