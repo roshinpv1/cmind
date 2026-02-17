@@ -235,7 +235,7 @@ class LanceDBStorage:
 
         # Post-filter for 50% similarity (distance < 0.5 for cosine)
         results = query.to_list()
-        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.5]
+        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.2]
         
         return filtered_results
 
