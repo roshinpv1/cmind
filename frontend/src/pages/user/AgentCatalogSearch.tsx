@@ -156,7 +156,13 @@ export default function AgentCatalogSearch() {
                                             const isLatest = i === jobStatus.logs.length - 1;
                                             const isThought = log.startsWith("Thinking:");
                                             const isAction = log.startsWith("Action");
-                                            const cleanText = log.replace(/^(Thinking:|Action \d+:)/, '').trim();
+                                            const cleanText = log
+                                                .replace(/^(Thinking:|Action \d+:)/, '')
+                                                .replace(/<\|channel\|>.*?<\|message\|>/g, '') // Strip meta-channel info
+                                                .replace(/<\|.*?\|>/g, '') // Strip remaining meta tags
+                                                .replace(/\{"query":.*?\}/g, '') // Strip tool JSON queries
+                                                .replace(/commentary to=\w+/g, '') // Strip orchestration labels
+                                                .trim();
 
                                             return (
                                                 <div
