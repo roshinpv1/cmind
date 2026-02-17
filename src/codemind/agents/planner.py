@@ -52,12 +52,12 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
         class PlaybookInput(BaseModel):
             """Input for playbook execution."""
             query: str = Field(description="Search query or goal for the playbook")
-            repo_id: Optional[str] = Field(default=None, description="Repository ID (optional)")
+            repo_id: Optional[str | list[str]] = Field(default=None, description="Repository ID or list of IDs (optional)")
         
         # We need a factory to capture pb_name in closure
         def make_pb_tool(pb_name_inner, pb_desc_inner):
             @tool(f"playbook_{pb_name_inner}", args_schema=PlaybookInput)
-            async def run_playbook(query: str, repo_id: Optional[str] = None) -> str:
+            async def run_playbook(query: str, repo_id: Optional[str | list[str]] = None) -> str:
                 f"""Execute the {pb_name_inner} playbook. {pb_desc_inner}"""
                 user_input = {"query": query, "goal": query}
                 if repo_id:
@@ -538,7 +538,7 @@ class PlannerAgent:
         
         return "\n".join(history) if history else "No actions taken yet."
     
-    async def execute(self, goal: str, repo_id: str | None = None,
+    async def execute(self, goal: str, repo_id: str | list[str] | None = None,
                       max_iterations: int = 10, on_update=None,
                       allowed_playbooks: list[str] = None,
                       thread_id: str | None = None) -> dict:

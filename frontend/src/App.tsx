@@ -3,26 +3,21 @@ import { AdminLayout, UserLayout } from "./layouts/Layout";
 import RepoList from "./pages/admin/RepoList";
 import RepoIndex from "./pages/admin/RepoIndex";
 import CatalogCreate from "./pages/admin/CatalogCreate";
-import CatalogSearch from "./pages/user/CatalogSearch";
-import ChatInterface from "./pages/user/ChatInterface";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 
 function App() {
   return (
     <Router>
       <Routes>
-        {/* User Routes */}
-        <Route path="/" element={<UserLayout><ChatInterface /></UserLayout>} />
-        <Route path="/search" element={<UserLayout><CatalogSearch /></UserLayout>} />
-        <Route path="/agent" element={<UserLayout><ChatInterface /></UserLayout>} />
-        <Route path="/catalog-agent" element={<UserLayout><AgentCatalogSearch /></UserLayout>} />
+        {/* Main Entry Points */}
+        <Route path="/" element={<Navigate to="/catalog-search" replace />} />
+        <Route path="/catalog-search" element={<UserLayout><AgentCatalogSearch /></UserLayout>} />
 
         {/* Admin Routes */}
         <Route path="/admin" element={<AdminLayout><RepoList /></AdminLayout>} />
         <Route path="/admin/repos" element={<AdminLayout><RepoList /></AdminLayout>} />
         <Route path="/admin/index" element={<AdminLayout><RepoIndex /></AdminLayout>} />
         <Route path="/admin/catalog/create" element={<AdminLayout><CatalogCreate /></AdminLayout>} />
-        <Route path="/admin/catalog/view" element={<Navigate to="/search" replace />} /> {/* Re-use search for viewing */}
 
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />

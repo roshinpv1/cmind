@@ -4,7 +4,6 @@ import {
     Database,
     Search,
     Library,
-    Settings,
     LayoutDashboard,
     Menu,
     X
@@ -19,8 +18,6 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         { name: "Dashboard", href: "/admin", icon: LayoutDashboard },
         { name: "Index Repo", href: "/admin/index", icon: Database },
         { name: "Repositories", href: "/admin/repos", icon: Library },
-        { name: "Create Catalog", href: "/admin/catalog/create", icon: Settings },
-        { name: "View Catalog", href: "/admin/catalog/view", icon: Search },
     ];
 
     return (
@@ -62,11 +59,11 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                     })}
                     <div className="pt-4 mt-4 border-t border-gray-200">
                         <Link
-                            to="/search"
+                            to="/catalog-search"
                             className="flex items-center px-4 py-3 text-sm font-medium text-gray-600 rounded-lg hover:bg-gray-100 hover:text-gray-900"
                         >
                             <Search className="w-5 h-5 mr-3" />
-                            User Search
+                            Catalog Search
                         </Link>
                     </div>
                 </nav>
@@ -90,11 +87,8 @@ export function UserLayout({ children }: { children: React.ReactNode }) {
                     <div className="flex items-center gap-8">
                         <span className="text-xl font-bold text-primary">CodeMind</span>
                         <nav className="hidden md:flex gap-4">
-                            <Link to="/catalog-agent" className="text-sm font-medium text-gray-600 hover:text-primary">
-                                Catalog Agent
-                            </Link>
-                            <Link to="/agent" className="text-sm font-medium text-gray-600 hover:text-primary">
-                                Repo Chat
+                            <Link to="/catalog-search" className="text-sm font-medium text-gray-600 hover:text-primary">
+                                Catalog Search
                             </Link>
                         </nav>
                     </div>

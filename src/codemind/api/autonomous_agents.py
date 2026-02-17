@@ -29,7 +29,7 @@ autonomous_jobs = {}
 class AutonomousRequest(BaseModel):
     """Request to execute autonomous agent."""
     goal: str = Field(..., description="Natural language goal", min_length=5)
-    repo_id: Optional[str] = Field(None, description="Repository identifier (optional for global search)")
+    repo_id: Optional[str | list[str]] = Field(None, description="Repository identifier or list of IDs (optional for global search)")
     max_iterations: int = Field(10, description="Maximum iterations", ge=1, le=50)
     allowed_playbooks: Optional[list[str]] = Field(None, description="Restrict agent to specific playbooks")
 
@@ -69,7 +69,7 @@ class PlaybookRequest(BaseModel):
     """Request to execute a specific playbook."""
     playbook_name: str = Field("auto", description="Name of the playbook to execute (or 'auto')")
     prompt: Optional[str] = Field(None, description="Input prompt for the playbook")
-    repo_id: Optional[str] = Field(None, description="Repository identifier (if needed)")
+    repo_id: Optional[str | list[str]] = Field(None, description="Repository identifier or list of IDs (if needed)")
 
 
 class PlaybookResponse(BaseModel):
@@ -128,7 +128,7 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
 async def run_autonomous_task(
     job_id: str, 
     goal: str, 
-    repo_id: Optional[str], 
+    repo_id: Optional[str | list[str]], 
     max_iterations: int,
     allowed_playbooks: Optional[list[str]] = None
 ):

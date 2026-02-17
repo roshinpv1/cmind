@@ -46,7 +46,7 @@ class PlaybookTools:
         Args:
             params: {
                 queries: list[str] - Search queries to try
-                repo_id: str - Repository ID
+                repo_id: str | list[str] - Repository ID or IDs
                 limit: int - Max results (default: 10)
                 mode: str - "semantic" or "hybrid" (default: semantic)
                 file_types: list[str] - File extensions to filter (.py, .js)

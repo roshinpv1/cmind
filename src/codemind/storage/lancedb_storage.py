@@ -196,33 +196,48 @@ class LanceDBStorage:
     def search(
         self,
         query_embedding: list[float],
-        repo_id: str | None = None,
+        repo_id: str | list[str] | None = None,
         limit: int = 10,
         table_name: str = "code_chunks",
     ) -> list[dict]:
         """
-        Semantic search over chunks.
+        Semantic search over chunks with 50% similarity threshold.
 
         Args:
             query_embedding: Query vector
-            repo_id: Optional repository filter
+            repo_id: Optional repository filter (string or list of strings)
             limit: Max results
             table_name: Table name
 
         Returns:
-            List of matching chunks with scores
+            List of matching chunks with scores >= 0.5
         """
         if table_name not in self.db.table_names():
             return []
 
         table = self.db.open_table(table_name)
 
-        query = table.search(query_embedding, vector_column_name="embedding").limit(limit)
+        # Enforce cosine metric and 50% similarity threshold (_distance < 0.5)
+        query = (
+            table.search(query_embedding, vector_column_name="embedding")
+            .metric("cosine")
+            .limit(limit)
+        )
 
         if repo_id:
-            query = query.where(f"repo_id = '{repo_id}'")
+            if isinstance(repo_id, list):
+                if repo_id:
+                    # Construct IN clause for multiple IDs
+                    ids_str = ", ".join([f"'{rid}'" for rid in repo_id])
+                    query = query.where(f"repo_id IN ({ids_str})")
+            else:
+                query = query.where(f"repo_id = '{repo_id}'")
 
-        return query.to_list()
+        # Post-filter for 50% similarity (distance < 0.5 for cosine)
+        results = query.to_list()
+        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.5]
+        
+        return filtered_results
 
     def get_all_chunks(
         self, repo_id: str | None = None, table_name: str = "code_chunks"
@@ -325,28 +340,42 @@ class LanceDBStorage:
     def search_catalogs(
         self,
         query_embedding: list[float],
-        repo_id: str | None = None,
+        repo_id: str | list[str] | None = None,
         limit: int = 10,
         table_name: str = "catalogs",
         columns: list[str] | None = None,
     ) -> list[dict]:
         """
-        Semantic search over catalog entries.
+        Semantic search over catalog entries with 50% similarity threshold.
         """
         if table_name not in self.db.table_names():
             return []
 
         table = self.db.open_table(table_name)
 
-        query = table.search(query_embedding, vector_column_name="embedding").limit(limit)
+        query = (
+            table.search(query_embedding, vector_column_name="embedding")
+            .metric("cosine")
+            .limit(limit)
+        )
 
         if repo_id:
-            query = query.where(f"repo_id = '{repo_id}'")
+            if isinstance(repo_id, list):
+                if repo_id:
+                    # Construct IN clause for multiple IDs
+                    ids_str = ", ".join([f"'{rid}'" for rid in repo_id])
+                    query = query.where(f"repo_id IN ({ids_str})")
+            else:
+                query = query.where(f"repo_id = '{repo_id}'")
             
         if columns:
             query = query.select(columns)
 
-        return query.to_list()
+        # Post-filter for 50% similarity (distance < 0.5 for cosine)
+        results = query.to_list()
+        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.5]
+        
+        return filtered_results
 
     def close(self):
         """Close database connection."""
