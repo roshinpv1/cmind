@@ -86,12 +86,24 @@ class CodeAnalyzerOutput(BaseModel):
     suggestions: list[str] = Field(default_factory=list)
 
 
+# ─── Code Explorer (ReAct) ──────────────────────────────────────────────────
+
+class CodeExplorerOutput(BaseModel):
+    """Structured output for code_explorer ReAct playbook."""
+    summary: str = Field(description="Direct answer to the question")
+    analysis: str = Field(description="Detailed walkthrough of findings")
+    key_files: list[str] = Field(default_factory=list, description="Relevant files with their roles")
+    code_flow: str = Field(default="", description="How components connect")
+    insights: list[str] = Field(default_factory=list, description="Non-obvious findings or potential issues")
+
+
 # ─── Schema Registry ────────────────────────────────────────────────────────
 
 PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
     "catalog_generator": CatalogGeneratorOutput,
     "catalog_search": CatalogSearchOutput,
     "code_analyzer": CodeAnalyzerOutput,
+    "code_explorer": CodeExplorerOutput,
 }
 
 

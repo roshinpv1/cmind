@@ -20,16 +20,18 @@ class ASTChunker:
     Falls back to character-based chunking for files without AST support.
     """
 
-    def __init__(self, max_chunk_chars: int = 2000, overlap_lines: int = 2):
+    def __init__(self, max_chunk_chars: int = 2000, overlap_lines: int = 2, min_chunk_chars: int = 50):
         """
         Initialize AST chunker.
 
         Args:
             max_chunk_chars: Max characters per chunk (large symbols get split)
             overlap_lines: Lines of overlap for split large symbols
+            min_chunk_chars: Minimum characters for a chunk to be kept
         """
         self.max_chunk_chars = max_chunk_chars
         self.overlap_lines = overlap_lines
+        self.min_chunk_chars = min_chunk_chars
         self.ast_extractor = ASTExtractor()
 
     def chunk_file(self, file_path: Path | str, content: str | None = None) -> list[CodeChunk]:
@@ -87,7 +89,10 @@ class ASTChunker:
             symbol_lines = lines[start:end]
             symbol_text = "\n".join(symbol_lines)
 
-            if len(symbol_text) > self.max_chunk_chars:
+            if len(symbol_text.strip()) < self.min_chunk_chars:
+                # Skip tiny symbols (often malformed or empty)
+                pass
+            elif len(symbol_text) > self.max_chunk_chars:
                 # Split large symbol
                 sub_chunks = self._split_large_symbol(
                     file_path, symbol_text, start, sym, language
@@ -115,7 +120,7 @@ class ASTChunker:
         uncovered_ranges = self._find_uncovered_ranges(lines, covered_lines)
         for start_idx, end_idx in uncovered_ranges:
             text = "\n".join(lines[start_idx:end_idx])
-            if text.strip():
+            if len(text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(text)
                 chunks.append(CodeChunk(
                     text=text,
@@ -153,20 +158,21 @@ class ASTChunker:
 
             chunk_lines = lines[i:end]
             chunk_text = "\n".join(chunk_lines)
-            chunk_hash = self._hash(chunk_text)
+            if len(chunk_text.strip()) >= self.min_chunk_chars:
+                chunk_hash = self._hash(chunk_text)
 
-            chunks.append(CodeChunk(
-                text=chunk_text,
-                chunk_hash=chunk_hash,
-                start_line=base_line + i + 1,
-                end_line=base_line + end,
-                start_byte=0,  # Approximate
-                end_byte=0,
-                file_path=str(file_path),
-                symbol_name=f"{sym.name}__part{part}",
-                symbol_type=sym.type,
-                language=language,
-            ))
+                chunks.append(CodeChunk(
+                    text=chunk_text,
+                    chunk_hash=chunk_hash,
+                    start_line=base_line + i + 1,
+                    end_line=base_line + end,
+                    start_byte=0,  # Approximate
+                    end_byte=0,
+                    file_path=str(file_path),
+                    symbol_name=f"{sym.name}__part{part}",
+                    symbol_type=sym.type,
+                    language=language,
+                ))
 
             i = max(i + 1, end - self.overlap_lines)
             part += 1
@@ -207,7 +213,7 @@ class ASTChunker:
             end = min(i + chunk_size_lines, len(lines))
             chunk_text = "\n".join(lines[i:end])
 
-            if chunk_text.strip():
+            if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
                 chunks.append(CodeChunk(
                     text=chunk_text,

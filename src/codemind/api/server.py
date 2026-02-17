@@ -630,8 +630,33 @@ async def create_catalog_entry(request: CatalogCreateRequest):
                     except:
                         full_catalog_data = {"raw_content": entry.content}
                 else:
-                    catalog_status = "tool_failed_no_entry"
-                    full_catalog_data = {"error": "Catalog entry not found in storage after playbook execution."}
+                    # Fallback: try to parse result from raw LLM output
+                    import re
+                    import json
+                    try:
+                        # Extract the fields we care about from the LLM's raw response
+                        # We look for a JSON block (markdown or raw)
+                        match = re.search(r'```json\s*({.*?})\s*```', execution_result, re.DOTALL)
+                        if not match:
+                             match = re.search(r'({[\s\S]*})', execution_result)
+                        
+                        if match:
+                            raw_data = json.loads(match.group(1))
+                            # If it's a tool-wrapped JSON, unwrap it
+                            if "params" in raw_data:
+                                full_catalog_data = raw_data["params"]
+                            elif "data" in raw_data and "tool_name" in raw_data:
+                                full_catalog_data = raw_data["data"]
+                            else:
+                                full_catalog_data = raw_data
+                            
+                            catalog_status = "unverified_llm_response"
+                        else:
+                            catalog_status = "tool_failed_no_entry"
+                            full_catalog_data = {"error": "Catalog entry not found in storage after playbook execution."}
+                    except:
+                        catalog_status = "tool_failed_no_entry"
+                        full_catalog_data = {"error": "Catalog entry not found and failed to parse LLM response"}
     except Exception as e:
         print(f"[ERROR] Failed to fetch catalog entry: {e}")
         full_catalog_data = {"error": f"Failed to fetch entry: {str(e)}", "partial_result": execution_result}
@@ -643,17 +668,130 @@ async def create_catalog_entry(request: CatalogCreateRequest):
         "llm_response": execution_result # Keep the original text response just in case
     }
 
+def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
+    """Transform internal catalog results into structured API response format.
+    
+    The internal format uses a flat text blob in 'chunk_text' for LLM consumption.
+    This function unpacks the metadata JSON and returns clean structured fields.
+    """
+    import json
+    formatted = []
+    for item in raw_results:
+        # Parse the metadata JSON string
+        metadata = {}
+        meta_str = item.get("metadata", "{}")
+        if isinstance(meta_str, str):
+            try:
+                metadata = json.loads(meta_str)
+            except:
+                metadata = {}
+        elif isinstance(meta_str, dict):
+            metadata = meta_str
+        
+        entry = {
+            "repo_id": item.get("repo_id", ""),
+            "repo_name": item.get("repo_name", metadata.get("repo_name", "")),
+            "score": round(item.get("score", 0.0), 4),
+            "category": metadata.get("category", ""),
+            "description": metadata.get("summary_high_level", ""),
+            "summary_detailed": "",  # Will be populated from content below
+            "architecture": metadata.get("architecture", ""),
+            "tech_stack": metadata.get("tech_stack", ""),
+            "topics": metadata.get("topics", []),
+            "quality_score": metadata.get("quality_score", 0),
+            "specification": metadata.get("specification", ""),
+            "pros": metadata.get("pros", []),
+            "cons": metadata.get("cons", []),
+            "repo_url": metadata.get("repo_url", ""),
+            "branch": metadata.get("branch", ""),
+        }
+        
+        # Coerce None values to safe defaults (metadata.get returns None when key exists but value is None)
+        for k in ["repo_id", "repo_name", "category", "description", "summary_detailed", 
+                   "architecture", "tech_stack", "specification", "repo_url", "branch"]:
+            if entry[k] is None:
+                entry[k] = ""
+        for k in ["topics", "pros", "cons"]:
+            if entry[k] is None:
+                entry[k] = []
+        if entry["quality_score"] is None:
+            entry["quality_score"] = 0
+        
+        # Try to get full content from the chunk_text (which has the detailed summary)
+        chunk_text = item.get("chunk_text", "")
+        if chunk_text:
+            # Extract detailed summary from the text blob
+            for line in chunk_text.split("\n"):
+                if line.startswith("Detailed Summary: "):
+                    entry["summary_detailed"] = line.replace("Detailed Summary: ", "").strip()
+                elif line.startswith("Description: ") and not entry["description"]:
+                    entry["description"] = line.replace("Description: ", "").strip()
+        
+        formatted.append(entry)
+    return formatted
+
+
+@app.get("/api/v1/catalogs/search")
+async def search_catalog_get(
+    query: str,
+    repo_id: str | None = None,
+    limit: int = 5,
+    min_score: float = 0.0
+):
+    """Semantic search over catalog entries (GET).
+    
+    Returns structured catalog entries with fields like repo_name, description,
+    architecture, tech_stack, topics, quality_score, pros, cons, etc.
+    """
+    from codemind.api.autonomous_agents import playbook_executor
+    
+    if not playbook_executor:
+         raise HTTPException(status_code=503, detail="Playbook system not initialized")
+    
+    params = {
+        "query": query,
+        "repo_id": repo_id,
+        "limit": limit,
+        "min_score": min_score
+    }
+    
+    result = await playbook_executor.tools.search_catalogs(params)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Search failed"))
+        
+    return _format_catalog_results(result.get("results", []))
+
+
+@app.post("/api/v1/catalogs/search")
+async def search_catalog_post(request: CatalogSearchRequest):
+    """Semantic search over catalog entries (POST).
+    
+    Returns structured catalog entries with fields like repo_name, description,
+    architecture, tech_stack, topics, quality_score, pros, cons, etc.
+    """
+    from codemind.api.autonomous_agents import playbook_executor
+    
+    if not playbook_executor:
+         raise HTTPException(status_code=503, detail="Playbook system not initialized")
+    
+    params = {
+        "query": request.query,
+        "repo_id": request.repo_id,
+        "limit": request.limit,
+        "min_score": request.min_score
+    }
+    
+    result = await playbook_executor.tools.search_catalogs(params)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Search failed"))
+        
+    return _format_catalog_results(result.get("results", []))
+
+
 @app.get("/api/v1/catalogs/{repo_id}")
 async def get_catalog_entries(repo_id: str):
     """Get catalog entries for a repository."""
     manifest: ManifestManager = app.state.manifest
-    try:
-        # We allow fetching even if not in manifest (it might be a detached repo)
-        # But good to validate if possible.
-        pass
-    except:
-        pass
-
     # Fetch from SQLite
     try:
         from codemind.storage.database import CatalogStore
@@ -678,46 +816,3 @@ async def get_catalog_entries(repo_id: str):
     except Exception as e:
         print(f"[ERROR] Failed to get catalog entries: {e}")
         return []
-
-
-@app.post("/api/v1/catalogs/search")
-async def search_catalog(request: CatalogSearchRequest):
-    """Semantic search over catalog entries."""
-    lance_storage: LanceDBStorage = app.state.lance_storage
-    embedder = app.state.embedder
-    
-    # Validate repo_id if provided
-    if request.repo_id:
-        manifest: ManifestManager = app.state.manifest
-        if not manifest.get_repository_by_id(request.repo_id):
-            raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
-    
-    # Generate query embedding
-    query_embedding = embedder.encode_query(request.query)
-    
-    # Search
-    # Note: lance_storage fetches 2*limit to allow for filtering
-    raw_results = lance_storage.search_catalogs(
-        query_embedding=query_embedding,
-        repo_id=request.repo_id,
-        limit=request.limit
-    )
-    
-    processed_results = []
-    for item in raw_results:
-        # LanceDB returns _distance. For cosine, distance = 1 - similarity.
-        # So similarity = 1 - distance.
-        score = 1 - item.get("_distance", 1.0)
-        
-        if score >= request.min_score:
-            # Clean up result (remove heavy embedding)
-            if "embedding" in item:
-                del item["embedding"]
-            
-            item["score"] = score
-            processed_results.append(item)
-    
-    # Sort by score descending (just in case)
-    processed_results.sort(key=lambda x: x["score"], reverse=True)
-    
-    return processed_results[:request.limit]

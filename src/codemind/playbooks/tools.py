@@ -6,6 +6,7 @@ Playbooks define HOW to process the retrieved code via their system prompts.
 """
 
 from datetime import UTC, datetime
+import traceback
 from codemind.storage.database import CatalogStore
 
 
@@ -94,150 +95,16 @@ class PlaybookTools:
             
             # Special handle for catalog mode
             if mode == "catalog":
-                # Reroute to search_catalogs logic
-                # New Flow: Search chunks in LanceDB -> Dedupe Repos -> Fetch Full Content from SQLite
-                all_results = []
-                seen_repos = set()
-                
-                for query in queries:
-                    q_emb = self.embedder.encode_query(query)
-                    # Search chunks!
-                    # Optimization: Only fetch relevant columns
-                    chunk_results = self.lance.search_catalogs(
-                        q_emb, 
-                        repo_id=repo_id, 
-                        limit=limit*3, 
-                        columns=["repo_id", "repo_name", "chunk_text", "metadata"] # metadata needed for score/debug? No, scoring uses _distance
-                    ) # Get more chunks to ensure enough unique repos
-                    
-                    for item in chunk_results:
-                        rid = item['repo_id']
-                        if rid in seen_repos:
-                            continue
-                        
-                        score = max(0.0, 1.0 - item.get("_distance", 1.0))
-                        print(f"[DEBUG] Catalog match: {rid} (Chunk score: {score:.2f})")
-                        
-                        if score < min_score:
-                            continue
-
-                        # Fetch FULL content from SQLite
-                        full_content = ""
-                        metadata = {}
-                        if self.db:
-                            try:
-                                with self.db.get_session() as session:
-                                    cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
-                                    if cat_entry:
-                                        full_content = cat_entry.content
-                                        metadata = cat_entry.metadata_json or {}
-                                    else:
-                                        print(f"[WARN] No SQLite entry for {rid}, falling back to chunk text")
-                                        full_content = item.get("chunk_text") or item.get("result", "")
-                            except Exception as e:
-                                print(f"[ERROR] SQLite fetch failed: {e}")
-                                full_content = item.get("chunk_text") or item.get("result", "")
-                        else:
-                             # Fallback if no DB
-                             full_content = item.get("chunk_text") or item.get("result", "")
-
-                        seen_repos.add(rid)
-                        
-                        # Enrich text for LLM - surface ALL fields explicitly
-                        import json
-                        try:
-                            content_obj = json.loads(full_content)
-                        except:
-                            content_obj = {}
-
-                        # Build rich text with all fields explicitly surfaced
-                        repo_name = content_obj.get("repo_name", metadata.get("repo_name", item.get("repo_name", rid)))
-                        parts = [
-                            f"CATALOG ENTRY: {repo_name}",
-                            f"Relevance Score: {score:.2f}",
-                        ]
-
-                        # Identity
-                        if metadata.get("repo_url"):
-                            parts.append(f"Repository URL: {metadata['repo_url']}")
-                        if metadata.get("branch"):
-                            parts.append(f"Branch: {metadata['branch']}")
-                        if metadata.get("category"):
-                            parts.append(f"Category: {metadata['category']}")
-
-                        # Descriptions - include ALL levels
-                        desc = content_obj.get("description", "")
-                        if desc:
-                            parts.append(f"Description: {desc}")
-                        high_level = metadata.get("summary_high_level", "")
-                        if high_level:
-                            parts.append(f"High-Level Summary: {high_level}")
-                        detailed = content_obj.get("summary_detailed", "")
-                        if detailed:
-                            parts.append(f"Detailed Summary: {detailed}")
-
-                        # Technical details
-                        if metadata.get("architecture"):
-                            parts.append(f"Architecture: {metadata['architecture']}")
-                        if metadata.get("tech_stack"):
-                            parts.append(f"Tech Stack: {metadata['tech_stack']}")
-                        if metadata.get("specification"):
-                            parts.append(f"Specification: {metadata['specification']}")
-
-                        # Classification
-                        topics = metadata.get("topics", [])
-                        if topics:
-                            parts.append(f"Topics: {', '.join(topics)}")
-
-                        # Quality
-                        quality = metadata.get("quality_score", 0)
-                        if quality:
-                            parts.append(f"Quality Score: {quality}/100")
-                        pros = metadata.get("pros", [])
-                        if pros:
-                            parts.append(f"Pros: {'; '.join(pros)}")
-                        cons = metadata.get("cons", [])
-                        if cons:
-                            parts.append(f"Cons: {'; '.join(cons)}")
-
-                        rich_text = "\n".join(parts)
-
-                        all_results.append({
-                            "file_path": f"catalog://{rid}",
-                            "chunk_text": rich_text,
-                            "score": score,
-                            "start_line": 0,
-                            "end_line": 0,
-                            "repo_id": rid
-                        })
-
-                        if len(all_results) >= limit:
-                            break
-                    
-                    if len(all_results) >= limit:
-                        break
-
-                # Sort and limit (already effectively limited but good to be safe)
-                all_results.sort(key=lambda x: x['score'], reverse=True)
-                final_results = all_results[:limit]
-                
-                # Debug: dump all rich_text to file
-                try:
-                    from datetime import datetime
-                    with open("/tmp/catalog_search_debug.txt", "w") as f:
-                        f.write(f"=== Catalog Search Debug — {datetime.now().isoformat()} ===\n")
-                        f.write(f"Queries: {queries}\n")
-                        f.write(f"Total matched: {len(all_results)}, Returned: {len(final_results)}\n\n")
-                        for i, r in enumerate(final_results, 1):
-                            f.write(f"--- Entry {i} (score={r['score']:.3f}, repo_id={r['repo_id']}) ---\n")
-                            f.write(r["chunk_text"] + "\n\n")
-                    print(f"[DEBUG] Catalog search debug written to /tmp/catalog_search_debug.txt ({len(final_results)} entries)")
-                except Exception as e:
-                    print(f"[DEBUG] Failed to write catalog debug: {e}")
+                final_results = await self._search_catalogs_internal(
+                    queries=queries,
+                    repo_id=repo_id,
+                    limit=limit,
+                    min_score=min_score
+                )
                 
                 return {
-                    "success": True,
-                    "results": final_results,
+                    "success": True, 
+                    "results": final_results, 
                     "count": len(final_results),
                     "queries_used": queries,
                     "min_score": min_score
@@ -457,100 +324,174 @@ class PlaybookTools:
         except Exception as e:
             return {"error": str(e), "files": [], "count": 0}
 
+    async def _search_catalogs_internal(
+        self, 
+        queries: list[str], 
+        repo_id: str | list[str] | None = None, 
+        limit: int = 10,
+        min_score: float = 0.0
+    ) -> list[dict]:
+        """
+        Internal high-quality catalog search:
+        1. Process all queries
+        2. Maximize score per repository
+        3. Fetch full context from SQLite for top N repositories
+        """
+        repo_candidates = {} # repo_id -> {score, chunk_item}
+        
+        for query in queries:
+            q_emb = self.embedder.encode_query(query)
+            # Use a high enough candidate limit to ensure we find diverse results
+            candidate_chunks = self.lance.search_catalogs(
+                q_emb, 
+                repo_id=repo_id, 
+                limit=limit * 5, 
+                columns=["repo_id", "repo_name", "chunk_text", "metadata"]
+            )
+            
+            for item in candidate_chunks:
+                rid = item['repo_id']
+                score = max(0.0, 1.0 - item.get("_distance", 1.0))
+                
+                if score < min_score:
+                    continue
+                    
+                if rid not in repo_candidates or score > repo_candidates[rid]['score']:
+                    repo_candidates[rid] = {
+                        "score": score,
+                        "item": item
+                    }
+
+        # Sort and take top N
+        sorted_repos = sorted(
+            repo_candidates.items(), 
+            key=lambda x: x[1]['score'], 
+            reverse=True
+        )
+        final_repos = sorted_repos[:limit]
+        
+        results = []
+        for rid, candidate in final_repos:
+            score = candidate['score']
+            item = candidate['item']
+            
+            # Fetch FULL content from SQLite
+            full_content = ""
+            metadata = {}
+            if self.db:
+                try:
+                    with self.db.get_session() as session:
+                        cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
+                        if cat_entry:
+                            full_content = cat_entry.content
+                            metadata = cat_entry.metadata_json or {}
+                        else:
+                            full_content = item.get("chunk_text") or item.get("result", "")
+                except Exception as e:
+                    print(f"[ERROR] SQLite fetch failed for {rid}: {e}")
+                    full_content = item.get("chunk_text") or item.get("result", "")
+            else:
+                full_content = item.get("chunk_text") or item.get("result", "")
+
+            import json
+            try:
+                content_obj = json.loads(full_content)
+            except:
+                content_obj = {}
+
+            # Build rich text with all fields explicitly surfaced
+            repo_name = content_obj.get("repo_name", metadata.get("repo_name", item.get("repo_name", rid)))
+            parts = [
+                f"CATALOG ENTRY: {repo_name}",
+                f"Relevance Score: {score:.2f}",
+            ]
+
+            # Identity & Metadata
+            if metadata.get("repo_url"): parts.append(f"Repository URL: {metadata['repo_url']}")
+            if metadata.get("branch"): parts.append(f"Branch: {metadata['branch']}")
+            if metadata.get("category"): parts.append(f"Category: {metadata['category']}")
+
+            # Summaries
+            desc = content_obj.get("description", "")
+            if desc: parts.append(f"Description: {desc}")
+            high_level = metadata.get("summary_high_level", "")
+            if high_level: parts.append(f"High-Level Summary: {high_level}")
+            detailed = content_obj.get("summary_detailed", "")
+            if detailed: parts.append(f"Detailed Summary: {detailed}")
+
+            # Tech Detail
+            if metadata.get("architecture"): parts.append(f"Architecture: {metadata['architecture']}")
+            if metadata.get("tech_stack"): parts.append(f"Tech Stack: {metadata['tech_stack']}")
+            if metadata.get("specification"): parts.append(f"Specification: {metadata['specification']}")
+            
+            topics = metadata.get("topics", [])
+            if topics: parts.append(f"Topics: {', '.join(topics)}")
+
+            # Quality
+            quality = metadata.get("quality_score", 0)
+            if quality: parts.append(f"Quality Score: {quality}/100")
+            pros = metadata.get("pros", [])
+            if pros: parts.append(f"Pros: {'; '.join(pros)}")
+            cons = metadata.get("cons", [])
+            if cons: parts.append(f"Cons: {'; '.join(cons)}")
+
+            rich_text = "\n".join(parts)
+
+            results.append({
+                "file_path": f"catalog://{rid}",
+                "chunk_text": rich_text,
+                "score": score,
+                "start_line": 0,
+                "end_line": 0,
+                "repo_id": rid,
+                "repo_name": repo_name,
+                "metadata": json.dumps(metadata)
+            })
+            
+        return results
+
     async def search_catalogs(self, params: dict) -> dict:
         """Search across repository catalogs.
         
         Args:
             params: {
-                query: str,
+                query: str | list[str],
                 repo_id: str (optional),
-                limit: int (optional)
+                limit: int (optional),
+                min_score: float (optional)
             }
         """
         try:
-            query = params["query"]
+            query = params.get("query")
+            if not query and "queries" in params:
+                query = params["queries"]
+            
+            if not query:
+                return {"error": "No query provided", "results": [], "count": 0}
+            
+            queries = [query] if isinstance(query, str) else query
             repo_id = params.get("repo_id")
             limit = params.get("limit", 10)
+            min_score = params.get("min_score", 0.0)
             
             if not self.embedder:
                 return {"error": "No embedder available", "results": [], "count": 0}
-                
-            query_emb = self.embedder.encode_query(query)
             
-            # New Flow: Search chunks -> Dedupe -> Fetch Full
-            # Optimization: Only fetch necessary columns from LanceDB to save bandwidth
-            chunk_results = self.lance.search_catalogs(
-                query_emb, 
-                repo_id=repo_id, 
-                limit=limit*3,
-                columns=["repo_id", "repo_name", "chunk_text"]
+            results = await self._search_catalogs_internal(
+                queries=queries,
+                repo_id=repo_id,
+                limit=limit,
+                min_score=min_score
             )
             
-            final_results = []
-            seen_repos = set()
-            
-            for item in chunk_results:
-                rid = item['repo_id']
-                if rid in seen_repos:
-                    continue
-                
-                # Fetch full content
-                full_content = ""
-                metadata = {}
-                
-                if self.db:
-                    try:
-                        with self.db.get_session() as session:
-                             cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
-                             if cat_entry:
-                                 full_content = cat_entry.content
-                                 metadata = cat_entry.metadata_json or {}
-                             else:
-                                 full_content = item.get("chunk_text") or item.get("result", "")
-                    except Exception:
-                        full_content = item.get("chunk_text") or item.get("result", "")
-                else:
-                     full_content = item.get("chunk_text") or item.get("result", "")
-
-                seen_repos.add(rid)
-                
-                # Format for API response - include all enriched metadata
-                import json
-                try:
-                    content_obj = json.loads(full_content)
-                except:
-                    content_obj = {}
-                
-                score = 1.0 - item.get("_distance", 1.0)
-                
-                # Build enriched result text with all fields
-                repo_name = content_obj.get("repo_name", metadata.get("repo_name", item.get("repo_name", rid)))
-                result_parts = [content_obj.get("description", full_content)]
-                
-                high_level = metadata.get("summary_high_level", "")
-                if high_level:
-                    result_parts.append(f"Summary: {high_level}")
-                if metadata.get("architecture"):
-                    result_parts.append(f"Architecture: {metadata['architecture']}")
-                if metadata.get("tech_stack"):
-                    result_parts.append(f"Tech Stack: {metadata['tech_stack']}")
-                if metadata.get("category"):
-                    result_parts.append(f"Category: {metadata['category']}")
-                
-                final_results.append({
-                    "repo_id": rid,
-                    "repo_name": repo_name,
-                    "result": "\n".join(result_parts),
-                    "metadata": json.dumps(metadata),
-                    "score": score,
-                    "chunk_match": item.get("chunk_text")  # debugging
-                })
-                
-                if len(final_results) >= limit:
-                    break
-            
-            return {"success": True, "results": final_results, "count": len(final_results)}
+            return {
+                "success": True, 
+                "results": results, 
+                "count": len(results),
+                "queries_used": queries
+            }
         except Exception as e:
+            traceback.print_exc()
             return {"error": str(e), "results": [], "count": 0}
 
     @staticmethod
@@ -572,6 +513,24 @@ class PlaybookTools:
         import json
         
         normalized = dict(params)  # shallow copy
+        
+        # Unwrap catalog_entry wrapper — LLM often nests all fields here
+        catalog_entry = normalized.pop("catalog_entry", None)
+        if isinstance(catalog_entry, dict):
+            # Merge catalog_entry fields into top level (don't overwrite existing top-level keys)
+            for k, v in catalog_entry.items():
+                if k not in normalized or normalized[k] is None or normalized[k] == "" or normalized[k] == []:
+                    normalized[k] = v
+        
+        # Unwrap identity wrapper — LLM sometimes nests name/url/branch here
+        identity = normalized.pop("identity", None)
+        if isinstance(identity, dict):
+            if "name" in identity and "repo_name" not in normalized:
+                normalized["repo_name"] = identity["name"]
+            if "url" in identity and "repo_url" not in normalized:
+                normalized["repo_url"] = identity["url"]
+            if "branch" in identity and "branch" not in normalized:
+                normalized["branch"] = identity["branch"]
         
         # name → repo_name
         if "name" in normalized and "repo_name" not in normalized:
@@ -596,11 +555,14 @@ class PlaybookTools:
         if isinstance(arch, dict):
             parts = []
             if arch.get("layers"):
-                parts.append("Layers: " + ", ".join(arch["layers"]))
+                val = arch["layers"]
+                parts.append("Layers: " + (", ".join(val) if isinstance(val, list) else str(val)))
             if arch.get("design_patterns"):
-                parts.append("Patterns: " + ", ".join(arch["design_patterns"]))
+                val = arch["design_patterns"]
+                parts.append("Patterns: " + (", ".join(val) if isinstance(val, list) else str(val)))
             if arch.get("data_flow"):
-                parts.append("Data Flow: " + arch["data_flow"])
+                val = arch["data_flow"]
+                parts.append("Data Flow: " + (", ".join(val) if isinstance(val, list) else str(val)))
             normalized["architecture"] = "\n".join(parts) if parts else json.dumps(arch)
         
         # tech_stack → stringify if nested
@@ -631,6 +593,10 @@ class PlaybookTools:
                 normalized["pros"] = qa["pros"]
             if "cons" not in normalized and qa.get("cons"):
                 normalized["cons"] = qa["cons"]
+        elif isinstance(qa, (int, float)):
+            # LLM sometimes returns quality_assessment as a plain number
+            if "quality_score" not in normalized:
+                normalized["quality_score"] = int(qa)
         
         # specification → stringify if nested
         spec = normalized.get("specification")

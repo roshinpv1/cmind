@@ -69,6 +69,7 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 ```yaml
 limit: 50
 mode: hybrid
+min_score: 0.3
 queries:
   - "README"
   - "architecture overview"
@@ -77,4 +78,5 @@ queries:
   - "auth logic"
   - "configuration"
   - "main entry point"
+  - "Integration Points"
 ```

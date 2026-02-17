@@ -280,9 +280,38 @@
             ]
         },
         {
-            "name": "3. Autonomous Agent",
-            "description": "LangGraph-powered autonomous agent that uses Think→Act→Observe loops with playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed",
+            "name": "3. Autonomous Agents",
+            "description": "LangGraph-powered autonomous agents that use Think→Act→Observe loops with playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed\n\nAlso includes direct playbook execution for simpler, specialized tasks.",
             "item": [
+                {
+                    "name": "Direct Playbook Execution",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"playbook_name\": \"code_explorer\",\n  \"prompt\": \"Explain how the authentication flow works in this repository\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/playbook",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "playbook"
+                            ]
+                        },
+                        "description": "Execute a specific playbook directly and synchronously.\n\nplaybook_name: name of the playbook (e.g. code_explorer, catalog_generator, catalog_search) or 'auto' for automatic selection based on prompt.\nprompt: the input for the playbook.\nrepo_id: (optional) scope the analysis to a specific repository."
+                    }
+                },
                 {
                     "name": "Execute Agent - Architecture Analysis",
                     "event": [
@@ -311,7 +340,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Generate a detailed high-level architecture diagram with Mermaid\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                            "raw": "{\n  \"goal\": \"Generate a detailed high-level architecture diagram with Mermaid\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/agents/autonomous",
@@ -356,7 +385,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Generate comprehensive documentation including README, API reference, and setup guide\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                            "raw": "{\n  \"goal\": \"Generate comprehensive documentation including README, API reference, and setup guide\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": [\"code_explorer\"]\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/agents/autonomous",
@@ -401,7 +430,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"goal\": \"What functions call the authenticate() method and which files import auth.py?\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                            "raw": "{\n  \"goal\": \"What functions call the authenticate() method and which files import auth.py?\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/agents/autonomous",
@@ -446,7 +475,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Find unused or dead code, orphaned functions, and unreferenced modules\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10\n}"
+                            "raw": "{\n  \"goal\": \"Find unused or dead code, orphaned functions, and unreferenced modules\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/agents/autonomous",
@@ -797,7 +826,40 @@
                     }
                 },
                 {
-                    "name": "Search Catalogs",
+                    "name": "Search Catalogs (GET)",
+                    "request": {
+                        "method": "GET",
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/search?query=authentication&limit=5&min_score=0.8",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "search"
+                            ],
+                            "query": [
+                                {
+                                    "key": "query",
+                                    "value": "authentication"
+                                },
+                                {
+                                    "key": "limit",
+                                    "value": "5"
+                                },
+                                {
+                                    "key": "min_score",
+                                    "value": "0.8"
+                                }
+                            ]
+                        },
+                        "description": "Semantic search across catalog entries using GET parameters.\n\nUses the same high-quality retrieval logic as POST search (dedupe + SQLite context enrichment)."
+                    }
+                },
+                {
+                    "name": "Search Catalogs (POST)",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -822,7 +884,7 @@
                                 "search"
                             ]
                         },
-                        "description": "Semantic search across all catalog entries (cross-repository search).\n\nSearches chunked catalog embeddings in LanceDB and filters by min_score."
+                        "description": "High-quality semantic search across all catalog entries (cross-repository search).\n\nUses advanced retrieval: processes multiple queries, dedupes by repository (max score), and enriches results with full SQLite context."
                     }
                 },
                 {
@@ -851,7 +913,7 @@
                                 "search"
                             ]
                         },
-                        "description": "Semantic search within a specific repository's catalog entries."
+                        "description": "High-quality semantic search within a specific repository's catalog entries.\n\nUses advanced retrieval: processes multiple queries, dedupes by repository, and enriches results with full SQLite context."
                     }
                 }
             ]

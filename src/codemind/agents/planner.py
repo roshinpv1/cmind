@@ -136,6 +136,8 @@ class PlannerAgent:
                 "catalog_generator": {"search_codebase", "save_catalog_entry"},
                 "code_analyzer": {"search_codebase", "read_file", "search_symbol",
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
+                "code_explorer": {"search_codebase", "read_file", "search_symbol",
+                                 "get_callers", "get_callees", "get_dependencies", "list_files"},
             }
             for pb in allowed_playbooks:
                 relevant |= PLAYBOOK_TOOLS.get(pb, set())

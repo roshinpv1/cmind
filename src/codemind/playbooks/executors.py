@@ -2,20 +2,64 @@
 Playbook Executor - Prompt-based playbook execution.
 
 New architecture:
-1. Search for code using playbook's search_strategy
-2. Build prompt: system_prompt + retrieved code
-3. LLM generates output based on playbook behavior
+1. Linear mode (default): search → LLM → format → END
+2. ReAct mode (code_explorer): agent ↔ tools loop until done
 
-All playbooks use same flow, different prompts.
+All playbooks use same executor, different modes.
 """
 
 from typing import TypedDict, Annotated, Optional, Any
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
+from langgraph.prebuilt import ToolNode, tools_condition
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import operator
 import json
 import traceback
+import re as _re
 
 from .structured_schemas import get_schema_for_playbook
+
+
+def _repair_json(raw: str) -> dict | None:
+    """Attempt to fix common LLM JSON errors and return parsed dict, or None."""
+    s = raw
+    # 1. Remove single-line // comments
+    s = _re.sub(r'//.*?$', '', s, flags=_re.MULTILINE)
+    # 2. Fix arrays where items have embedded unquoted parens like:
+    #    "/path" (description)",  ->  "/path (description)",
+    s = _re.sub(r'"\s*\(', ' (', s)
+    # 3. Fix broken array items: VALUE"  -> "VALUE"
+    #    Pattern: a quote, comma/newline, then text without opening quote
+    # 4. Remove trailing commas before } or ]
+    s = _re.sub(r',\s*([}\]])', r'\1', s)
+    # 5. Try to balance braces - find the outermost matching pair
+    depth = 0
+    start = None
+    end = None
+    for i, c in enumerate(s):
+        if c == '{':
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if start is not None and end is not None:
+        s = s[start:end]
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    # 6. More aggressive: strip all non-ASCII and retry
+    s_clean = ''.join(c for c in s if ord(c) < 128)
+    try:
+        return json.loads(s_clean)
+    except json.JSONDecodeError:
+        pass
+    return None
 
 
 class PlaybookExecutionState(TypedDict):
@@ -24,6 +68,18 @@ class PlaybookExecutionState(TypedDict):
     user_input: dict
     code_chunks: list[dict]
     llm_output: str
+    outputs: dict
+    error: Optional[str]
+    logs: Annotated[list[str], operator.add]
+
+
+class ReactExecutionState(TypedDict):
+    """State for ReAct-style playbook execution (message-based)."""
+    messages: Annotated[list, add_messages]
+    playbook_name: str
+    user_input: dict
+    iteration: int
+    max_iterations: int
     outputs: dict
     error: Optional[str]
     logs: Annotated[list[str], operator.add]
@@ -107,12 +163,11 @@ class ContextPacker:
 
 class PlaybookExecutor:
     """
-    Execute prompt-based playbooks via LangGraph workflows.
+    Execute playbooks via LangGraph workflows.
     
-    Flow:
-    1. Search code (using playbook's search_strategy)
-    2. Build prompt (system_prompt + code)
-    3. LLM generates output
+    Supports two modes:
+    1. Linear (default): search → LLM → format → END
+    2. ReAct (code_explorer): agent ↔ tools cyclic loop
     """
     
     def __init__(self, registry, tools, llm_client):
@@ -121,12 +176,20 @@ class PlaybookExecutor:
         
         Args:
             registry: PlaybookRegistry instance
-            tools: PlaybookTools instance (just search_codebase)
-            llm_client: LLM for generation
+            tools: PlaybookTools instance
+            llm_client: LLM driver for generation
         """
         self.registry = registry
         self.tools = tools
         self.llm = llm_client
+        self._chat_model = None  # Lazy init for ReAct mode
+    
+    def _get_chat_model(self):
+        """Get or create CmindChatModel wrapper for ReAct mode."""
+        if self._chat_model is None:
+            from ..llm.chat_wrapper import CmindChatModel
+            self._chat_model = CmindChatModel(driver=self.llm)
+        return self._chat_model
     
     async def execute(self, playbook_name: str, user_input: dict) -> dict:
         """
@@ -154,7 +217,44 @@ class PlaybookExecutor:
                 "logs": [f"Playbook not found: {playbook_name}"]
             }
         
-        # Build workflow for this playbook
+        # Enrich user_input with repo metadata from SQLite if not already present
+        if not user_input.get("context") and user_input.get("repo_id"):
+            repo_id = user_input["repo_id"]
+            try:
+                db = getattr(self.tools, 'db', None)
+                if db:
+                    from ..storage.models import RepositoryManifest
+                    with db.get_session() as session:
+                        repo = session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
+                        if repo:
+                            # Extract repo name from path (e.g., "/path/to/org/repo" → "repo")
+                            repo_name = repo.repo_path.rstrip('/').split('/')[-1] if repo.repo_path else "unknown"
+                            user_input["context"] = {
+                                "repo_id": repo.repo_id,
+                                "name": repo_name,
+                                "repo_url": repo.repo_url or "",
+                                "branch": repo.branch or "main",
+                                "path": repo.repo_path or "",
+                                "first_author": repo.first_author or "",
+                                "total_commits": repo.total_commits or 0,
+                                "last_pr_title": repo.last_pr_title or "",
+                                "last_pr_user": repo.last_pr_user or "",
+                                "last_pr_merged_at": repo.last_pr_merged_at or "",
+                                "last_indexed": repo.last_indexed_at.isoformat() if repo.last_indexed_at else "",
+                            }
+                            print(f"[EXECUTOR] Enriched with repo metadata: name={repo_name}, url={repo.repo_url}, branch={repo.branch}")
+                        else:
+                            print(f"[EXECUTOR] ⚠️ No manifest found for repo_id={repo_id}")
+            except Exception as e:
+                print(f"[EXECUTOR] ⚠️ Failed to fetch repo metadata: {e}")
+        
+        # Route: ReAct mode or Linear mode
+        is_react = getattr(playbook.search_strategy, 'mode', '') == 'react'
+        
+        if is_react:
+            return await self._execute_react(playbook, playbook_name, user_input)
+        
+        # --- Linear mode (existing pipeline) ---
         workflow = self._build_workflow(playbook)
         
         # Execute
@@ -251,8 +351,18 @@ class PlaybookExecutor:
             try:
                 result = await self.tools.search_codebase(search_params)
                 
+                print(f"[EXECUTOR] Search result: success={result.get('success')}, "
+                      f"count={result.get('count', 0)}, "
+                      f"results_len={len(result.get('results', []))}, "
+                      f"repo_id={repo_id}")
+                
                 if result.get("success"):
                     chunks = result.get("results", [])
+                    
+                    if not chunks:
+                        print(f"[EXECUTOR] ⚠️ Search returned 0 chunks for repo_id={repo_id} "
+                              f"with queries={queries[:3]}... "
+                              f"(mode={search_params['mode']}, limit={search_params['limit']})")
                     
                     # Filter out test files for catalog_generator
                     if playbook.name == "catalog_generator":
@@ -305,6 +415,14 @@ class PlaybookExecutor:
                 return state
             
             code_chunks = state.get("code_chunks", [])
+            
+            # Soft warning if no code chunks found — log it but let the LLM handle it
+            if not code_chunks:
+                repo_id = state["user_input"].get("repo_id", "unknown")
+                state["logs"].append(
+                    f"  ⚠️ No code chunks returned for repo '{repo_id}' — "
+                    f"LLM will generate based on available context only"
+                )
             sys_prompt = playbook.system_prompt
             user_goal = state["user_input"].get("goal", state["user_input"].get("query", ""))
             
@@ -358,17 +476,55 @@ class PlaybookExecutor:
                                 "The Quality Score line in the context (e.g. 'Quality Score: 85/100') MUST be copied as an integer into `catalog_entry.quality_score`.\n"
                             )
 
-                    user_msg = (
-                        "USER REQUEST:\n" + user_goal + "\n\n"
-                        "RETRIEVED CODE:\n" + code_context + "\n\n"
-                        + prompt_suffix
-                    )
+                    # Prepend repo metadata if available (so LLM uses real identity)
+                    repo_metadata_section = ""
+                    context = state["user_input"].get("context", {})
+                    if context and playbook.name == "catalog_generator":
+                        meta_lines = ["REPOSITORY METADATA (use these exact values):"]
+                        if context.get("name"):
+                            meta_lines.append(f"  repo_name: {context['name']}")
+                        if context.get("repo_url"):
+                            meta_lines.append(f"  repo_url: {context['repo_url']}")
+                        if context.get("branch"):
+                            meta_lines.append(f"  branch: {context['branch']}")
+                        if context.get("first_author"):
+                            meta_lines.append(f"  first_author: {context['first_author']}")
+                        if context.get("total_commits"):
+                            meta_lines.append(f"  total_commits: {context['total_commits']}")
+                        if context.get("last_pr_title"):
+                            meta_lines.append(f"  last_pr_title: {context['last_pr_title']}")
+                        repo_metadata_section = "\n".join(meta_lines) + "\n\n"
+                    
+                    # For catalog_search: use grounding fence to prevent hallucination
+                    if playbook.name == "catalog_search":
+                        user_msg = (
+                            "USER REQUEST:\n" + user_goal + "\n\n"
+                            "=== BEGIN CATALOG ENTRIES (THIS IS YOUR ONLY SOURCE OF TRUTH) ===\n"
+                            + code_context + "\n"
+                            "=== END CATALOG ENTRIES ===\n\n"
+                            "GROUNDING RULE: You may ONLY reference repositories, names, URLs, "
+                            "and details that appear between the BEGIN/END markers above. "
+                            "If no catalog entries are shown, return empty catalog_matches list. "
+                            "Do NOT invent, guess, or recall any repository from your training data.\n\n"
+                            + prompt_suffix
+                        )
+                    else:
+                        user_msg = (
+                            repo_metadata_section
+                            + "USER REQUEST:\n" + user_goal + "\n\n"
+                            "RETRIEVED CODE:\n" + code_context + "\n\n"
+                            + prompt_suffix
+                        )
                     
                     output = await self.llm.generate(
                         user_msg,
                         system_prompt=sys_prompt,
                         max_tokens=single_pass_output
                     )
+                    print(f"[EXECUTOR] Raw LLM output ({len(output)} chars):")
+                    print("-" * 40)
+                    print(output)
+                    print("-" * 40)
                     state["llm_output"] = output
                     state["logs"].append(f"  Generated {len(output)} chars in single pass (max_tokens={single_pass_output})")
                 
@@ -436,6 +592,7 @@ class PlaybookExecutor:
             
             # Check for JSON tool call block
             import re
+            import json
             
             tool_executed = False
             tool_result = None
@@ -468,44 +625,85 @@ class PlaybookExecutor:
                     # Actually regex '({[\s\S]*})' is greedy. 
                     
                     try:
-                        data = json.loads(json_str)
+                        print(f"[EXECUTOR] Extracted JSON string: {json_str[:200]}...", flush=True)
+                        try:
+                            data = json.loads(json_str)
+                        except json.JSONDecodeError as je:
+                            print(f"[EXECUTOR] Standard JSON parse failed: {je}, attempting repair...", flush=True)
+                            state["logs"].append(f"JSON parse failed, attempting repair...")
+                            data = _repair_json(json_str)
+                            if data is None:
+                                raise je  # Re-raise if repair also failed
+                            state["logs"].append(f"JSON repaired successfully")
+                        print(f"[EXECUTOR] Parsed JSON keys: {list(data.keys())}", flush=True)
                         
                         # Fix for catalog_search structure issues:
                         # If catalog_matches elements are missing wrapper fields but have catalog_entry, wrap them.
                         if playbook.name == "catalog_search" and "catalog_matches" in data:
                             matches = data["catalog_matches"]
                             fixed_matches = []
+                            
+                            # Build set of known repo names from retrieved context
+                            known_repos = set()
+                            for chunk in state.get("code_chunks", []):
+                                chunk_text = chunk.get("chunk_text", "")
+                                # Extract repo names from "CATALOG ENTRY: <name>" lines
+                                for line in chunk_text.split("\n"):
+                                    if line.startswith("CATALOG ENTRY:"):
+                                        known_repos.add(line.replace("CATALOG ENTRY:", "").strip().lower())
+                                # Also capture repo_name from chunk metadata
+                                rn = chunk.get("repo_name", "")
+                                if rn:
+                                    known_repos.add(rn.lower())
+                            
                             for m in matches:
+                                # Fix malformed entries (missing wrapper fields)
                                 if "catalog_entry" in m and "match_type" not in m:
-                                    # Malformed: missing wrapper fields. detailed in issue #75
                                     fixed_match = {
                                         "capability": "inferred from catalog",
                                         "component_name": m["catalog_entry"].get("repo_name", "Unknown"),
-                                        "match_type": "Partial Match", # Defaulting to partial
-                                        "confidence_score": 0, # Default to 0 if missing
+                                        "match_type": "Partial Match",
+                                        "confidence_score": 0,
                                         "reasoning": "Result structure was malformed by LLM; inferred from catalog entry.",
                                         "catalog_entry": m["catalog_entry"]
                                     }
-                                    # Attempt to extract fields if they exist in the flat structure
                                     for k in ["capability", "component_name", "match_type", "confidence_score", "reasoning"]:
                                         if k in m:
                                             fixed_match[k] = m[k]
-                                            
-                                    fixed_matches.append(fixed_match)
-                                else:
-                                    fixed_matches.append(m)
+                                    m = fixed_match
+                                
+                                # Validate: strip hallucinated entries not in retrieved context
+                                if known_repos:
+                                    entry_name = ""
+                                    if "catalog_entry" in m:
+                                        entry_name = m["catalog_entry"].get("repo_name", "").lower()
+                                    elif "component_name" in m:
+                                        entry_name = m.get("component_name", "").lower()
+                                    
+                                    if entry_name and entry_name not in known_repos:
+                                        state["logs"].append(
+                                            f"  ⛔ Stripped hallucinated catalog match: '{entry_name}' "
+                                            f"(not in retrieved context: {known_repos})"
+                                        )
+                                        continue  # Skip this hallucinated entry
+                                
+                                fixed_matches.append(m)
                             data["catalog_matches"] = fixed_matches
 
                         parsed_data = data # Capture for output
                         
-                        # Case 1: Standard Wrapper
-                        if "tool" in data and "params" in data:
-                            tool_name = data["tool"]
-                            params = data["params"]
-                        # Case 2: Loose Params (Model skipped wrapper) - Only for catalog_generator
+                        # Case 1: Standard Wrapper (tool/params)
+                        if ("tool" in data or "tool_name" in data) and ("params" in data or "data" in data):
+                            tool_name = data.get("tool") or data.get("tool_name")
+                            params = data.get("params") or data.get("data")
+                        # Case 2: Flat Params with name/tool_name key
+                        elif ("name" in data or "tool_name" in data) and playbook.name == "catalog_generator":
+                             tool_name = "save_catalog_entry"
+                             params = data
+                        # Case 3: Loose Params (Model skipped wrapper) - Only for catalog_generator
                         elif playbook.name == "catalog_generator" and (
                             "description" in data or "summary_detailed" in data
-                            or "purpose" in data or "name" in data
+                            or "purpose" in data or "repo_name" in data or "name" in data
                         ):
                             # Assume save_catalog_entry if we see catalog fields (flat or nested)
                             tool_name = "save_catalog_entry"
@@ -515,55 +713,58 @@ class PlaybookExecutor:
                             params = None
 
                         if tool_name:
-                            # Execute tool
-                            if tool_name == "save_catalog_entry":
-                                state["logs"].append(f"Executing tool: {tool_name}")
-                                
-                                # inject repo_id if missing or template
-                                if params.get("repo_id") == "{{repo_id}}" or not params.get("repo_id"):
-                                    params["repo_id"] = state["user_input"].get("repo_id")
-                                
-                                # Inject metadata from context if available
-                                context = state["user_input"].get("context", {})
-                                if context:
-                                    # Fields to inject if missing or template or empty
-                                    fields_to_inject = ["repo_name", "repo_url", "branch"]
-                                    for field in fields_to_inject:
-                                        # Map 'name' from context to 'repo_name' in params
-                                        ctx_key = "name" if field == "repo_name" else field
-                                        
-                                        if not params.get(field) or params.get(field) == "{{" + field + "}}":
-                                            if ctx_key in context:
-                                                params[field] = context[ctx_key]
-                                    
-                                    # Also inject rich metadata into the 'metadata' JSON string if possible
-                                    # The tool expects 'metadata' as a string or dict. 
-                                    # If it's a string, we parse, update, stringify.
-                                    # If it's a dict, we update.
-                                    meta_param = params.get("metadata", {})
-                                    if isinstance(meta_param, str):
-                                        try:
-                                            meta_dict = json.loads(meta_param)
-                                        except:
-                                            meta_dict = {}
-                                    else:
-                                        meta_dict = meta_param
-                                    
-                                    # Merge context into metadata
-                                    for k, v in context.items():
-                                        if k not in meta_dict:
-                                            meta_dict[k] = v
-                                    
-                                    params["metadata"] = json.dumps(meta_dict)
+                             # Ensure case-insensitive match for common tools
+                             if tool_name.lower() in ["save_catalog_entry", "savecatalogentry"]:
+                                 tool_name = "save_catalog_entry"
+                             
+                             if tool_name == "save_catalog_entry":
+                                 state["logs"].append(f"Executing tool: {tool_name}")
+                                 
+                                 # inject repo_id if missing or template
+                                 if not params.get("repo_id") or params.get("repo_id") == "{{repo_id}}":
+                                     params["repo_id"] = state["user_input"].get("repo_id")
+                                 
+                                 # Inject metadata from context if available
+                                 context = state["user_input"].get("context", {})
+                                 if context:
+                                     # Fields to inject if missing or template or empty
+                                     fields_to_inject = ["repo_name", "repo_url", "branch"]
+                                     for field in fields_to_inject:
+                                         # Map 'name' from context to 'repo_name' in params
+                                         ctx_key = "name" if field == "repo_name" else field
+                                         
+                                         if not params.get(field) or params.get(field) == "{{" + field + "}}":
+                                             if ctx_key in context:
+                                                 params[field] = context[ctx_key]
+                                     
+                                     # Also inject rich metadata into the 'metadata' JSON string if possible
+                                     # The tool expects 'metadata' as a string or dict. 
+                                     # If it's a string, we parse, update, stringify.
+                                     # If it's a dict, we update.
+                                     meta_param = params.get("metadata", {})
+                                     if isinstance(meta_param, str):
+                                         try:
+                                             meta_dict = json.loads(meta_param)
+                                         except:
+                                             meta_dict = {}
+                                     else:
+                                         meta_dict = meta_param
+                                     
+                                     # Merge context into metadata
+                                     for k, v in context.items():
+                                         if k not in meta_dict:
+                                             meta_dict[k] = v
+                                     
+                                     params["metadata"] = json.dumps(meta_dict)
 
-                                tool_result = await self.tools.save_catalog_entry(params)
-                                state["logs"].append(f"Tool result: {tool_result}")
-                                tool_executed = True
-                                
-                                # Clean up result text to be user friendly
-                                output_text = f"Catalog entry generated and saved for {params.get('repo_name', params['repo_id'])}."
-                            else:
-                                state["logs"].append(f"Unknown tool: {tool_name}")
+                                 tool_result = await self.tools.save_catalog_entry(params)
+                                 state["logs"].append(f"Tool result: {tool_result}")
+                                 tool_executed = True
+                                 
+                                 # Clean up result text to be user friendly
+                                 output_text = f"Catalog entry generated and saved for {params.get('repo_name', params['repo_id'])}."
+                             else:
+                                 state["logs"].append(f"Unknown tool: {tool_name}")
                                 
                     except json.JSONDecodeError:
                         state["logs"].append("Failed to decode JSON tool block")
@@ -627,3 +828,179 @@ class PlaybookExecutor:
             )
         
         return "\n".join(formatted)
+    
+    # ─── ReAct Execution Path ────────────────────────────────────────────────
+    
+    async def _execute_react(self, playbook, playbook_name: str, user_input: dict) -> dict:
+        """
+        Execute a playbook using the ReAct (Reasoning + Acting) loop.
+        
+        The LLM decides which tools to call, observes results, and loops
+        until it has enough information to answer.
+        """
+        print(f"[EXECUTOR] ⚡ ReAct mode for playbook '{playbook_name}'")
+        
+        try:
+            workflow = self._build_react_workflow(playbook)
+            
+            # Build initial message with goal + context
+            goal = user_input.get("goal", user_input.get("query", ""))
+            repo_id = user_input.get("repo_id")
+            
+            user_content = f"{goal}"
+            if repo_id:
+                if isinstance(repo_id, list):
+                    user_content += f"\n\nRepository IDs: {', '.join(repo_id)}"
+                else:
+                    user_content += f"\n\nRepository ID: {repo_id}"
+            
+            # Inject repo_id context so tools can use it
+            context = user_input.get("context", {})
+            if context:
+                user_content += f"\n\nRepository Info: {json.dumps(context, default=str)}"
+            
+            initial_state: ReactExecutionState = {
+                "messages": [HumanMessage(content=user_content)],
+                "playbook_name": playbook_name,
+                "user_input": user_input,
+                "iteration": 0,
+                "max_iterations": 5,
+                "outputs": {},
+                "error": None,
+                "logs": [f"Running playbook: {playbook_name} (ReAct mode)"]
+            }
+            
+            result = await workflow.ainvoke(initial_state)
+            
+            # Extract the final answer from the last AI message
+            answer = ""
+            for msg in reversed(result.get("messages", [])):
+                if isinstance(msg, AIMessage) and msg.content:
+                    # Skip messages that are just tool calls with no text
+                    if not (hasattr(msg, 'tool_calls') and msg.tool_calls and not msg.content.strip()):
+                        answer = msg.content
+                        break
+            
+            iterations = result.get("iteration", 0)
+            logs = result.get("logs", [])
+            logs.append(f"ReAct completed in {iterations} iterations")
+            logs.append(f"Success: {playbook_name}")
+            
+            return {
+                "success": True,
+                "outputs": {
+                    "result": answer,
+                    "data": None,
+                    "tool_executed": False,
+                    "tool_result": None,
+                    "iterations": iterations,
+                    "playbook": playbook_name,
+                },
+                "error": None,
+                "logs": logs
+            }
+        
+        except Exception as e:
+            print(f"[EXECUTOR] ReAct execution failed: {e}", flush=True)
+            traceback.print_exc()
+            return {
+                "success": False,
+                "outputs": {},
+                "error": str(e),
+                "logs": [f"ReAct execution error: {str(e)}"]
+            }
+    
+    def _build_react_workflow(self, playbook):
+        """
+        Build a standard LangGraph ReAct workflow.
+        
+        Graph:
+            agent (LLM with tools) ←→ tools (ToolNode)
+                                   ↘ END (when no tool calls)
+        """
+        from .langchain_tools import create_langchain_tools
+        
+        # Create LangChain tools from PlaybookTools
+        tools = create_langchain_tools(self.tools)
+        
+        # Bind tools to chat model
+        chat_model = self._get_chat_model()
+        llm_with_tools = chat_model.bind_tools(tools)
+        
+        # System prompt from the playbook definition
+        system_prompt = playbook.system_prompt
+        
+        # ── Agent Node ──
+        async def agent_node(state: ReactExecutionState) -> dict:
+            """LLM thinks and optionally calls tools."""
+            iteration = state.get("iteration", 0)
+            max_iter = state.get("max_iterations", 5)
+            
+            print(f"[EXECUTOR] ReAct agent — iteration {iteration + 1}/{max_iter}")
+            
+            # Check iteration limit
+            if iteration >= max_iter:
+                print(f"[EXECUTOR] ReAct max iterations reached ({max_iter})")
+                return {
+                    "messages": [AIMessage(content="I've reached the maximum number of exploration steps. Let me synthesize my findings from the data gathered so far.")],
+                    "iteration": iteration + 1,
+                    "logs": [f"  Max iterations reached ({max_iter})"]
+                }
+            
+            # Build messages: system + conversation history
+            messages = [SystemMessage(content=system_prompt)]
+            messages.extend(state.get("messages", []))
+            
+            # Get LLM config for token budgets
+            config = getattr(self.llm, 'config', None)
+            max_tokens = max(512, (config.max_tokens if config else 4096) // 4)
+            
+            try:
+                response = await llm_with_tools.ainvoke(
+                    messages,
+                    max_tokens=max_tokens,
+                    temperature=0.1
+                )
+                
+                # Log what happened
+                has_tool_calls = hasattr(response, 'tool_calls') and response.tool_calls
+                if has_tool_calls:
+                    tool_names = [tc['name'] for tc in response.tool_calls]
+                    log_entry = f"  Iteration {iteration + 1}: called tools [{', '.join(tool_names)}]"
+                else:
+                    log_entry = f"  Iteration {iteration + 1}: final answer ({len(response.content)} chars)"
+                
+                print(f"[EXECUTOR] {log_entry}")
+                
+                return {
+                    "messages": [response],
+                    "iteration": iteration + 1,
+                    "logs": [log_entry]
+                }
+            
+            except Exception as e:
+                print(f"[EXECUTOR] ReAct agent error: {e}")
+                return {
+                    "messages": [AIMessage(content=f"Error during analysis: {e}. Providing best answer from data gathered.")],
+                    "iteration": iteration + 1,
+                    "logs": [f"  Agent error: {e}"]
+                }
+        
+        # ── Build Graph ──
+        graph = StateGraph(ReactExecutionState)
+        
+        graph.add_node("agent", agent_node)
+        graph.add_node("tools", ToolNode(tools))
+        
+        graph.set_entry_point("agent")
+        
+        # Conditional: if tool calls → tools node, else → END
+        graph.add_conditional_edges(
+            "agent",
+            tools_condition,
+        )
+        
+        # After tools execute → back to agent
+        graph.add_edge("tools", "agent")
+        
+        return graph.compile()

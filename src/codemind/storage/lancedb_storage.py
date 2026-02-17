@@ -235,7 +235,15 @@ class LanceDBStorage:
 
         # Post-filter for 50% similarity (distance < 0.5 for cosine)
         results = query.to_list()
-        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.2]
+        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.5]
+        
+        # New: Safety filter for tiny chunks (handles legacy data)
+        filtered_results = [r for r in filtered_results if len(r.get("chunk_text", "").strip()) >= 50]
+        
+        if results and not filtered_results:
+            top_distances = sorted([r.get("_distance", 1.0) for r in results[:5]])
+            print(f"[LANCE] ⚠️ All {len(results)} results filtered out by distance threshold 0.5 or min-size filter. "
+                  f"Top distances: {top_distances}")
         
         return filtered_results
 
@@ -373,9 +381,13 @@ class LanceDBStorage:
 
         # Post-filter for 50% similarity (distance < 0.5 for cosine)
         results = query.to_list()
-        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.2]
         
-        return filtered_results
+        # Log results for debugging
+        print(f"[LANCEDB] search_catalogs found {len(results)} raw results")
+        for r in results[:3]:
+            print(f"  - dist: {r.get('_distance')}, repo: {r.get('repo_id')}")
+            
+        return results
 
     def close(self):
         """Close database connection."""
