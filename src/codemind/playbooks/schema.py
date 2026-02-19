@@ -34,15 +34,45 @@ class PlaybookDefinition(BaseModel):
     A playbook is:
     - A system prompt that defines how the LLM should behave
     - A search strategy for fetching relevant code
+    - An output schema that defines the expected JSON structure
+    - Behavioral flags that control execution
     - Metadata about when to use it
     """
     name: str = Field(..., description="Unique playbook name")
     description: str = Field(..., description="What this playbook does")
     when_to_use: str = Field(..., description="When to select this playbook (intent-based)")
     
-    # NEW: Prompt-based architecture
+    # Prompt-based architecture
     system_prompt: str = Field(..., description="System prompt that defines LLM behavior")
     search_strategy: SearchStrategy = Field(..., description="How to search for code")
+    
+    # Output schema (parsed from ## Output Schema section in .md)
+    output_schema: dict = Field(
+        default_factory=dict,
+        description="Parsed output schema definition with field names, types, defaults"
+    )
+    output_type: str = Field(
+        default="json_response",
+        description="Output type: 'tool_call' (LLM invokes a tool) or 'json_response' (LLM returns JSON)"
+    )
+    tool_name: Optional[str] = Field(
+        default=None,
+        description="Tool to invoke if output_type is 'tool_call' (e.g. 'save_catalog_entry')"
+    )
+    
+    # Behavioral flags (parsed from ## Behavior section in .md)
+    exclude_test_files: bool = Field(
+        default=False,
+        description="Whether to filter test files from search results"
+    )
+    grounding_fence: bool = Field(
+        default=False,
+        description="Whether to wrap context in grounding fence markers to prevent hallucination"
+    )
+    inject_repo_metadata: bool = Field(
+        default=False,
+        description="Whether to inject repo metadata (name, url, branch) into the prompt"
+    )
     
     # Metadata
     deterministic: bool = Field(default=False, description="Whether output is deterministic")

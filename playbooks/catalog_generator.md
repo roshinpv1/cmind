@@ -65,6 +65,35 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 - **specification**: Document REST APIs, gRPC services, CLI commands, library interfaces
 - **topics**: Include technology names, domain terms, and capability keywords for searchability
 
+## Output Schema
+```yaml
+type: tool_call
+tool_name: save_catalog_entry
+fields:
+  repo_id: {type: string, required: true, description: "Repository identifier"}
+  repo_name: {type: string, required: true, description: "Human-readable project name"}
+  repo_url: {type: string, default: "", description: "Repository URL"}
+  branch: {type: string, default: "main", description: "Branch name"}
+  description: {type: string, required: true, description: "One-line summary"}
+  summary_high_level: {type: string, required: true, description: "2-3 sentence overview for catalog browsing"}
+  summary_detailed: {type: string, required: true, description: "Comprehensive multi-paragraph analysis"}
+  category: {type: string, required: true, description: "Software type (e.g. Web App, API, CLI Tool, Library)"}
+  quality_score: {type: integer, min: 1, max: 100, default: 50, description: "Quality score 1-100"}
+  architecture: {type: string, default: "", description: "Architecture description"}
+  tech_stack: {type: string, default: "", description: "Languages, frameworks, databases"}
+  specification: {type: string, default: "", description: "Key APIs, interfaces, protocols"}
+  topics: {type: array, items: string, default: [], description: "Searchable tags"}
+  pros: {type: array, items: string, default: [], description: "Strengths"}
+  cons: {type: array, items: string, default: [], description: "Weaknesses"}
+```
+
+## Behavior
+```yaml
+exclude_test_files: true
+grounding_fence: false
+inject_repo_metadata: true
+```
+
 ## Search Strategy
 ```yaml
 limit: 50

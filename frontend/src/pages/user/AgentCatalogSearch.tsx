@@ -220,37 +220,37 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                 Specification
                             </h4>
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                {specObj.key_apis && specObj.key_apis.length > 0 && (
+                                {specObj.key_apis && (Array.isArray(specObj.key_apis) ? specObj.key_apis : [specObj.key_apis]).length > 0 && (
                                     <div>
                                         <span className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">APIs</span>
                                         <ul className="mt-1 space-y-1">
-                                            {specObj.key_apis.map((api, i) => (
+                                            {(Array.isArray(specObj.key_apis) ? specObj.key_apis : [specObj.key_apis]).map((api, i) => (
                                                 <li key={i} className="text-xs text-gray-600 flex items-start gap-1.5">
-                                                    <span className="text-primary mt-0.5">•</span> {api}
+                                                    <span className="text-primary mt-0.5">•</span> {String(api)}
                                                 </li>
                                             ))}
                                         </ul>
                                     </div>
                                 )}
-                                {specObj.interfaces && specObj.interfaces.length > 0 && (
+                                {specObj.interfaces && (Array.isArray(specObj.interfaces) ? specObj.interfaces : [specObj.interfaces]).length > 0 && (
                                     <div>
                                         <span className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">Interfaces</span>
                                         <ul className="mt-1 space-y-1">
-                                            {specObj.interfaces.map((iface, i) => (
+                                            {(Array.isArray(specObj.interfaces) ? specObj.interfaces : [specObj.interfaces]).map((iface, i) => (
                                                 <li key={i} className="text-xs text-gray-600 flex items-start gap-1.5">
-                                                    <span className="text-indigo-500 mt-0.5">•</span> {iface}
+                                                    <span className="text-indigo-500 mt-0.5">•</span> {String(iface)}
                                                 </li>
                                             ))}
                                         </ul>
                                     </div>
                                 )}
-                                {specObj.contracts && specObj.contracts.length > 0 && (
+                                {specObj.contracts && (Array.isArray(specObj.contracts) ? specObj.contracts : [specObj.contracts]).length > 0 && (
                                     <div>
                                         <span className="text-[10px] font-bold uppercase text-gray-400 tracking-wider">Contracts</span>
                                         <ul className="mt-1 space-y-1">
-                                            {specObj.contracts.map((c, i) => (
+                                            {(Array.isArray(specObj.contracts) ? specObj.contracts : [specObj.contracts]).map((c, i) => (
                                                 <li key={i} className="text-xs text-gray-600 flex items-start gap-1.5">
-                                                    <span className="text-amber-500 mt-0.5">•</span> {c}
+                                                    <span className="text-amber-500 mt-0.5">•</span> {String(c)}
                                                 </li>
                                             ))}
                                         </ul>

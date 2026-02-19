@@ -94,6 +94,27 @@ Ensure ALL fields are present, including `overall_confidence_score`, even if the
 
 Do not output any text before or after the JSON block.
 
+## Output Schema
+```yaml
+type: json_response
+fields:
+  requirement_summary: {type: string, default: "", description: "Summary of the requirement"}
+  capabilities: {type: dict, default: {}, description: "Required capabilities (functional and non_functional)"}
+  decomposition: {type: dict, default: {}, description: "Module decomposition (core, supporting, cross_cutting)"}
+  catalog_matches: {type: array, items: object, default: [], description: "List of matched catalog entries"}
+  architecture_composition: {type: string, default: "", description: "How to assemble components"}
+  gaps: {type: array, items: string, default: [], description: "Missing capabilities"}
+  risks: {type: array, items: string, default: [], description: "Potential risks"}
+  overall_confidence_score: {type: integer, min: 0, max: 100, default: 0, description: "Overall confidence 0-100"}
+```
+
+## Behavior
+```yaml
+exclude_test_files: false
+grounding_fence: true
+inject_repo_metadata: false
+```
+
 ## Search Strategy
 ```yaml
 limit: 5

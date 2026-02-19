@@ -43,6 +43,24 @@ When you have gathered enough information, respond with a clear, structured answ
 
 Do NOT call any more tools once you are ready to answer. Just respond with text.
 
+## Output Schema
+```yaml
+type: json_response
+fields:
+  summary: {type: string, required: true, description: "Direct answer to the question"}
+  analysis: {type: string, required: true, description: "Detailed walkthrough of findings"}
+  key_files: {type: array, items: string, default: [], description: "Relevant files with their roles"}
+  code_flow: {type: string, default: "", description: "How components connect"}
+  insights: {type: array, items: string, default: [], description: "Non-obvious findings or potential issues"}
+```
+
+## Behavior
+```yaml
+exclude_test_files: false
+grounding_fence: false
+inject_repo_metadata: false
+```
+
 ## Search Strategy
 ```yaml
 limit: 100

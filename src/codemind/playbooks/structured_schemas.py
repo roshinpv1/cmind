@@ -107,6 +107,147 @@ PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
 }
 
 
-def get_schema_for_playbook(playbook_name: str) -> type[BaseModel] | None:
-    """Get Pydantic schema for a playbook's output, if defined."""
-    return PLAYBOOK_SCHEMAS.get(playbook_name)
+# ─── Dynamic Schema Builder ─────────────────────────────────────────────────
+
+# Type mapping from YAML schema type names to Python types
+_YAML_TYPE_MAP: dict[str, type] = {
+    "string": str,
+    "integer": int,
+    "float": float,
+    "boolean": bool,
+    "number": float,
+}
+
+# Cache for dynamically built models
+_dynamic_schema_cache: dict[str, type[BaseModel]] = {}
+
+
+def build_pydantic_model(name: str, schema_dict: dict) -> type[BaseModel] | None:
+    """
+    Dynamically create a Pydantic model from a playbook's output schema YAML.
+    
+    Schema format:
+    ```yaml
+    type: json_response
+    fields:
+      summary: {type: string, required: true, description: "Analysis summary"}
+      score: {type: integer, min: 0, max: 100, default: 50}
+      tags: {type: array, items: string, default: []}
+    ```
+    
+    Args:
+        name: Playbook name (used to generate the model class name)
+        schema_dict: Parsed YAML schema dict with 'fields' key
+        
+    Returns:
+        Dynamically created Pydantic BaseModel subclass, or None if no fields defined
+    """
+    fields = schema_dict.get("fields", {})
+    if not fields:
+        return None
+    
+    field_definitions: dict = {}
+    
+    for field_name, field_spec in fields.items():
+        if not isinstance(field_spec, dict):
+            # Simple type shorthand: field_name: string
+            python_type = _YAML_TYPE_MAP.get(str(field_spec), str)
+            field_definitions[field_name] = (python_type, Field(default=""))
+            continue
+        
+        type_name = field_spec.get("type", "string")
+        is_required = field_spec.get("required", False)
+        description = field_spec.get("description", "")
+        default = field_spec.get("default")
+        
+        # Determine Python type
+        if type_name == "array":
+            items_type = field_spec.get("items", "string")
+            item_python_type = _YAML_TYPE_MAP.get(items_type, str)
+            python_type = list[item_python_type]
+            if default is None:
+                default = []
+        elif type_name == "dict" or type_name == "object":
+            python_type = dict
+            if default is None:
+                default = {}
+        else:
+            python_type = _YAML_TYPE_MAP.get(type_name, str)
+        
+        # Build Field kwargs
+        field_kwargs = {}
+        if description:
+            field_kwargs["description"] = description
+        if "min" in field_spec:
+            field_kwargs["ge"] = field_spec["min"]
+        if "max" in field_spec:
+            field_kwargs["le"] = field_spec["max"]
+        
+        if is_required and default is None:
+            field_kwargs["default"] = ...  # Required field
+        elif default is not None:
+            field_kwargs["default"] = default
+        elif type_name == "string":
+            field_kwargs["default"] = ""
+        elif type_name in ("integer", "number", "float"):
+            field_kwargs["default"] = 0
+        elif type_name == "boolean":
+            field_kwargs["default"] = False
+        else:
+            field_kwargs["default"] = ""
+        
+        # Handle Optional for non-required fields
+        if not is_required and field_kwargs.get("default") is not ...:
+            python_type = Optional[python_type]
+        
+        field_definitions[field_name] = (python_type, Field(**field_kwargs))
+    
+    if not field_definitions:
+        return None
+    
+    # Generate a CamelCase model name from the playbook name
+    model_name = "".join(
+        word.capitalize() for word in name.replace("-", "_").split("_")
+    ) + "Output"
+    
+    # Use Pydantic's create_model to build dynamically
+    from pydantic import create_model
+    model = create_model(model_name, **field_definitions)
+    
+    return model
+
+
+def get_schema_for_playbook(playbook_name: str, playbook_def=None) -> type[BaseModel] | None:
+    """
+    Get Pydantic schema for a playbook's output.
+    
+    Resolution order:
+    1. Check hardcoded PLAYBOOK_SCHEMAS dict (backward compatibility)
+    2. Check dynamic schema cache
+    3. Build dynamically from playbook's output_schema definition
+    
+    Args:
+        playbook_name: Name of the playbook
+        playbook_def: Optional PlaybookDefinition with output_schema
+        
+    Returns:
+        Pydantic BaseModel subclass, or None if no schema defined
+    """
+    # 1. Check hardcoded registry first (backward compat)
+    if playbook_name in PLAYBOOK_SCHEMAS:
+        return PLAYBOOK_SCHEMAS[playbook_name]
+    
+    # 2. Check dynamic cache
+    if playbook_name in _dynamic_schema_cache:
+        return _dynamic_schema_cache[playbook_name]
+    
+    # 3. Build dynamically from playbook definition
+    if playbook_def and hasattr(playbook_def, 'output_schema') and playbook_def.output_schema:
+        model = build_pydantic_model(playbook_name, playbook_def.output_schema)
+        if model:
+            _dynamic_schema_cache[playbook_name] = model
+            print(f"[SCHEMAS] ✓ Built dynamic schema for '{playbook_name}': "
+                  f"{list(model.model_fields.keys())}")
+            return model
+    
+    return None

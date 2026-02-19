@@ -338,7 +338,7 @@ class PlaybookExecutor:
             search_params = {
                 "queries": queries,
                 "repo_id": repo_id,
-                "limit": getattr(strategy, "limit", 100 if playbook.name == "code_analyzer" else 10),
+                "limit": getattr(strategy, "limit", 10),
                 "mode": getattr(strategy, 'mode', 'semantic'),
                 "file_types": getattr(strategy, 'file_types', []),
                 "graph_filters": getattr(strategy, 'graph_filters', {}),
@@ -364,8 +364,8 @@ class PlaybookExecutor:
                               f"with queries={queries[:3]}... "
                               f"(mode={search_params['mode']}, limit={search_params['limit']})")
                     
-                    # Filter out test files for catalog_generator
-                    if playbook.name == "catalog_generator":
+                    # Data-driven: filter test files if playbook requests it
+                    if playbook.exclude_test_files:
                         import re
                         test_pattern = re.compile(
                             r'(^|/)tests?/|/test_[^/]+$|/_test\.py$|/conftest\.py$|'
@@ -380,7 +380,7 @@ class PlaybookExecutor:
                         ]
                         filtered = before - len(chunks)
                         if filtered:
-                            state["logs"].append(f"  Excluded {filtered} test file chunks for catalog generation")
+                            state["logs"].append(f"  Excluded {filtered} test file chunks (exclude_test_files=true)")
                     
                     state["code_chunks"] = chunks
                     state["logs"].append(f"  Found {len(state['code_chunks'])} code chunks")
@@ -449,37 +449,30 @@ class PlaybookExecutor:
                     
                     prompt_suffix = "Generate your output based on the instructions and code:"
                     
-                    # Use structured schema for prompt generation
-                    output_schema = get_schema_for_playbook(playbook.name)
+                    # Use structured schema for prompt generation (data-driven)
+                    output_schema = get_schema_for_playbook(playbook.name, playbook_def=playbook)
                     
-                    if playbook.name == "catalog_generator":
-                        prompt_suffix += "\n\nIMPORTANT: You MUST output a JSON block invoking 'save_catalog_entry'. Do not output any other text."
+                    if playbook.output_type == "tool_call" and playbook.tool_name:
+                        # Tool-call playbooks: instruct LLM to output JSON invoking the tool
+                        prompt_suffix += (
+                            f"\n\nIMPORTANT: You MUST output a JSON block invoking '{playbook.tool_name}'. "
+                            f"Do not output any other text."
+                        )
                     elif output_schema:
-                        # Auto-generate schema hint from Pydantic model
+                        # JSON-response playbooks: auto-generate schema hint from Pydantic model
                         schema_json = json.dumps(output_schema.model_json_schema(), indent=2)
                         prompt_suffix += (
                             f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object "
                             f"matching the following schema:\n```json\n{schema_json}\n```\n"
                             f"Wrap it in a markdown code block (```json ... ```).\n"
+                            f"CRITICAL: respond ONLY with valid JSON matching this schema. "
+                            f"Do NOT output conversational text or markdown tables.\n"
                         )
-                        # Add playbook-specific instructions
-                        if playbook.name == "catalog_search":
-                            prompt_suffix += (
-                                "Do NOT use keys 'project' or 'recommendation'.\n"
-                                "Do NOT generate a generic project plan. If NO catalog matches found, return empty 'catalog_matches' list.\n"
-                                "Each match in `catalog_matches` MUST include `capability`, `match_type`, `confidence_score` and `reasoning`.\n"
-                                "CRITICAL: The `catalog_entry` data MUST come ONLY from the RETRIEVED CODE context above. "
-                                "Do NOT invent or hallucinate component names, URLs, or details.\n"
-                                "SCORING: For each catalog match, set `confidence_score` = the Relevance Score from the context × 100 (rounded to integer).\n"
-                                "COPY THESE FIELDS from each CATALOG ENTRY in the context into `catalog_entry`: "
-                                "repo_name, repo_url, description, architecture, tech_stack, topics, category, quality_score, pros, cons. "
-                                "The Quality Score line in the context (e.g. 'Quality Score: 85/100') MUST be copied as an integer into `catalog_entry.quality_score`.\n"
-                            )
 
-                    # Prepend repo metadata if available (so LLM uses real identity)
+                    # Data-driven: prepend repo metadata if playbook requests it
                     repo_metadata_section = ""
                     context = state["user_input"].get("context", {})
-                    if context and playbook.name == "catalog_generator":
+                    if context and playbook.inject_repo_metadata:
                         meta_lines = ["REPOSITORY METADATA (use these exact values):"]
                         if context.get("name"):
                             meta_lines.append(f"  repo_name: {context['name']}")
@@ -495,17 +488,17 @@ class PlaybookExecutor:
                             meta_lines.append(f"  last_pr_title: {context['last_pr_title']}")
                         repo_metadata_section = "\n".join(meta_lines) + "\n\n"
                     
-                    # For catalog_search: use grounding fence to prevent hallucination
-                    if playbook.name == "catalog_search":
+                    # Data-driven: use grounding fence if playbook requests it
+                    if playbook.grounding_fence:
                         user_msg = (
                             "USER REQUEST:\n" + user_goal + "\n\n"
-                            "=== BEGIN CATALOG ENTRIES (THIS IS YOUR ONLY SOURCE OF TRUTH) ===\n"
+                            "=== BEGIN RETRIEVED CONTEXT (THIS IS YOUR ONLY SOURCE OF TRUTH) ===\n"
                             + code_context + "\n"
-                            "=== END CATALOG ENTRIES ===\n\n"
-                            "GROUNDING RULE: You may ONLY reference repositories, names, URLs, "
+                            "=== END RETRIEVED CONTEXT ===\n\n"
+                            "GROUNDING RULE: You may ONLY reference data, names, URLs, "
                             "and details that appear between the BEGIN/END markers above. "
-                            "If no catalog entries are shown, return empty catalog_matches list. "
-                            "Do NOT invent, guess, or recall any repository from your training data.\n\n"
+                            "If no entries are shown, return empty results. "
+                            "Do NOT invent, guess, or recall any data from your training data.\n\n"
                             + prompt_suffix
                         )
                     else:
@@ -637,9 +630,8 @@ class PlaybookExecutor:
                             state["logs"].append(f"JSON repaired successfully")
                         print(f"[EXECUTOR] Parsed JSON keys: {list(data.keys())}", flush=True)
                         
-                        # Fix for catalog_search structure issues:
-                        # If catalog_matches elements are missing wrapper fields but have catalog_entry, wrap them.
-                        if playbook.name == "catalog_search" and "catalog_matches" in data:
+                        # Data-driven: if playbook uses grounding fence, validate against retrieved context
+                        if playbook.grounding_fence and "catalog_matches" in data:
                             matches = data["catalog_matches"]
                             fixed_matches = []
                             
@@ -682,7 +674,7 @@ class PlaybookExecutor:
                                     
                                     if entry_name and entry_name not in known_repos:
                                         state["logs"].append(
-                                            f"  ⛔ Stripped hallucinated catalog match: '{entry_name}' "
+                                            f"  ⛔ Stripped hallucinated match: '{entry_name}' "
                                             f"(not in retrieved context: {known_repos})"
                                         )
                                         continue  # Skip this hallucinated entry
@@ -692,21 +684,26 @@ class PlaybookExecutor:
 
                         parsed_data = data # Capture for output
                         
+                        # Pydantic validation + coercion (Phase 3: Schema Compliance)
+                        schema_class = get_schema_for_playbook(playbook.name, playbook_def=playbook)
+                        if schema_class and parsed_data and playbook.output_type == "json_response":
+                            try:
+                                validated = schema_class.model_validate(parsed_data)
+                                parsed_data = validated.model_dump()
+                                validated_data = validated
+                                state["logs"].append(f"  ✓ Schema validation passed ({schema_class.__name__})")
+                            except Exception as val_err:
+                                state["logs"].append(f"  ⚠ Schema validation warning: {val_err}")
+                                # Don't fail — the LLM output is still usable, just not perfectly shaped
+                        
                         # Case 1: Standard Wrapper (tool/params)
                         if ("tool" in data or "tool_name" in data) and ("params" in data or "data" in data):
                             tool_name = data.get("tool") or data.get("tool_name")
                             params = data.get("params") or data.get("data")
-                        # Case 2: Flat Params with name/tool_name key
-                        elif ("name" in data or "tool_name" in data) and playbook.name == "catalog_generator":
-                             tool_name = "save_catalog_entry"
-                             params = data
-                        # Case 3: Loose Params (Model skipped wrapper) - Only for catalog_generator
-                        elif playbook.name == "catalog_generator" and (
-                            "description" in data or "summary_detailed" in data
-                            or "purpose" in data or "repo_name" in data or "name" in data
-                        ):
-                            # Assume save_catalog_entry if we see catalog fields (flat or nested)
-                            tool_name = "save_catalog_entry"
+                        # Case 2: Data-driven tool_call playbooks — LLM skipped wrapper
+                        elif playbook.output_type == "tool_call" and playbook.tool_name:
+                            # LLM output flat params without tool wrapper — infer tool name
+                            tool_name = playbook.tool_name
                             params = data
                         else:
                             tool_name = None

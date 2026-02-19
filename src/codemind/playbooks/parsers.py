@@ -29,6 +29,22 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
     ## System Prompt
     System prompt for LLM
     
+    ## Output Schema
+    ```yaml
+    type: json_response       # or "tool_call"
+    tool_name: save_catalog_entry  # only if type is tool_call
+    fields:
+      field_name: {type: string, required: true}
+      score: {type: integer, min: 0, max: 100, default: 50}
+    ```
+    
+    ## Behavior
+    ```yaml
+    exclude_test_files: true
+    grounding_fence: false
+    inject_repo_metadata: true
+    ```
+    
     ## Search Strategy
     ```yaml
     queries:
@@ -75,6 +91,8 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         default_prompt = _extract_section(content, "## Default Prompt")
         search_strategy_yaml = _extract_code_block(content, "## Search Strategy")
         deterministic_str = _extract_section(content, "## Deterministic")
+        output_schema_yaml = _extract_code_block(content, "## Output Schema")
+        behavior_yaml = _extract_code_block(content, "## Behavior")
         
         # Parse search strategy (YAML)
         search_strategy = SearchStrategy()
@@ -89,6 +107,39 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         # Parse deterministic
         deterministic = deterministic_str.lower().strip() == "true" if deterministic_str else False
         
+        # Parse output schema (YAML)
+        output_schema = {}
+        output_type = "json_response"
+        tool_name = None
+        if output_schema_yaml:
+            try:
+                schema_dict = yaml.safe_load(output_schema_yaml)
+                if schema_dict and isinstance(schema_dict, dict):
+                    output_type = schema_dict.get("type", "json_response")
+                    tool_name = schema_dict.get("tool_name")
+                    output_schema = schema_dict
+                    print(f"[PARSER] ✓ Parsed output schema for {name}: "
+                          f"type={output_type}, fields={list(schema_dict.get('fields', {}).keys())}")
+            except Exception as e:
+                print(f"[PARSER] Failed to parse output schema YAML for {name}: {e}")
+        
+        # Parse behavior flags (YAML)
+        exclude_test_files = False
+        grounding_fence = False
+        inject_repo_metadata = False
+        if behavior_yaml:
+            try:
+                behavior_dict = yaml.safe_load(behavior_yaml)
+                if behavior_dict and isinstance(behavior_dict, dict):
+                    exclude_test_files = behavior_dict.get("exclude_test_files", False)
+                    grounding_fence = behavior_dict.get("grounding_fence", False)
+                    inject_repo_metadata = behavior_dict.get("inject_repo_metadata", False)
+                    print(f"[PARSER] ✓ Parsed behavior for {name}: "
+                          f"exclude_test={exclude_test_files}, grounding={grounding_fence}, "
+                          f"inject_meta={inject_repo_metadata}")
+            except Exception as e:
+                print(f"[PARSER] Failed to parse behavior YAML for {name}: {e}")
+        
         playbook = PlaybookDefinition(
             name=name,
             description=description or "No description provided",
@@ -96,7 +147,13 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
             system_prompt=system_prompt or "You are a helpful coding assistant.",
             default_prompt=default_prompt,
             search_strategy=search_strategy,
-            deterministic=deterministic
+            deterministic=deterministic,
+            output_schema=output_schema,
+            output_type=output_type,
+            tool_name=tool_name,
+            exclude_test_files=exclude_test_files,
+            grounding_fence=grounding_fence,
+            inject_repo_metadata=inject_repo_metadata,
         )
         
         return playbook
