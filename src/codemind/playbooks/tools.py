@@ -644,7 +644,10 @@ class PlaybookTools:
                 "quality_score": params.get("quality_score", 0),
                 "specification": params.get("specification", ""),
                 "pros": params.get("pros", []),
-                "cons": params.get("cons", [])
+                "cons": params.get("cons", []),
+                "first_author": params.get("first_author", ""),
+                "total_commits": params.get("total_commits", 0),
+                "last_pr_title": params.get("last_pr_title", "")
             }
             
             # Full content includes everything for the LLM to read

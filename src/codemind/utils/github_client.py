@@ -44,7 +44,7 @@ class GitHubClient:
             if "github.com" not in repo_url:
                 return {}
                 
-            path_parts = repo_url.rstrip(".git").split("github.com/")
+            path_parts = repo_url.removesuffix(".git").split("github.com/")
             if len(path_parts) < 2:
                 return {}
                 

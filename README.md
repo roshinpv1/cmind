@@ -27,6 +27,7 @@ Whether you are onboarding a new developer, refactoring a legacy monolith, or ge
 - **🔍 Hybrid Search** — Semantic + structural filtering with advanced file patterns
 - **🤖 Autonomous Agents** — LangGraph-based Think → Act → Observe loop with `ToolNode` + `bind_tools()`
 - **📚 Repository Catalogs** — Auto-generated summaries with chunked vector search & Pydantic-validated output
+- **🧩 Seamless Playbook Architecture** — Add new playbooks with zero code changes (just drop a `.md` file)
 - **🔄 Incremental Indexing** — LangGraph workflow with 7 pipeline stages
 - **🔗 MCP Server** — Expose tools and resources to any MCP-compatible client
 - **💾 Checkpointing** — LangGraph `MemorySaver` for agent state persistence per job
@@ -129,27 +130,76 @@ POST /api/v1/agents/autonomous
   "goal": "What functions call the authenticate() method and which files import auth.py?",
   "repo_id": "abc123",
   "max_iterations": 10,
-  "allowed_playbooks": ["catalog_search"]
+  "allowed_playbooks": ["code_explorer"]
 }
 ```
 
-### 3. Playbooks (Prompt-Based Strategies)
+### 🕵️ Discovery Agent (Code Explorer)
 
-Playbooks are high-level strategies defined in Markdown that guide the Agent or LLM on how to solve specific tasks. They are auto-discovered from `*.md` files in the `playbooks/` directory.
+CodeMind features a powerful **Discovery Agent** powered by the `code_explorer` playbook. It operates as an autonomous researcher designed to iteratively explore, trace, and understand your codebase.
 
-| Playbook | Mode | Purpose | Output Schema |
-|----------|------|---------|---------------|
-| `catalog_generator` | Linear | Generates rich catalog summaries with metadata (tech stack, architecture, quality assessment) | `CatalogGeneratorOutput` |
-| `catalog_search` | Linear | Searches across all repository catalogs with strict JSON output schema | `CatalogSearchOutput` |
-| `code_explorer` | ReAct | Multi-hop code exploration agent that iteratively searches, reads, and traces code | Free-form |
+**Key Features:**
+- **Iterative ReAct Loop**: Employs a reasoning loop that autonomously determines which tools to call next based on previous findings.
+- **Multi-Hop Tracing**: Maps how code connects by following function calls, imports, and dependencies across multiple files.
+- **Dynamic Tool Selection**: Automatically chooses whether to execute a broad semantic search (`search_codebase`), delve into a specific file (`read_file`), or trace a symbol's dependents (`get_callers`, `get_callees`, `get_dependencies`).
+- **Synthesized Intelligence**: Stops exploring only when sufficient evidence is gathered, producing a structured analysis containing direct answers, key files, code flow, and non-obvious insights.
+- **Explainable Findings**: Always cites evidence with specific file paths, allowing you to easily verify its conclusions.
 
-**Structured Output:** All playbook outputs are validated against **Pydantic schemas** defined in `structured_schemas.py`. The executor uses `CmindChatModel.with_structured_output()` for schema-driven prompt generation and JSON validation.
+### 3. Playbooks (Zero-Code, Self-Describing Strategies)
+
+Playbooks are high-level strategies defined **entirely in Markdown** that guide the Agent or LLM on how to solve specific tasks. They are auto-discovered from `*.md` files in the `playbooks/` directory.
+
+> **🔧 Adding a new playbook requires ZERO code changes** — just drop a `.md` file in `playbooks/` with the right sections and it works end-to-end.
+
+| Playbook | Mode | Purpose | Output Type |
+|----------|------|---------|-------------|
+| `catalog_generator` | Linear | Generates rich catalog summaries with metadata (tech stack, architecture, quality assessment) | `tool_call` → `save_catalog_entry` |
+| `catalog_search` | Linear | Searches across all repository catalogs with strict JSON output schema | `json_response` |
+| `code_explorer` | ReAct | Multi-hop code exploration agent that iteratively searches, reads, and traces code | `json_response` |
+| `tech_debt_analyzer` | Linear | Analyzes codebases for technical debt, code smells, and areas needing refactoring | `json_response` |
+
+**Seamless Playbook Architecture:**
+
+Each playbook `.md` file is fully self-describing with three key sections:
+
+```markdown
+## Output Schema        ← Defines the Pydantic model (fields, types, constraints)
+## Behavior             ← Declares executor flags (no hardcoded if/else)
+## Search Strategy      ← Configures code retrieval (queries, mode, limits)
+```
+
+**Self-Describing Schema Example:**
+```yaml
+## Output Schema
+type: json_response          # or "tool_call" for tool-invoking playbooks
+fields:
+  summary: {type: string, required: true, description: "Executive summary"}
+  score: {type: integer, min: 1, max: 100, default: 50}
+  findings: {type: array, items: object, default: []}
+```
+
+**Behavioral Flags** (declared per playbook, no hardcoded branches in executor):
+
+| Flag | Effect |
+|------|--------|
+| `exclude_test_files` | Filters test files from search results before LLM analysis |
+| `grounding_fence` | Wraps context in BEGIN/END markers, prevents LLM hallucination |
+| `inject_repo_metadata` | Injects repo name, URL, branch into the LLM prompt |
+
+**Dynamic Schema Generation:**
+- Pydantic models are built dynamically from YAML field definitions at startup
+- 3-tier schema resolution: hardcoded → cache → dynamic build
+- Supports types: `string`, `integer`, `float`, `boolean`, `array`, `dict/object`
+- Supports constraints: `required`, `default`, `min`/`max`, `description`
 
 **Playbook Executor Features:**
-- **JSON Repair**: Handles malformed LLM JSON output (unbalanced quotes, trailing commas, embedded parentheticals)
-- **Format Normalization**: Unwraps nested LLM output formats (`catalog_entry`, `identity`, `quality_assessment` wrappers) into flat parameter format
-- **Type Coercion**: Handles architecture/tech_stack fields as both strings and lists
-- **Metadata Injection**: Auto-injects repository metadata (`repo_id`, `repo_url`, `branch`) into tool calls
+- **Data-Driven Execution** — Zero `if playbook.name == "..."` branches; all behavior driven by flags
+- **Schema Validation** — Post-parse Pydantic validation with type coercion
+- **JSON Repair** — Handles malformed LLM JSON output (unbalanced quotes, trailing commas)
+- **Format Normalization** — Unwraps nested LLM output formats into flat parameter format
+- **Metadata Injection** — Auto-injects repository metadata into tool calls
+- **Grounding Fence** — Prevents hallucination by restricting LLM to retrieved context only
+- **Hallucination Stripping** — Validates output entries against retrieved context, removes fabricated data
 
 ### 4. Repository Catalogs 📚
 
@@ -626,11 +676,14 @@ cmind/
 │   │   ├── factory.py       # get_llm_client(), get_chat_model()
 │   │   └── providers.py     # LocalDriver, OllamaDriver, ApigeeDriver, EnterpriseDriver
 │   ├── mcp/                 # MCP server (Model Context Protocol proxy)
-│   ├── playbooks/           # Playbook engine
-│   │   ├── executors.py     # PlaybookExecutor (LangGraph StateGraph) + JSON repair
-│   │   ├── structured_schemas.py  # Pydantic output schemas per playbook
+│   ├── playbooks/           # Playbook engine (zero-code architecture)
+│   │   ├── executors.py     # PlaybookExecutor (data-driven, no hardcoded branches)
+│   │   ├── structured_schemas.py  # Pydantic schemas + dynamic model builder
+│   │   ├── schema.py        # PlaybookDefinition model (output_schema, behavioral flags)
+│   │   ├── parsers.py       # Markdown parser (## Output Schema, ## Behavior)
 │   │   ├── langchain_tools.py     # @tool-wrapped data tools + playbook meta-tools
 │   │   ├── registry.py      # Auto-discovery from playbooks/*.md
+│   │   ├── token_utils.py   # Token estimation and context budgeting
 │   │   └── tools.py         # PlaybookTools (search, catalogs, graph, normalization)
 │   ├── storage/             # SQLAlchemy database, LanceDB, ManifestManager
 │   │   ├── database.py      # SQLAlchemy models (RepoMetadata, CatalogStore, IndexJob)
@@ -638,10 +691,11 @@ cmind/
 │   ├── utils/               # Git utilities, GitHub client
 │   ├── worker/              # Standalone IndexWorker process
 │   └── workflows/           # LangGraph indexing pipeline (7 stages)
-├── playbooks/               # Markdown playbook definitions
-│   ├── catalog_generator.md # Generates comprehensive catalog entries
-│   ├── catalog_search.md    # Searches across repository catalogs
-│   └── code_explorer.md     # Multi-hop ReAct code exploration agent
+├── playbooks/               # Markdown playbook definitions (zero-code addition)
+│   ├── catalog_generator.md # Generates comprehensive catalog entries (tool_call)
+│   ├── catalog_search.md    # Searches across repository catalogs (json_response)
+│   ├── code_explorer.md     # Multi-hop ReAct code exploration (json_response)
+│   └── tech_debt_analyzer.md # Technical debt analysis & scoring (json_response)
 ├── frontend/                # React + Vite + TailwindCSS frontend
 │   ├── src/
 │   │   ├── pages/
