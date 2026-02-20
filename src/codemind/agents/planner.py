@@ -67,9 +67,10 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
                     result = await executor.execute(pb_name_inner, user_input)
                     if result.get("success"):
                         outputs = result.get("outputs", {})
-                        # Return the result text or a summary of outputs
+                        # Return the result as JSON so planner's _finish can extract it directly
                         if outputs.get("result"):
-                            return outputs["result"][:4000]
+                            truncated = str(outputs["result"])[:3800]
+                            return json.dumps({"result": truncated})
                         return json.dumps(outputs, default=str)[:4000]
                     else:
                         return json.dumps({"error": result.get("error", "Playbook failed")})
@@ -450,7 +451,7 @@ class PlannerAgent:
                 "You are a code analysis assistant. Answer based ONLY on the data below.\n\n"
                 "USER GOAL: " + state["goal"] + "\n\n"
                 "GATHERED DATA:\n" + data_context[:8000] + "\n\n"
-                "Provide a clear, detailed answer. Include file paths and code references.\n\n"
+                "Provide a clear, detailed answer. Synthesize the findings completely based on the data.\n\n"
                 "Your answer:"
             )
             
