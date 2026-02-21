@@ -462,27 +462,46 @@ class PlaybookExecutor:
                             f"Do not output any other text."
                         )
                     elif output_schema:
-                        # JSON-response playbooks: generate a compact example-based schema
-                        # The full Pydantic model_json_schema() is too verbose for local LLMs
-                        # and causes them to echo back empty default values.
-                        schema_fields = output_schema.model_fields
-                        field_hints = []
-                        for fname, finfo in schema_fields.items():
-                            ftype = finfo.annotation
-                            desc = finfo.description or fname
-                            field_hints.append(f'  "{fname}": ... // {desc}')
-                        compact_schema = "{\n" + ",\n".join(field_hints) + "\n}"
-                        
+                        # JSON-response playbooks: provide a concrete example 
+                        # Local LLMs need to see actual populated values, not just field names.
                         prompt_suffix += (
-                            f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object "
-                            f"with these fields:\n{compact_schema}\n\n"
-                            f"For `catalog_matches`, each item must have: "
-                            f"capability (str), component_name (str), match_type ('Full Match'|'Partial Match'), "
-                            f"confidence_score (0-100), reasoning (str), and catalog_entry (object with "
-                            f"repo_name, repo_url, description, topics, tech_stack, architecture, category, "
-                            f"quality_score, pros, cons).\n"
-                            f"Wrap your response in a markdown code block (```json ... ```).\n"
-                            f"CRITICAL: respond ONLY with valid JSON. Do NOT output conversational text.\n"
+                            '\n\nIMPORTANT: You MUST return a JSON object. Here is an EXAMPLE of the expected format '
+                            '(use real data from RETRIEVED CODE above, not these example values):\n'
+                            '```json\n'
+                            '{\n'
+                            '  "requirement_summary": "Build an e-commerce platform",\n'
+                            '  "capabilities": ["User authentication", "Product catalog", "Payment processing"],\n'
+                            '  "decomposition": ["Auth Service", "Catalog Service", "Payment Gateway"],\n'
+                            '  "catalog_matches": [\n'
+                            '    {\n'
+                            '      "capability": "User authentication",\n'
+                            '      "component_name": "ExampleApp",\n'
+                            '      "match_type": "Partial Match",\n'
+                            '      "confidence_score": 65,\n'
+                            '      "reasoning": "ExampleApp has a login system that can be adapted for this use case.",\n'
+                            '      "catalog_entry": {\n'
+                            '        "repo_name": "ExampleApp",\n'
+                            '        "repo_url": "https://github.com/example/app",\n'
+                            '        "description": "An example application",\n'
+                            '        "topics": ["Web", "Auth"],\n'
+                            '        "tech_stack": "Python, React",\n'
+                            '        "architecture": "Microservices",\n'
+                            '        "category": "Web App",\n'
+                            '        "quality_score": 70,\n'
+                            '        "pros": ["Good structure", "Modern stack"],\n'
+                            '        "cons": ["No tests"]\n'
+                            '      }\n'
+                            '    }\n'
+                            '  ],\n'
+                            '  "architecture_composition": "The proposed architecture uses ExampleApp as foundation...",\n'
+                            '  "gaps": ["Payment processing service needs custom development"],\n'
+                            '  "risks": ["ExampleApp is incomplete and may need extra work"],\n'
+                            '  "overall_confidence_score": 60\n'
+                            '}\n'
+                            '```\n\n'
+                            'Now generate YOUR response using the RETRIEVED CODE entries above. '
+                            'Fill in ALL fields with REAL data. Do NOT return empty arrays or strings.\n'
+                            'Wrap your response in ```json ... ```.\n'
                         )
 
                     # Data-driven: prepend repo metadata if playbook requests it
@@ -526,6 +545,13 @@ class PlaybookExecutor:
                         )
                     
 
+                    # Temporary debug dump
+                    with open("/tmp/llm_prompt_debug.txt", "w") as f:
+                        f.write("=== SYSTEM PROMPT ===\n")
+                        f.write(sys_prompt)
+                        f.write(f"\n\n=== USER MSG ({len(user_msg)} chars) ===\n")
+                        f.write(user_msg)
+                    
                     output = await self.llm.generate(
                         user_msg,
                         system_prompt=sys_prompt,
@@ -535,6 +561,35 @@ class PlaybookExecutor:
                     print("-" * 40)
                     print(output)
                     print("-" * 40)
+                    
+                    # Retry logic: if LLM returns suspiciously short output for json_response
+                    # playbooks, it likely echoed empty defaults. Retry with higher temperature
+                    # to break the deterministic pattern.
+                    if (playbook.output_type == "json_response" 
+                            and len(output) < 300 
+                            and code_context.strip()):
+                        for retry in range(2):
+                            print(f"[EXECUTOR] ⚠️ Output too short ({len(output)} chars), retry {retry + 1}/2 with temp=0.7")
+                            nudge = (
+                                "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
+                                "The RETRIEVED CODE section above contains catalog entries that you MUST use.\n"
+                                "You MUST populate catalog_matches with entries from the RETRIEVED CODE.\n"
+                                "You MUST fill in requirement_summary, capabilities, decomposition, "
+                                "architecture_composition, gaps, risks, and overall_confidence_score.\n"
+                                "Do NOT return empty arrays or empty strings.\n\n"
+                            )
+                            retry_output = await self.llm.generate(
+                                nudge + user_msg,
+                                system_prompt=sys_prompt,
+                                max_tokens=single_pass_output,
+                                temperature=0.7
+                            )
+                            print(f"[EXECUTOR] Retry {retry + 1} output: {len(retry_output)} chars")
+                            if len(retry_output) > len(output):
+                                output = retry_output
+                            if len(output) >= 300:
+                                break
+                    
                     state["llm_output"] = output
                     state["logs"].append(f"  Generated {len(output)} chars in single pass (max_tokens={single_pass_output})")
                 

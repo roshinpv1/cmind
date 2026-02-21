@@ -18,6 +18,10 @@ import {
     X,
     Coins,
     Lightbulb,
+    Target,
+    GitBranch,
+    AlertTriangle,
+    Gauge,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -502,7 +506,7 @@ export default function AgentCatalogSearch() {
                         Discovery Agent
                     </div>
 
-                    <p className="text-gray-500 max-w-lg mx-auto">
+                    <p className="text-gray-700 text-lg max-w-xlg mx-auto">
                         Search across all indexed marketplaces and repositories by architecture, technology, capability, or natural language.
                     </p>
                 </div>
@@ -726,13 +730,91 @@ export default function AgentCatalogSearch() {
                             {/* Discovery Final Result (Structured JSON) */}
                             {!loading && discoveryResult && discoveryResult.answer && discoveryResult.answer.catalog_matches && (
                                 <div className="space-y-6">
-                                    {/* Arch Summary */}
+                                    {/* ─── Requirement Summary + Confidence ─── */}
                                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-                                        <h2 className="text-lg font-black text-gray-900 mb-2">Architecture Composition</h2>
-                                        <p className="text-sm text-gray-600 leading-relaxed">
-                                            {discoveryResult.answer.architecture_composition}
-                                        </p>
+                                        <div className="flex items-start justify-between gap-6">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <Target className="h-5 w-5 text-primary" />
+                                                    <h2 className="text-lg font-black text-gray-900">Requirement Analysis</h2>
+                                                </div>
+                                                <p className="text-sm text-gray-600 leading-relaxed">
+                                                    {discoveryResult.answer.requirement_summary || discoveryResult.goal || "—"}
+                                                </p>
+                                            </div>
+                                            {discoveryResult.answer.overall_confidence_score > 0 && (
+                                                <div className="shrink-0 flex flex-col items-center gap-1 px-4 py-3 bg-gray-50 rounded-xl">
+                                                    <Gauge className="h-5 w-5 text-gray-400" />
+                                                    <span className="text-2xl font-black text-gray-900 tabular-nums">
+                                                        {discoveryResult.answer.overall_confidence_score}%
+                                                    </span>
+                                                    <span className="text-[10px] font-bold uppercase tracking-widest text-gray-400">Confidence</span>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
+
+                                    {/* ─── Capabilities & Decomposition Grid ─── */}
+                                    {(() => {
+                                        const caps = discoveryResult.answer.capabilities;
+                                        const decomp = discoveryResult.answer.decomposition;
+                                        const capList: string[] = Array.isArray(caps) ? caps : (caps?.items || caps?.functional || Object.values(caps || {}).flat());
+                                        const decompList: string[] = Array.isArray(decomp) ? decomp : (decomp?.items || decomp?.core_modules || Object.values(decomp || {}).flat());
+                                        const hasCaps = capList && capList.length > 0;
+                                        const hasDecomp = decompList && decompList.length > 0;
+
+                                        if (!hasCaps && !hasDecomp) return null;
+
+                                        return (
+                                            <div className={`grid gap-4 ${hasCaps && hasDecomp ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
+                                                {hasCaps && (
+                                                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                                                        <div className="flex items-center gap-2 mb-4">
+                                                            <Sparkles className="h-4 w-4 text-indigo-500" />
+                                                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Identified Capabilities</h3>
+                                                        </div>
+                                                        <ul className="space-y-2">
+                                                            {capList.filter((c: any) => typeof c === 'string').map((cap: string, i: number) => (
+                                                                <li key={i} className="text-sm text-gray-700 flex items-start gap-2">
+                                                                    <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-indigo-400 shrink-0" />
+                                                                    {cap}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                )}
+                                                {hasDecomp && (
+                                                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                                                        <div className="flex items-center gap-2 mb-4">
+                                                            <GitBranch className="h-4 w-4 text-emerald-500" />
+                                                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Module Decomposition</h3>
+                                                        </div>
+                                                        <ul className="space-y-2">
+                                                            {decompList.filter((d: any) => typeof d === 'string').map((mod: string, i: number) => (
+                                                                <li key={i} className="text-sm text-gray-700 flex items-start gap-2">
+                                                                    <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
+                                                                    {mod}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* ─── Architecture Composition ─── */}
+                                    {discoveryResult.answer.architecture_composition && (
+                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                                            <div className="flex items-center gap-2 mb-3">
+                                                <Layers className="h-5 w-5 text-gray-400" />
+                                                <h2 className="text-lg font-black text-gray-900">Architecture Composition</h2>
+                                            </div>
+                                            <p className="text-sm text-gray-600 leading-relaxed">
+                                                {discoveryResult.answer.architecture_composition}
+                                            </p>
+                                        </div>
+                                    )}
 
                                     {/* Catalog Match Cards — deduplicated by component */}
                                     <div className="space-y-4">
@@ -796,6 +878,24 @@ export default function AgentCatalogSearch() {
                                                     <li key={i} className="text-sm text-amber-800 flex items-start gap-2">
                                                         <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
                                                         {gap}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    {/* Risks */}
+                                    {discoveryResult.answer.risks && discoveryResult.answer.risks.length > 0 && (
+                                        <div className="bg-red-50/60 rounded-2xl border border-red-200 p-6">
+                                            <div className="flex items-center gap-2 mb-4">
+                                                <AlertTriangle className="h-5 w-5 text-red-500" />
+                                                <h3 className="text-sm font-bold text-red-800 uppercase tracking-wider">Risks & Considerations</h3>
+                                            </div>
+                                            <ul className="space-y-2">
+                                                {discoveryResult.answer.risks.map((risk: string, i: number) => (
+                                                    <li key={i} className="text-sm text-red-700 flex items-start gap-2">
+                                                        <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
+                                                        {risk}
                                                     </li>
                                                 ))}
                                             </ul>
