@@ -67,8 +67,11 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
                     result = await executor.execute(pb_name_inner, user_input)
                     if result.get("success"):
                         outputs = result.get("outputs", {})
-                        # Return the result as JSON so planner's _finish can extract it directly
-                        if outputs.get("result"):
+                        # Return the structured data if available so _finish parses it natively
+                        if outputs.get("data"):
+                            # Pydantic dicts might have non-serializable objects (like dates), default=str
+                            return json.dumps(outputs["data"], default=str)
+                        elif outputs.get("result"):
                             truncated = str(outputs["result"])[:3800]
                             return json.dumps({"result": truncated})
                         return json.dumps(outputs, default=str)[:4000]
@@ -139,6 +142,7 @@ class PlannerAgent:
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
                 "code_explorer": {"search_codebase", "read_file", "search_symbol",
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
+                "solution_architect": {"search_catalogs"}
             }
             for pb in allowed_playbooks:
                 relevant |= PLAYBOOK_TOOLS.get(pb, set())
@@ -395,9 +399,12 @@ class PlannerAgent:
         for obs in state.get("observations", []):
             if obs.get("success") and obs.get("outputs"):
                 outputs = obs["outputs"]
-                if isinstance(outputs, dict) and outputs.get("result"):
-                    playbook_output = outputs["result"]
                 if isinstance(outputs, dict):
+                    if "result" in outputs:
+                        playbook_output = outputs["result"]
+                    elif "catalog_matches" in outputs or "summary" in outputs:
+                        playbook_output = outputs
+                    
                     for key, val in outputs.items():
                         if isinstance(val, str) and len(val) > 20:
                             all_data.append(val[:2000])
@@ -409,11 +416,14 @@ class PlannerAgent:
             if isinstance(msg, ToolMessage):
                 content = msg.content
                 if isinstance(content, str) and len(content) > 20:
-                    # Check if it's a playbook result (JSON with "result" key)
+                    # Check if it's a playbook result (JSON with schema keys)
                     try:
                         parsed = json.loads(content)
-                        if isinstance(parsed, dict) and parsed.get("result"):
-                            playbook_output = parsed["result"]
+                        if isinstance(parsed, dict):
+                            if "result" in parsed:
+                                playbook_output = parsed["result"]
+                            elif "catalog_matches" in parsed or "summary" in parsed:
+                                playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
                         pass
                     all_data.append(content[:2000])
@@ -432,7 +442,9 @@ class PlannerAgent:
             actions_used.append(name)
         
         if playbook_output:
-            print(f"[PLANNER] ✅ Using playbook output directly ({len(playbook_output)} chars)")
+            # Output can be dict or a string
+            chars = len(str(playbook_output))
+            print(f"[PLANNER] ✅ Using playbook output directly ({chars} chars)")
             return {
                 "final_answer": {
                     "goal": state["goal"],

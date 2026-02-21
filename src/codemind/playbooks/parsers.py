@@ -186,8 +186,8 @@ def _extract_section(content: str, header: str) -> Optional[str]:
             continue
         
         if in_section:
-            # Stop at next header
-            if line.startswith('#'):
+            # Stop at next header (level 1 or 2, but NOT level 3+)
+            if line.startswith('# ') or line.startswith('## '):
                 break
             section_lines.append(line)
     

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
     Search,
     Loader2,
@@ -17,6 +17,7 @@ import {
     SlidersHorizontal,
     X,
     Coins,
+    Lightbulb,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -37,6 +38,7 @@ interface CatalogResult {
     branch: string;
     estimated_cost: number;
     business_functionalities: string[];
+    reasoning?: string; // Appears during Discovery Agent mode
 }
 
 function QualityBadge({ score }: { score: number }) {
@@ -95,16 +97,23 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         category: rawItem.category ?? "",
         estimated_cost: rawItem.estimated_cost ?? 0,
         business_functionalities: rawItem.business_functionalities ?? [],
+        reasoning: rawItem.reasoning ?? "",
     };
 
     // Parse specification JSON
     let specObj: { key_apis?: string[]; interfaces?: string[]; contracts?: string[] } | null = null;
+    let specArray: string[] | null = null;
     try {
         if (item.specification) {
-            specObj = JSON.parse(item.specification);
+            const parsed = JSON.parse(item.specification);
+            if (Array.isArray(parsed)) {
+                specArray = parsed;
+            } else {
+                specObj = parsed;
+            }
         }
     } catch (e) {
-        // Not valid JSON, skip rendering specification section
+        // Not valid JSON string. If it's actually an array passed as string, we try an eval fallback or just leave null
         specObj = null;
     }
 
@@ -153,6 +162,19 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                     </div>
                 </div>
             </div>
+
+            {/* Discovery Agent Reasoning Block */}
+            {item.reasoning && (
+                <div className="px-6 py-4 mx-4 mb-4 bg-primary/5 rounded-xl border border-primary/20">
+                    <div className="flex items-center gap-2 mb-2">
+                        <Lightbulb className="h-4 w-4 text-primary" />
+                        <span className="text-xs font-bold tracking-widest uppercase text-primary">Architectural Reasoning</span>
+                    </div>
+                    <p className="text-sm text-gray-700 leading-relaxed italic">
+                        "{item.reasoning}"
+                    </p>
+                </div>
+            )}
 
             {/* Description */}
             <div className="px-6 pb-4">
@@ -242,7 +264,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                     )}
 
                     {/* Specification */}
-                    {specObj && (
+                    {specObj && Object.keys(specObj).length > 0 && (
                         <div className="px-6 py-5 border-b border-gray-100">
                             <h4 className="text-xs font-black uppercase tracking-widest text-gray-400 mb-3">
                                 Specification
@@ -285,6 +307,20 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                     </div>
                                 )}
                             </div>
+                        </div>
+                    )}
+                    {specArray && specArray.length > 0 && (
+                        <div className="px-6 py-5 border-b border-gray-100">
+                            <h4 className="text-xs font-black uppercase tracking-widest text-gray-400 mb-3">
+                                Specification Details
+                            </h4>
+                            <ul className="grid grid-cols-1 gap-2">
+                                {specArray.map((specStr, i) => (
+                                    <li key={i} className="text-xs text-gray-700 flex items-start gap-2">
+                                        <span className="text-indigo-500 mt-0.5 font-bold">↳</span> {String(specStr)}
+                                    </li>
+                                ))}
+                            </ul>
                         </div>
                     )}
 
@@ -344,9 +380,48 @@ export default function AgentCatalogSearch() {
     const [hasSearched, setHasSearched] = useState(false);
     const [showFilters, setShowFilters] = useState(false);
 
+    // Modes
+    const [searchMode, setSearchMode] = useState<"catalog" | "discovery">("catalog");
+
+    // Discovery State
+    const [discoveryJobId, setDiscoveryJobId] = useState<string | null>(null);
+    const [discoveryLogs, setDiscoveryLogs] = useState<string[]>([]);
+    const [discoveryResult, setDiscoveryResult] = useState<any>(null);
+
     // Filters
     const [limit, setLimit] = useState(5);
     const [minScore, setMinScore] = useState(0.5);
+
+    // Discovery Polling Hook
+    useEffect(() => {
+        let interval: ReturnType<typeof setInterval>;
+        if (discoveryJobId && loading) {
+            interval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/agents/autonomous/${discoveryJobId}/status`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setDiscoveryLogs(data.logs || []);
+
+                        if (data.status === "completed" || data.status === "failed") {
+                            clearInterval(interval);
+                            setLoading(false);
+
+                            // Fetch final result
+                            const resultRes = await fetch(`/api/v1/agents/autonomous/${discoveryJobId}/result`);
+                            if (resultRes.ok) {
+                                const resultData = await resultRes.json();
+                                setDiscoveryResult(resultData);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.error("Polling error", e);
+                }
+            }, 2000);
+        }
+        return () => clearInterval(interval);
+    }, [discoveryJobId, loading]);
 
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -354,7 +429,39 @@ export default function AgentCatalogSearch() {
 
         setLoading(true);
         setHasSearched(true);
+        setResults([]);
+        setDiscoveryJobId(null);
+        setDiscoveryLogs([]);
+        setDiscoveryResult(null);
 
+        if (searchMode === "discovery") {
+            try {
+                const res = await fetch("/api/v1/agents/autonomous", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        goal: query,
+                        max_iterations: 15,
+                        allowed_playbooks: ["solution_architect"]
+                    }),
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    setDiscoveryJobId(data.job_id);
+                    // Loading remains true while polling occurs
+                } else {
+                    console.error("Discovery trigger failed");
+                    setLoading(false);
+                }
+            } catch (err) {
+                console.error("Discovery error:", err);
+                setLoading(false);
+            }
+            return;
+        }
+
+        // Standard Catalog Search
         try {
             const res = await fetch("/api/v1/catalogs/search", {
                 method: "POST",
@@ -400,13 +507,45 @@ export default function AgentCatalogSearch() {
                     </p>
                 </div>
 
+                {/* Mode Toggle */}
+                <div className="flex justify-center mb-8">
+                    <div className="inline-flex items-center p-1 bg-gray-100 rounded-xl space-x-1">
+                        <button
+                            onClick={() => setSearchMode("catalog")}
+                            className={`px-6 py-2.5 text-sm font-bold rounded-lg transition-all ${searchMode === "catalog"
+                                ? "bg-white text-gray-900 shadow-sm ring-1 ring-gray-200"
+                                : "text-gray-500 hover:text-gray-700 hover:bg-gray-50/50"
+                                }`}
+                        >
+                            <span className="flex items-center gap-2">
+                                <Search className="h-4 w-4" /> Catalog Search
+                            </span>
+                        </button>
+                        <button
+                            onClick={() => setSearchMode("discovery")}
+                            className={`px-6 py-2.5 text-sm font-bold rounded-lg transition-all ${searchMode === "discovery"
+                                ? "bg-white text-gray-900 shadow-sm ring-1 ring-gray-200"
+                                : "text-gray-500 hover:text-gray-700 hover:bg-gray-50/50"
+                                }`}
+                        >
+                            <span className="flex items-center gap-2">
+                                <Lightbulb className="h-4 w-4" /> Intelligent Discovery
+                            </span>
+                        </button>
+                    </div>
+                </div>
+
                 {/* Search Box */}
                 <div className="max-w-3xl mx-auto mb-8 space-y-3">
                     <form onSubmit={handleSearch} className="relative group">
                         <div className="absolute -inset-1 bg-gradient-to-r from-primary/20 via-indigo-500/20 to-primary/20 rounded-2xl blur-lg opacity-0 group-hover:opacity-60 group-focus-within:opacity-80 transition-opacity duration-500" />
                         <div className="relative flex items-center gap-2 bg-white border-2 border-gray-100 rounded-2xl p-2 shadow-xl shadow-gray-200/30 hover:border-gray-200 focus-within:border-primary/40 transition-all">
                             <div className="pl-3">
-                                <Search className="h-5 w-5 text-gray-300" />
+                                {searchMode === "discovery" ? (
+                                    <Lightbulb className="h-5 w-5 text-indigo-400" />
+                                ) : (
+                                    <Search className="h-5 w-5 text-gray-300" />
+                                )}
                             </div>
                             <input
                                 type="text"
@@ -504,58 +643,175 @@ export default function AgentCatalogSearch() {
 
                 {/* Results */}
                 <div className="space-y-5">
-                    {/* Results Summary */}
-                    {hasSearched && !loading && (
-                        <div className="flex items-center justify-between px-1">
-                            <div className="flex items-center gap-2 text-sm text-gray-500">
-                                <BookOpen className="h-4 w-4" />
-                                <span>
-                                    <strong className="text-gray-900">{results.length}</strong>{" "}
-                                    {results.length === 1 ? "catalog" : "catalogs"} found
-                                </span>
-                            </div>
-                            {results.length > 0 && (
-                                <div className="flex items-center gap-1.5 text-xs text-gray-400">
-                                    <Info className="h-3.5 w-3.5" />
-                                    Sorted by relevance
+                    {searchMode === "catalog" && (
+                        <>
+                            {/* Results Summary */}
+                            {hasSearched && !loading && (
+                                <div className="flex items-center justify-between px-1">
+                                    <div className="flex items-center gap-2 text-sm text-gray-500">
+                                        <BookOpen className="h-4 w-4" />
+                                        <span>
+                                            <strong className="text-gray-900">{results.length}</strong>{" "}
+                                            {results.length === 1 ? "catalog" : "catalogs"} found
+                                        </span>
+                                    </div>
+                                    {results.length > 0 && (
+                                        <div className="flex items-center gap-1.5 text-xs text-gray-400">
+                                            <Info className="h-3.5 w-3.5" />
+                                            Sorted by relevance
+                                        </div>
+                                    )}
                                 </div>
                             )}
-                        </div>
+
+                            {/* Loading State */}
+                            {loading && (
+                                <div className="flex flex-col items-center justify-center py-20 space-y-4">
+                                    <div className="relative">
+                                        <div className="h-12 w-12 rounded-full border-4 border-gray-100" />
+                                        <div className="absolute inset-0 h-12 w-12 rounded-full border-4 border-primary border-t-transparent animate-spin" />
+                                    </div>
+                                    <p className="text-sm text-gray-400 font-medium">
+                                        Searching across the catalog...
+                                    </p>
+                                </div>
+                            )}
+
+                            {/* Result Cards */}
+                            {!loading &&
+                                results.map((item) => (
+                                    <CatalogCard key={item.repo_id} item={item} />
+                                ))}
+
+                            {/* Empty State */}
+                            {hasSearched && !loading && results.length === 0 && (
+                                <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
+                                    <div className="p-5 bg-gray-100 rounded-full">
+                                        <Search className="h-10 w-10 text-gray-300" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-gray-700">No catalogs found</h3>
+                                        <p className="text-sm text-gray-400 max-w-sm mt-1">
+                                            Try a different query or lower the minimum similarity threshold
+                                            in the filter settings.
+                                        </p>
+                                    </div>
+                                </div>
+                            )}
+                        </>
                     )}
 
-                    {/* Loading State */}
-                    {loading && (
-                        <div className="flex flex-col items-center justify-center py-20 space-y-4">
-                            <div className="relative">
-                                <div className="h-12 w-12 rounded-full border-4 border-gray-100" />
-                                <div className="absolute inset-0 h-12 w-12 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-                            </div>
-                            <p className="text-sm text-gray-400 font-medium">
-                                Searching across the catalog...
-                            </p>
-                        </div>
-                    )}
+                    {searchMode === "discovery" && (
+                        <>
+                            {/* Discovery Loading & Logs */}
+                            {loading && (
+                                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                                    <div className="p-4 bg-gray-50/50 border-b border-gray-100 flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                            <h3 className="text-sm font-bold text-gray-700">Synthesizing Architecture...</h3>
+                                        </div>
+                                    </div>
+                                    <div className="p-4 space-y-2 max-h-60 overflow-y-auto font-mono text-xs">
+                                        {discoveryLogs.map((log, i) => (
+                                            <div key={i} className="text-gray-500 flex gap-2">
+                                                <span className="text-gray-300">[{new Date().toLocaleTimeString()}]</span>
+                                                {log}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
 
-                    {/* Result Cards */}
-                    {!loading &&
-                        results.map((item) => (
-                            <CatalogCard key={item.repo_id} item={item} />
-                        ))}
+                            {/* Discovery Final Result (Structured JSON) */}
+                            {!loading && discoveryResult && discoveryResult.answer && discoveryResult.answer.catalog_matches && (
+                                <div className="space-y-6">
+                                    {/* Arch Summary */}
+                                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                                        <h2 className="text-lg font-black text-gray-900 mb-2">Architecture Composition</h2>
+                                        <p className="text-sm text-gray-600 leading-relaxed">
+                                            {discoveryResult.answer.architecture_composition}
+                                        </p>
+                                    </div>
 
-                    {/* Empty State */}
-                    {hasSearched && !loading && results.length === 0 && (
-                        <div className="flex flex-col items-center justify-center py-20 space-y-4 text-center">
-                            <div className="p-5 bg-gray-100 rounded-full">
-                                <Search className="h-10 w-10 text-gray-300" />
-                            </div>
-                            <div>
-                                <h3 className="text-lg font-bold text-gray-700">No catalogs found</h3>
-                                <p className="text-sm text-gray-400 max-w-sm mt-1">
-                                    Try a different query or lower the minimum similarity threshold
-                                    in the filter settings.
-                                </p>
-                            </div>
-                        </div>
+                                    {/* Catalog Match Cards — deduplicated by component */}
+                                    <div className="space-y-4">
+                                        <h3 className="text-sm font-bold text-gray-500 uppercase tracking-widest pl-2">Selected Components</h3>
+                                        {(() => {
+                                            // Deduplicate: group matches by component_name (or repo_url fallback)
+                                            const grouped = new Map<string, { entry: any; reasonings: string[]; maxScore: number }>();
+                                            for (const match of discoveryResult.answer.catalog_matches) {
+                                                const entry = match.catalog_entry || {};
+                                                const key = entry.repo_url || match.component_name || `unknown-${Math.random()}`;
+                                                if (grouped.has(key)) {
+                                                    const g = grouped.get(key)!;
+                                                    if (match.reasoning) g.reasonings.push(match.reasoning);
+                                                    g.maxScore = Math.max(g.maxScore, match.confidence_score || 0);
+                                                } else {
+                                                    grouped.set(key, {
+                                                        entry,
+                                                        reasonings: match.reasoning ? [match.reasoning] : [],
+                                                        maxScore: match.confidence_score || 0,
+                                                    });
+                                                }
+                                            }
+                                            return Array.from(grouped.entries()).map(([_key, { entry, reasonings, maxScore }], idx) => {
+                                                const combinedReasoning = reasonings.length > 1
+                                                    ? reasonings.map((r, i) => `${i + 1}. ${r}`).join("\n")
+                                                    : reasonings[0] || "";
+                                                const resultObj: CatalogResult = {
+                                                    repo_id: `discovery-${idx}`,
+                                                    repo_name: entry.repo_name || "",
+                                                    repo_url: entry.repo_url || "",
+                                                    score: maxScore / 100,
+                                                    category: entry.category || "",
+                                                    description: entry.description || "",
+                                                    summary_detailed: entry.description || "",
+                                                    architecture: entry.architecture || "",
+                                                    tech_stack: Array.isArray(entry.tech_stack) ? entry.tech_stack.join(", ") : (entry.tech_stack || ""),
+                                                    specification: "",
+                                                    estimated_cost: entry.estimated_cost || 0,
+                                                    business_functionalities: entry.business_functionalities || [],
+                                                    reasoning: combinedReasoning,
+                                                    topics: entry.topics || [],
+                                                    quality_score: entry.quality_score || 0,
+                                                    pros: entry.pros || [],
+                                                    cons: entry.cons || [],
+                                                    branch: entry.branch || "main",
+                                                };
+                                                return <CatalogCard key={idx} item={resultObj} />;
+                                            });
+                                        })()}
+                                    </div>
+
+                                    {/* Gaps & Custom Build Needs */}
+                                    {discoveryResult.answer.gaps && discoveryResult.answer.gaps.length > 0 && (
+                                        <div className="bg-amber-50 rounded-2xl border border-amber-200 p-6">
+                                            <div className="flex items-center gap-2 mb-4">
+                                                <Info className="h-5 w-5 text-amber-600" />
+                                                <h3 className="text-sm font-bold text-amber-900 uppercase tracking-wider">Identified Gaps (Custom Build Required)</h3>
+                                            </div>
+                                            <ul className="space-y-2">
+                                                {discoveryResult.answer.gaps.map((gap: string, i: number) => (
+                                                    <li key={i} className="text-sm text-amber-800 flex items-start gap-2">
+                                                        <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
+                                                        {gap}
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {/* Empty / Error State */}
+                            {!loading && hasSearched && (!discoveryResult || !discoveryResult.answer || !discoveryResult.answer.catalog_matches) && (
+                                <div className="flex flex-col items-center justify-center py-20 text-center">
+                                    <h3 className="text-lg font-bold text-gray-700">Discovery Completed</h3>
+                                    <p className="text-sm text-gray-500 mt-2">Could not synthesize architecture or find matches.</p>
+                                </div>
+                            )}
+                        </>
                     )}
                 </div>
             </main>

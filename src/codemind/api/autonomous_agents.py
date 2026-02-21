@@ -11,7 +11,7 @@ Endpoints:
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Any
 import uuid
 import asyncio
 from datetime import datetime
@@ -58,7 +58,7 @@ class AutonomousJobResult(BaseModel):
     job_id: str
     status: str
     goal: str
-    answer: Optional[str] = None
+    answer: Optional[Any] = None
     steps_taken: Optional[int] = None
     iterations: Optional[int] = None
     playbooks_used: Optional[list[str]] = None

@@ -349,7 +349,10 @@ class PlaybookExecutor:
             state["logs"].append(f"  Search mode: {search_params['mode']}, limit: {search_params['limit']}, min_score: {search_params['min_score']}")
             
             try:
-                result = await self.tools.search_codebase(search_params)
+                if search_params.get("mode") == "catalog":
+                    result = await self.tools.search_catalogs(search_params)
+                else:
+                    result = await self.tools.search_codebase(search_params)
                 
                 print(f"[EXECUTOR] Search result: success={result.get('success')}, "
                       f"count={result.get('count', 0)}, "
@@ -459,14 +462,27 @@ class PlaybookExecutor:
                             f"Do not output any other text."
                         )
                     elif output_schema:
-                        # JSON-response playbooks: auto-generate schema hint from Pydantic model
-                        schema_json = json.dumps(output_schema.model_json_schema(), indent=2)
+                        # JSON-response playbooks: generate a compact example-based schema
+                        # The full Pydantic model_json_schema() is too verbose for local LLMs
+                        # and causes them to echo back empty default values.
+                        schema_fields = output_schema.model_fields
+                        field_hints = []
+                        for fname, finfo in schema_fields.items():
+                            ftype = finfo.annotation
+                            desc = finfo.description or fname
+                            field_hints.append(f'  "{fname}": ... // {desc}')
+                        compact_schema = "{\n" + ",\n".join(field_hints) + "\n}"
+                        
                         prompt_suffix += (
                             f"\n\nIMPORTANT: You MUST return your analysis as a valid JSON object "
-                            f"matching the following schema:\n```json\n{schema_json}\n```\n"
-                            f"Wrap it in a markdown code block (```json ... ```).\n"
-                            f"CRITICAL: respond ONLY with valid JSON matching this schema. "
-                            f"Do NOT output conversational text or markdown tables.\n"
+                            f"with these fields:\n{compact_schema}\n\n"
+                            f"For `catalog_matches`, each item must have: "
+                            f"capability (str), component_name (str), match_type ('Full Match'|'Partial Match'), "
+                            f"confidence_score (0-100), reasoning (str), and catalog_entry (object with "
+                            f"repo_name, repo_url, description, topics, tech_stack, architecture, category, "
+                            f"quality_score, pros, cons).\n"
+                            f"Wrap your response in a markdown code block (```json ... ```).\n"
+                            f"CRITICAL: respond ONLY with valid JSON. Do NOT output conversational text.\n"
                         )
 
                     # Data-driven: prepend repo metadata if playbook requests it
@@ -509,6 +525,7 @@ class PlaybookExecutor:
                             + prompt_suffix
                         )
                     
+
                     output = await self.llm.generate(
                         user_msg,
                         system_prompt=sys_prompt,

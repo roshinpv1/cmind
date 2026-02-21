@@ -547,14 +547,16 @@ def _parse_structured_output(text: str, schema: type) -> Any:
         try:
             data = json.loads(match.group(1))
             return schema.model_validate(data)
-        except (json.JSONDecodeError, Exception):
+        except Exception as e:
+            print(f"[PARSER ERROR] Strategy 1 failed: {e}")
             pass
     
     # Strategy 2: Try the whole text as JSON
     try:
         data = json.loads(text.strip())
         return schema.model_validate(data)
-    except (json.JSONDecodeError, Exception):
+    except Exception as e:
+        print(f"[PARSER ERROR] Strategy 2 failed: {e}")
         pass
     
     # Strategy 3: Find first { to last }
@@ -564,7 +566,8 @@ def _parse_structured_output(text: str, schema: type) -> Any:
         try:
             data = json.loads(text[start:end + 1])
             return schema.model_validate(data)
-        except (json.JSONDecodeError, Exception):
+        except Exception as e:
+            print(f"[PARSER ERROR] Strategy 3 failed: {e}")
             pass
     
     # Fallback: return raw text wrapped in a minimal schema if possible

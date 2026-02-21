@@ -704,6 +704,8 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
             "cons": metadata.get("cons", []),
             "repo_url": metadata.get("repo_url", ""),
             "branch": metadata.get("branch", ""),
+            "estimated_cost": metadata.get("estimated_cost", 0),
+            "business_functionalities": metadata.get("business_functionalities", [])
         }
         
         # Coerce None values to safe defaults (metadata.get returns None when key exists but value is None)
@@ -711,11 +713,13 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
                    "architecture", "tech_stack", "specification", "repo_url", "branch"]:
             if entry[k] is None:
                 entry[k] = ""
-        for k in ["topics", "pros", "cons"]:
+        for k in ["topics", "pros", "cons", "business_functionalities"]:
             if entry[k] is None:
                 entry[k] = []
         if entry["quality_score"] is None:
             entry["quality_score"] = 0
+        if entry["estimated_cost"] is None:
+            entry["estimated_cost"] = 0
         
         # Try to get full content from the chunk_text (which has the detailed summary)
         chunk_text = item.get("chunk_text", "")

@@ -6,8 +6,8 @@ LLM responses against expected formats, replacing inline schema
 hints and manual JSON parsing.
 """
 
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import Any, Optional, Union
+from pydantic import BaseModel, Field, model_validator
 
 
 # ─── Catalog Generator ──────────────────────────────────────────────────────
@@ -41,12 +41,25 @@ class CatalogEntry(BaseModel):
     repo_url: str = Field(default="", description="Repository URL")
     description: str = Field(default="", description="Entry description")
     topics: list[str] = Field(default_factory=list)
-    tech_stack: str = Field(default="")
+    tech_stack: Any = Field(default="")
     architecture: str = Field(default="")
     category: str = Field(default="")
     quality_score: int = Field(default=0, ge=0, le=100)
     pros: list[str] = Field(default_factory=list)
     cons: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_tech_stack(cls, values):
+        ts = values.get("tech_stack")
+        if isinstance(ts, list):
+            values["tech_stack"] = ", ".join(str(t) for t in ts)
+        # Coerce pros/cons from semicolon-separated strings to lists
+        for field in ("pros", "cons"):
+            val = values.get(field)
+            if isinstance(val, str):
+                values[field] = [s.strip() for s in val.split(";") if s.strip()]
+        return values
 
 
 class CatalogMatch(BaseModel):
@@ -62,11 +75,11 @@ class CatalogMatch(BaseModel):
 class CatalogSearchOutput(BaseModel):
     """Structured output for catalog_search playbook."""
     requirement_summary: str = Field(default="", description="Summary of the requirement")
-    capabilities: dict = Field(
+    capabilities: Any = Field(
         default_factory=lambda: {"functional": [], "non_functional": []},
         description="Required capabilities"
     )
-    decomposition: dict = Field(
+    decomposition: Any = Field(
         default_factory=lambda: {"core_modules": [], "supporting_modules": [], "cross_cutting": []},
         description="Module decomposition"
     )
@@ -75,6 +88,16 @@ class CatalogSearchOutput(BaseModel):
     gaps: list[str] = Field(default_factory=list)
     risks: list[str] = Field(default_factory=list)
     overall_confidence_score: int = Field(default=0, ge=0, le=100)
+
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_capabilities_decomposition(cls, values):
+        # LLM sometimes returns lists instead of dicts — wrap them
+        for field in ("capabilities", "decomposition"):
+            val = values.get(field)
+            if isinstance(val, list):
+                values[field] = {"items": val}
+        return values
 
 
 # ─── Code Analyzer ───────────────────────────────────────────────────────────
@@ -99,6 +122,13 @@ class CodeExplorerOutput(BaseModel):
     insights: list[str] = Field(default_factory=list, description="Non-obvious findings or potential issues")
 
 
+# ─── Solution Architect ──────────────────────────────────────────────────────
+
+class SolutionArchitectOutput(CatalogSearchOutput):
+    """Structured output for solution_architect playbook."""
+    pass
+
+
 # ─── Schema Registry ────────────────────────────────────────────────────────
 
 PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -106,6 +136,7 @@ PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
     "catalog_search": CatalogSearchOutput,
     "code_analyzer": CodeAnalyzerOutput,
     "code_explorer": CodeExplorerOutput,
+    "solution_architect": SolutionArchitectOutput,
 }
 
 

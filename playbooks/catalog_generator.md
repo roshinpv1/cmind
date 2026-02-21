@@ -69,7 +69,7 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 - **repo_name**: Use the actual project/component name (e.g., "PromptShield", "CodeMind API")
 - **summary_high_level**: Brief enough for catalog listing, detailed enough to understand purpose
 - **summary_detailed**: Include architecture decisions, component interactions, data flow
-- **category**: Choose from: API, Web App, CLI Tool, Library, Framework, AI Agent, ML Pipeline, Data Pipeline, Infrastructure, DevOps, Security, Testing, Documentation, Other
+- **category**: Choose the most accurate from: Monolith, Microservice, AI Agent, MCP (Model Context Protocol), AI Enabled, Frontend, Backend, Fullstack, API, Web App, CLI Tool, Library, Framework, ML Pipeline, Data Pipeline, Infrastructure, DevOps, Security, Testing, Documentation, Other
 - **quality_score**: 1-30 (poor), 31-60 (adequate), 61-80 (good), 81-100 (excellent)
 - **specification**: Document REST APIs, gRPC services, CLI commands, library interfaces
 - **topics**: Include technology names, domain terms, and capability keywords for searchability
@@ -91,7 +91,7 @@ fields:
   description: {type: string, required: true, description: "One-line summary"}
   summary_high_level: {type: string, required: true, description: "2-3 sentence overview for catalog browsing"}
   summary_detailed: {type: string, required: true, description: "Comprehensive multi-paragraph analysis"}
-  category: {type: string, required: true, description: "Software type (e.g. Web App, API, CLI Tool, Library)"}
+  category: {type: string, required: true, description: "Software architecture or type (e.g. Monolith, Microservice, MCP, AI Agent, Frontend, Backend, API)"}
   quality_score: {type: integer, min: 1, max: 100, default: 50, description: "Quality score 1-100"}
   architecture: {type: string, default: "", description: "Architecture description"}
   tech_stack: {type: string, default: "", description: "Languages, frameworks, databases"}
