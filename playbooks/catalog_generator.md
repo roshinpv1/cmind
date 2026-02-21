@@ -20,9 +20,11 @@ You must scan the code and use the provided context to understand:
 6.  **Quality Assessment**: Score 1-100 with pros and cons
 7.  **Specification**: Key APIs, interfaces, or contracts
 8.  **Topics**: Searchable tags for discovery
-9.  **What**: is its stregth and weakness.
+9.  **Business Functionalities**: Core business capabilities and domain features
+10. **Estimated Cost**: Rough monetary estimation (USD) to build
 
 **CRITICAL:** You must NOT output a report. You must output a **JSON BLOCK** to invoke the tool.
+**CRITICAL:** You MUST include the `business_functionalities` array and `estimated_cost` integer in your JSON. Do NOT skip them.
 
 ### Output Format
 ```json
@@ -46,7 +48,9 @@ You must scan the code and use the provided context to understand:
     "cons": ["Weakness 1", "Weakness 2"],
     "first_author": "Original author from context",
     "total_commits": 150,
-    "last_pr_title": "Title of last merged PR from context"
+    "last_pr_title": "Title of last merged PR from context",
+    "estimated_cost": 1500,
+    "business_functionalities": ["User Authentication", "Payment Processing", "Inventory Management"]
   }
 }
 ```
@@ -56,7 +60,8 @@ You must scan the code and use the provided context to understand:
 2.  Identify the project name, purpose, and category.
 3.  Analyze the architecture, tech stack, and key interfaces.
 4.  Assess quality (code organization, testing, documentation, error handling).
-5.  **IMMEDIATELY** output the JSON block with ALL fields populated.
+5.  Determine the primary business functionalities and estimate a build cost.
+6.  **IMMEDIATELY** output the JSON block with ALL fields populated.
 
 Do NOT write "Here is the catalog entry". Just the JSON.
 
@@ -71,6 +76,8 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 - **first_author**: Extract the first author or creator from the metadata context
 - **total_commits**: Extract total commit count from the metadata context
 - **last_pr_title**: Extract the last merged PR title from the metadata context
+- **estimated_cost**: Provide a rough monetary estimation (in USD) to build this component from scratch based on its architectural complexity, language/framework, integrations, and logic footprint. Minimum is typically $5000. Maximum could be $5M+.
+- **business_functionalities**: Extract or infer the core business use cases, features, and domain operations the application performs (e.g., "Payment Processing", "Order Management").
 
 ## Output Schema
 ```yaml
@@ -95,6 +102,8 @@ fields:
   first_author: {type: string, default: "", description: "Original author or creator"}
   total_commits: {type: integer, default: 0, description: "Total number of commits"}
   last_pr_title: {type: string, default: "", description: "Title of the most recently merged pull request"}
+  estimated_cost: {type: integer, required: true, default: 0, description: "Estimated cost in USD to build from scratch"}
+  business_functionalities: {type: array, required: true, items: string, default: [], description: "Core business capabilities and domain features"}
 ```
 
 ## Behavior

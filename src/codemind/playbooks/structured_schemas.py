@@ -29,6 +29,8 @@ class CatalogGeneratorOutput(BaseModel):
     topics: list[str] = Field(default_factory=list, description="Searchable tags")
     pros: list[str] = Field(default_factory=list, description="Strengths")
     cons: list[str] = Field(default_factory=list, description="Weaknesses")
+    estimated_cost: int = Field(default=0, description="Estimated cost in USD")
+    business_functionalities: list[str] = Field(default_factory=list, description="Core business capabilities")
 
 
 # ─── Catalog Search ──────────────────────────────────────────────────────────

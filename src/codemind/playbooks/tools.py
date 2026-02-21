@@ -606,6 +606,19 @@ class PlaybookTools:
         # Ensure description exists
         if "description" not in normalized:
             normalized["description"] = normalized.get("summary_detailed", normalized.get("summary_high_level", ""))
+            
+        # Extract estimated_cost specifically if LLM wrapped it under strange names
+        if "estimated_cost" not in normalized:
+            if isinstance(catalog_entry, dict) and "estimated_cost" in catalog_entry:
+                normalized["estimated_cost"] = catalog_entry["estimated_cost"]
+            elif "quality_assessment" in normalized and isinstance(normalized["quality_assessment"], dict):
+                qb = normalized["quality_assessment"]
+                if "estimated_cost" in qb:
+                     normalized["estimated_cost"] = qb["estimated_cost"]
+                     
+        if "business_functionalities" not in normalized:
+            if isinstance(catalog_entry, dict) and "business_functionalities" in catalog_entry:
+                normalized["business_functionalities"] = catalog_entry["business_functionalities"]
         
         return normalized
 
@@ -647,7 +660,9 @@ class PlaybookTools:
                 "cons": params.get("cons", []),
                 "first_author": params.get("first_author", ""),
                 "total_commits": params.get("total_commits", 0),
-                "last_pr_title": params.get("last_pr_title", "")
+                "last_pr_title": params.get("last_pr_title", ""),
+                "estimated_cost": params.get("estimated_cost", 0),
+                "business_functionalities": params.get("business_functionalities", [])
             }
             
             # Full content includes everything for the LLM to read

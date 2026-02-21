@@ -16,6 +16,7 @@ import {
     Sparkles,
     SlidersHorizontal,
     X,
+    Coins,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -34,6 +35,8 @@ interface CatalogResult {
     cons: string[];
     repo_url: string;
     branch: string;
+    estimated_cost: number;
+    business_functionalities: string[];
 }
 
 function QualityBadge({ score }: { score: number }) {
@@ -90,6 +93,8 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         repo_url: rawItem.repo_url ?? "",
         branch: rawItem.branch ?? "",
         category: rawItem.category ?? "",
+        estimated_cost: rawItem.estimated_cost ?? 0,
+        business_functionalities: rawItem.business_functionalities ?? [],
     };
 
     // Parse specification JSON
@@ -132,6 +137,12 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                             {item.branch && (
                                 <span className="text-xs text-gray-400 font-mono">
                                     ⎇ {item.branch}
+                                </span>
+                            )}
+                            {item.estimated_cost > 0 && (
+                                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-bold bg-green-50 text-green-700 ring-1 ring-green-200 shadow-sm ml-2">
+                                    <Coins className="h-3.5 w-3.5 text-green-600" />
+                                    ${item.estimated_cost.toLocaleString()} Est. Cost
                                 </span>
                             )}
                         </div>
@@ -196,6 +207,23 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                             <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-line">
                                 {item.summary_detailed}
                             </p>
+                        </div>
+                    )}
+
+                    {/* Business Functionalities */}
+                    {item.business_functionalities && item.business_functionalities.length > 0 && (
+                        <div className="px-6 py-5 border-b border-gray-100">
+                            <h4 className="text-xs font-black uppercase tracking-widest text-gray-400 mb-3">
+                                Business Functionalities
+                            </h4>
+                            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-gray-700">
+                                {item.business_functionalities.map((func, i) => (
+                                    <li key={i} className="flex items-start gap-2">
+                                        <span className="text-indigo-500 mt-0.5">•</span>
+                                        {func}
+                                    </li>
+                                ))}
+                            </ul>
                         </div>
                     )}
 
