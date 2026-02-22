@@ -20,11 +20,10 @@ class LocalDriver(LLMDriver):
         # Build messages with optional system prompt
         messages = []
         system_prompt = kwargs.pop("system_prompt", None)
+        max_chars = self.config.max_tokens * 3  # ~3 chars per token
         if system_prompt:
-            # Truncate system prompt if too long
-            messages.append({"role": "system", "content": system_prompt[:4000]})
-        # Truncate user prompt to prevent context overflow
-        messages.append({"role": "user", "content": prompt[:8000]})
+            messages.append({"role": "system", "content": system_prompt[:max_chars]})
+        messages.append({"role": "user", "content": prompt[:max_chars]})
 
         max_tokens = kwargs.get("max_tokens", self.config.max_tokens)
         temperature = kwargs.get("temperature", self.config.temperature)
