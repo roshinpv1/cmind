@@ -57,6 +57,7 @@ _TOKEN_ENV_VARS = (
 class GitTimeoutError(Exception):
     """Raised when a git operation exceeds its configured timeout."""
 
+
 class GitAuthError(Exception):
     """Raised when git authentication fails."""
 

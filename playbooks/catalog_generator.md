@@ -115,15 +115,27 @@ inject_repo_metadata: true
 
 ## Search Strategy
 ```yaml
-limit: 50
+limit: 80
 mode: hybrid
-min_score: 0.3
+min_score: 0.15
 queries:
-  - "architecture overview"
-  - "database schema"
-  - "API routes"
-  - "auth logic"
-  - "configuration"
-  - "main entry point"
-  - "Integration Points"
+  # Foundational — every codebase has these
+  - "main entry point application startup initialization"
+  - "core logic primary function class"
+  - "imports dependencies requirements packages"
+  - "configuration settings environment variables"
+  - "project structure modules components"
+  - "error handling logging"
+  # Domain — catches more from larger apps
+  - "API routes endpoints handlers"
+  - "data model schema types"
+  - "authentication authorization"
+  - "integration external services"
+  # AI / Agentic — catches AI-powered apps
+  - "LLM prompt template system message"
+  - "agent tools function calling"
+  - "embeddings vector store RAG retrieval"
+  - "chain workflow pipeline orchestration"
+  - "model provider openai anthropic ollama"
+  - "MCP server protocol resources"
 ```
