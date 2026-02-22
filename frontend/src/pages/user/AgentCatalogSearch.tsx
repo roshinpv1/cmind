@@ -22,6 +22,10 @@ import {
     GitBranch,
     AlertTriangle,
     Gauge,
+    Store,
+    Bot,
+    GitFork,
+    MessageSquareCode,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -509,6 +513,24 @@ export default function AgentCatalogSearch() {
                     <p className="text-gray-700 text-lg max-w-xlg mx-auto">
                         Search across all indexed marketplaces and repositories by architecture, technology, capability, or natural language.
                     </p>
+
+                    {/* Feature Icons */}
+                    <div className="flex items-center justify-center gap-3 pt-3 flex-wrap">
+                        {[
+                            { icon: Store, label: "IDP", color: "text-violet-600 bg-violet-50 ring-violet-200/60" },
+                            { icon: Bot, label: "Tachyon Agent Marketplace", color: "text-blue-600 bg-blue-50 ring-blue-200/60" },
+                            { icon: GitFork, label: "Enterprise Git", color: "text-orange-600 bg-orange-50 ring-orange-200/60" },
+                            { icon: MessageSquareCode, label: "Prompt Library", color: "text-emerald-600 bg-emerald-50 ring-emerald-200/60" },
+                        ].map(({ icon: Icon, label, color }) => (
+                            <div
+                                key={label}
+                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold ring-1 ${color} hover:shadow-sm transition-all cursor-default`}
+                            >
+                                <Icon className="h-3.5 w-3.5" />
+                                {label}
+                            </div>
+                        ))}
+                    </div>
                 </div>
 
                 {/* Mode Toggle */}
