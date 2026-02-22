@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Load .env before anything reads os.environ
 
 from contextlib import asynccontextmanager
+import os
 
 from datetime import UTC, datetime
 from fastapi import FastAPI, HTTPException
@@ -820,3 +821,65 @@ async def get_catalog_entries(repo_id: str):
     except Exception as e:
         print(f"[ERROR] Failed to get catalog entries: {e}")
         return []
+
+
+# ---------------------------------------------------------------------------
+# Git Integration Endpoints (multi-platform search & branch listing)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/git/search")
+async def search_git_repositories(
+    keywords: str,
+    endpoint: str = "github.com",
+    limit: int = 20,
+):
+    """Search repositories across Git platforms.
+
+    Args:
+        keywords: Comma-separated search terms (e.g. "fastapi,auth")
+        endpoint: Git host — github.com, gitlab.com, bitbucket.org, or enterprise hostname
+        limit: Max results (default 20)
+    """
+    from codemind.utils.git_utils import GitIntegration
+
+    kw_list = [k.strip() for k in keywords.split(",") if k.strip()]
+    if not kw_list:
+        raise HTTPException(status_code=400, detail="keywords parameter is required")
+
+    # Token resolution handled internally by GitIntegration (GitSaaS → static env vars)
+    git = GitIntegration()
+
+    try:
+        results = git.search_repositories(kw_list, git_endpoint=endpoint, limit=limit)
+        return {"results": results, "total": len(results)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+@app.get("/api/v1/git/branches")
+async def list_git_branches(
+    owner: str,
+    name: str,
+    endpoint: str = "github.com",
+):
+    """List branches for a repository.
+
+    Args:
+        owner: Repository owner/org
+        name: Repository name
+        endpoint: Git host
+    """
+    from codemind.utils.git_utils import GitIntegration
+
+    # Token resolution handled internally by GitIntegration (GitSaaS → static env vars)
+    git = GitIntegration()
+
+    try:
+        branches = git.list_branches(owner, name, git_endpoint=endpoint)
+        return {"branches": branches, "total": len(branches)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Branch listing failed: {e}")
