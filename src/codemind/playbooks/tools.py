@@ -119,7 +119,7 @@ class PlaybookTools:
                 query_emb = self.embedder.encode_query(query)
                 
                 # Semantic search
-                results = self.lance.search(query_emb, repo_id=repo_id, limit=limit * 2)
+                results = self.lance.search(query_emb, repo_id=repo_id, limit=limit * 2, min_score=min_score)
                 
                 # Apply filters
                 if mode == "hybrid" and (file_types or graph_filters):

@@ -199,25 +199,30 @@ class LanceDBStorage:
         repo_id: str | list[str] | None = None,
         limit: int = 10,
         table_name: str = "code_chunks",
+        min_score: float = 0.3,
     ) -> list[dict]:
         """
-        Semantic search over chunks with 50% similarity threshold.
+        Semantic search over chunks.
 
         Args:
             query_embedding: Query vector
             repo_id: Optional repository filter (string or list of strings)
             limit: Max results
             table_name: Table name
+            min_score: Minimum similarity score (0-1). Default 0.3.
+                       Driven by playbook's min_score. Distance threshold = 1.0 - min_score.
 
         Returns:
-            List of matching chunks with scores >= 0.5
+            List of matching chunks with score >= min_score
         """
         if table_name not in self.db.table_names():
             return []
 
         table = self.db.open_table(table_name)
 
-        # Enforce cosine metric and 50% similarity threshold (_distance < 0.5)
+        # Distance threshold from min_score (cosine distance = 1 - similarity)
+        distance_threshold = 1.0 - min_score
+
         query = (
             table.search(query_embedding, vector_column_name="embedding")
             .metric("cosine")
@@ -227,24 +232,23 @@ class LanceDBStorage:
         if repo_id:
             if isinstance(repo_id, list):
                 if repo_id:
-                    # Construct IN clause for multiple IDs
                     ids_str = ", ".join([f"'{rid}'" for rid in repo_id])
                     query = query.where(f"repo_id IN ({ids_str})")
             else:
                 query = query.where(f"repo_id = '{repo_id}'")
 
-        # Post-filter for 50% similarity (distance < 0.5 for cosine)
+        # Post-filter by distance threshold (derived from playbook min_score)
         results = query.to_list()
-        filtered_results = [r for r in results if r.get("_distance", 1.0) < 0.5]
-        
-        # New: Safety filter for tiny chunks (handles legacy data)
+        filtered_results = [r for r in results if r.get("_distance", 1.0) < distance_threshold]
+
+        # Safety filter for tiny chunks (handles legacy data)
         filtered_results = [r for r in filtered_results if len(r.get("chunk_text", "").strip()) >= 50]
-        
+
         if results and not filtered_results:
             top_distances = sorted([r.get("_distance", 1.0) for r in results[:5]])
-            print(f"[LANCE] ⚠️ All {len(results)} results filtered out by distance threshold 0.5 or min-size filter. "
-                  f"Top distances: {top_distances}")
-        
+            print(f"[LANCE] ⚠️ All {len(results)} results filtered out by distance threshold {distance_threshold:.2f} "
+                  f"(min_score={min_score}). Top distances: {top_distances}")
+
         return filtered_results
 
     def get_all_chunks(
