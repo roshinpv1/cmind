@@ -24,7 +24,9 @@ You must utilize the provided `RETRIEVED CODE` context—which consists of rich 
 ### Proposal Format Requirements
 Your final response MUST be a detailed JSON object satisfying the Output Schema parameters.
 
-Ensure you meticulously fill out the `catalog_matches` array. For each chosen component, provide the `component_name`, your confidence `score` (0-100), and a detailed `reasoning` string explaining why it fits into the architectural chain.
+Ensure you meticulously fill out the `catalog_matches` array. For each chosen component, provide the `component_name`, your confidence `score` (0-100), a detailed `reasoning` string explaining why it fits into the architectural chain, and an `architecture_layer` classifying which tier it belongs to.
+
+For each `gap` (component not found in the catalog), also classify its `architecture_layer`.
 
 List any missing systems in the `gaps` array, and write a cohesive summary in `architecture_composition`.
 
@@ -51,9 +53,12 @@ fields:
   catalog_matches: 
     type: array
     items: dict
-    description: "Array of matched catalog components. Each item MUST contain 'capability' (what is being matched), 'component_name', 'match_type' ('Full Match' or 'Partial Match'), 'confidence_score' (int), 'reasoning', and 'catalog_entry' (dict of the retrieved data)."
+    description: "Array of matched catalog components. Each item MUST contain 'capability' (what is being matched), 'component_name', 'match_type' ('Full Match' or 'Partial Match'), 'confidence_score' (int), 'reasoning', 'architecture_layer' (one of: 'Presentation', 'Business Logic', 'Data & Storage', 'Infrastructure'), and 'catalog_entry' (dict of the retrieved data)."
   architecture_composition: {type: string, required: true, description: "A cohesive paragraph explaining how the retrieved components weave together"}
-  gaps: {type: array, items: string, required: true, description: "List of components that were NOT found and must be built from scratch"}
+  gaps:
+    type: array
+    items: dict
+    description: "Array of components NOT found in the catalog. Each item MUST contain 'name' (component name), 'description' (why it is needed), and 'architecture_layer' (one of: 'Presentation', 'Business Logic', 'Data & Storage', 'Infrastructure')."
   risks: {type: array, items: string, required: true, description: "Potential architectural risks"}
   overall_confidence_score: {type: integer, required: true, min: 0, max: 100, description: "Your confidence 0-100 that this architecture satisfies the user"}
 ```

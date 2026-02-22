@@ -838,6 +838,101 @@ export default function AgentCatalogSearch() {
                                         </div>
                                     )}
 
+                                    {/* ─── Layered Architecture View ─── */}
+                                    {(() => {
+                                        const LAYERS = ["Presentation", "Business Logic", "Data & Storage", "Infrastructure"] as const;
+                                        const layerStyles: Record<string, { bg: string; border: string; label: string; icon: string }> = {
+                                            "Presentation": { bg: "bg-violet-50/60", border: "border-violet-200", label: "text-violet-700", icon: "🖥️" },
+                                            "Business Logic": { bg: "bg-blue-50/60", border: "border-blue-200", label: "text-blue-700", icon: "⚙️" },
+                                            "Data & Storage": { bg: "bg-amber-50/60", border: "border-amber-200", label: "text-amber-700", icon: "🗄️" },
+                                            "Infrastructure": { bg: "bg-slate-50/60", border: "border-slate-200", label: "text-slate-700", icon: "🏗️" },
+                                        };
+
+                                        // Classify catalog matches into layers
+                                        const matches = discoveryResult.answer.catalog_matches || [];
+                                        const layerMap: Record<string, { matches: any[]; gaps: any[] }> = {};
+                                        LAYERS.forEach(l => { layerMap[l] = { matches: [], gaps: [] }; });
+
+                                        for (const m of matches) {
+                                            const layer = m.architecture_layer || "Business Logic";
+                                            const key = LAYERS.includes(layer) ? layer : "Business Logic";
+                                            layerMap[key].matches.push(m);
+                                        }
+
+                                        // Classify gaps (handle both string[] and object[] formats)
+                                        const rawGaps = discoveryResult.answer.gaps || [];
+                                        for (const g of rawGaps) {
+                                            if (typeof g === "string") {
+                                                layerMap["Business Logic"].gaps.push({ name: g, description: "" });
+                                            } else {
+                                                const layer = g.architecture_layer || "Business Logic";
+                                                const key = LAYERS.includes(layer) ? layer : "Business Logic";
+                                                layerMap[key].gaps.push(g);
+                                            }
+                                        }
+
+                                        // Only show layers that have content
+                                        const activeLayers = LAYERS.filter(l => layerMap[l].matches.length > 0 || layerMap[l].gaps.length > 0);
+                                        if (activeLayers.length === 0) return null;
+
+                                        return (
+                                            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                                                <div className="px-6 pt-5 pb-3 flex items-center gap-2">
+                                                    <Layers className="h-5 w-5 text-primary" />
+                                                    <h2 className="text-lg font-black text-gray-900">Architecture Layers</h2>
+                                                </div>
+                                                <div className="px-4 pb-5 space-y-1">
+                                                    {activeLayers.map((layer) => {
+                                                        const style = layerStyles[layer];
+                                                        const { matches: lMatches, gaps: lGaps } = layerMap[layer];
+                                                        return (
+                                                            <div key={layer} className={`${style.bg} border ${style.border} rounded-xl px-4 py-3`}>
+                                                                <div className={`text-[10px] font-black uppercase tracking-[0.15em] ${style.label} mb-2 flex items-center gap-1.5`}>
+                                                                    <span>{style.icon}</span> {layer}
+                                                                </div>
+                                                                <div className="flex flex-wrap gap-2">
+                                                                    {lMatches.map((m: any, i: number) => {
+                                                                        const name = m.component_name || m.catalog_entry?.repo_name || "Component";
+                                                                        const score = m.confidence_score || 0;
+                                                                        const matchType = m.match_type || "";
+                                                                        const opacity = score >= 70 ? "opacity-100" : score >= 40 ? "opacity-85" : "opacity-70";
+                                                                        return (
+                                                                            <div
+                                                                                key={i}
+                                                                                className={`group relative flex items-center gap-2 px-3 py-2 bg-white rounded-lg border border-gray-200 shadow-sm hover:shadow-md transition-all ${opacity}`}
+                                                                                title={m.reasoning || ""}
+                                                                            >
+                                                                                <div className={`h-2 w-2 rounded-full shrink-0 ${score >= 70 ? "bg-emerald-500" : score >= 40 ? "bg-amber-400" : "bg-gray-300"}`} />
+                                                                                <span className="text-xs font-bold text-gray-800">{name}</span>
+                                                                                {matchType && (
+                                                                                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${matchType === "Full Match" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
+                                                                                        {matchType === "Full Match" ? "Full" : "Partial"}
+                                                                                    </span>
+                                                                                )}
+                                                                                <span className="text-[10px] font-mono text-gray-400">{score}%</span>
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                    {lGaps.map((g: any, i: number) => (
+                                                                        <div
+                                                                            key={`gap-${i}`}
+                                                                            className="flex items-center gap-2 px-3 py-2 bg-white/50 rounded-lg border-2 border-dashed border-gray-300 hover:border-amber-400 transition-colors"
+                                                                            title={g.description || "Needs custom development"}
+                                                                        >
+                                                                            <div className="h-2 w-2 rounded-full bg-amber-400 shrink-0 animate-pulse" />
+                                                                            <span className="text-xs font-bold text-gray-500">{g.name || g}</span>
+                                                                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">Gap</span>
+                                                                        </div>
+                                                                    ))}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+
                                     {/* Catalog Match Cards — deduplicated by component */}
                                     <div className="space-y-4">
                                         <h3 className="text-sm font-bold text-gray-500 uppercase tracking-widest pl-2">Selected Components</h3>
@@ -896,12 +991,17 @@ export default function AgentCatalogSearch() {
                                                 <h3 className="text-sm font-bold text-amber-900 uppercase tracking-wider">Identified Gaps (Custom Build Required)</h3>
                                             </div>
                                             <ul className="space-y-2">
-                                                {discoveryResult.answer.gaps.map((gap: string, i: number) => (
-                                                    <li key={i} className="text-sm text-amber-800 flex items-start gap-2">
-                                                        <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
-                                                        {gap}
-                                                    </li>
-                                                ))}
+                                                {discoveryResult.answer.gaps.map((gap: any, i: number) => {
+                                                    const gapName = typeof gap === "string" ? gap : gap.name || "Unknown";
+                                                    const gapDesc = typeof gap === "object" && gap.description ? ` — ${gap.description}` : "";
+                                                    const gapLayer = typeof gap === "object" && gap.architecture_layer ? ` [${gap.architecture_layer}]` : "";
+                                                    return (
+                                                        <li key={i} className="text-sm text-amber-800 flex items-start gap-2">
+                                                            <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0" />
+                                                            <span><strong>{gapName}</strong>{gapDesc}{gapLayer && <span className="text-amber-500 text-xs">{gapLayer}</span>}</span>
+                                                        </li>
+                                                    );
+                                                })}
                                             </ul>
                                         </div>
                                     )}
