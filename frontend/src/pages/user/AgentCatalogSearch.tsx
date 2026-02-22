@@ -859,8 +859,18 @@ export default function AgentCatalogSearch() {
                                     {(() => {
                                         const caps = discoveryResult.answer.capabilities;
                                         const decomp = discoveryResult.answer.decomposition;
-                                        const capList: string[] = Array.isArray(caps) ? caps : (caps?.items || caps?.functional || Object.values(caps || {}).flat());
-                                        const decompList: string[] = Array.isArray(decomp) ? decomp : (decomp?.items || decomp?.core_modules || Object.values(decomp || {}).flat());
+                                        // Normalize: handle both string[] and object[] from LLM
+                                        const toStringList = (arr: any): string[] => {
+                                            if (!arr) return [];
+                                            const items = Array.isArray(arr) ? arr : (arr?.items || arr?.functional || arr?.core_modules || Object.values(arr || {}).flat());
+                                            return (items || []).map((item: any) => {
+                                                if (typeof item === 'string') return item;
+                                                if (typeof item === 'object' && item !== null) return item.component_name || item.name || item.description || JSON.stringify(item);
+                                                return String(item);
+                                            });
+                                        };
+                                        const capList = toStringList(caps);
+                                        const decompList = toStringList(decomp);
                                         const hasCaps = capList && capList.length > 0;
                                         const hasDecomp = decompList && decompList.length > 0;
 
@@ -875,7 +885,7 @@ export default function AgentCatalogSearch() {
                                                             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Identified Capabilities</h3>
                                                         </div>
                                                         <ul className="space-y-2">
-                                                            {capList.filter((c: any) => typeof c === 'string').map((cap: string, i: number) => (
+                                                            {capList.map((cap: string, i: number) => (
                                                                 <li key={i} className="text-sm text-gray-700 flex items-start gap-2">
                                                                     <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-indigo-400 shrink-0" />
                                                                     {cap}
@@ -891,7 +901,7 @@ export default function AgentCatalogSearch() {
                                                             <h3 className="text-xs font-bold text-gray-500 uppercase tracking-widest">Module Decomposition</h3>
                                                         </div>
                                                         <ul className="space-y-2">
-                                                            {decompList.filter((d: any) => typeof d === 'string').map((mod: string, i: number) => (
+                                                            {decompList.map((mod: string, i: number) => (
                                                                 <li key={i} className="text-sm text-gray-700 flex items-start gap-2">
                                                                     <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
                                                                     {mod}
@@ -912,7 +922,9 @@ export default function AgentCatalogSearch() {
                                                 <h2 className="text-lg font-black text-gray-900">Architecture Composition</h2>
                                             </div>
                                             <p className="text-sm text-gray-600 leading-relaxed">
-                                                {discoveryResult.answer.architecture_composition}
+                                                {typeof discoveryResult.answer.architecture_composition === 'string'
+                                                    ? discoveryResult.answer.architecture_composition
+                                                    : JSON.stringify(discoveryResult.answer.architecture_composition)}
                                             </p>
                                         </div>
                                     )}
@@ -1093,10 +1105,10 @@ export default function AgentCatalogSearch() {
                                                 <h3 className="text-sm font-bold text-red-800 uppercase tracking-wider">Risks & Considerations</h3>
                                             </div>
                                             <ul className="space-y-2">
-                                                {discoveryResult.answer.risks.map((risk: string, i: number) => (
+                                                {discoveryResult.answer.risks.map((risk: any, i: number) => (
                                                     <li key={i} className="text-sm text-red-700 flex items-start gap-2">
                                                         <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
-                                                        {risk}
+                                                        {typeof risk === 'string' ? risk : (risk.name || risk.description || JSON.stringify(risk))}
                                                     </li>
                                                 ))}
                                             </ul>
