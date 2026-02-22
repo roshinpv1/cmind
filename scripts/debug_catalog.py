@@ -338,6 +338,22 @@ async def debug_catalog(repo_id: str, skip_llm: bool = False, db_path: str = "da
         info(f"Total prompt tokens: ~{total_prompt_tokens:,}")
         info(f"LLM max_tokens: {llm.config.max_tokens:,}")
 
+        # Write full prompt to tmp file for debugging
+        prompt_file = "/tmp/catalog_prompt_debug.txt"
+        with open(prompt_file, "w") as f:
+            f.write("=" * 80 + "\n")
+            f.write("SYSTEM PROMPT\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(sys_prompt)
+            f.write("\n\n")
+            f.write("=" * 80 + "\n")
+            f.write("USER MESSAGE\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(user_msg)
+        ok(f"Full prompt written to: {prompt_file}")
+        info(f"  System prompt: {len(sys_prompt):,} chars")
+        info(f"  User message:  {len(user_msg):,} chars")
+
         if total_prompt_tokens > llm.config.max_tokens * 0.7:
             warn(f"Prompt may exceed context window! "
                  f"({total_prompt_tokens}/{int(llm.config.max_tokens * 0.7)})")
