@@ -338,8 +338,11 @@ async def debug_catalog(repo_id: str, skip_llm: bool = False, db_path: str = "da
         info(f"Total prompt tokens: ~{total_prompt_tokens:,}")
         info(f"LLM max_tokens: {llm.config.max_tokens:,}")
 
-        # Write full prompt to tmp file for debugging
-        prompt_file = "/tmp/catalog_prompt_debug.txt"
+        # Write full prompt to project tmp/ dir
+        tmp_dir = Path("/tmp")
+        tmp_dir.mkdir(exist_ok=True)
+        prompt_file = tmp_dir / "catalog_prompt_debug.txt"
+        response_file = tmp_dir / "catalog_response_debug.txt"
         with open(prompt_file, "w") as f:
             f.write("=" * 80 + "\n")
             f.write("SYSTEM PROMPT\n")
@@ -369,6 +372,15 @@ async def debug_catalog(repo_id: str, skip_llm: bool = False, db_path: str = "da
             )
             elapsed = time.time() - t0
             ok(f"Response received in {elapsed:.1f}s ({len(raw_output)} chars)")
+
+            # Write LLM response to file
+            with open(response_file, "w") as f:
+                f.write(f"LLM: {llm.config.provider.value} / {llm.config.model}\n")
+                f.write(f"Time: {elapsed:.1f}s\n")
+                f.write(f"Length: {len(raw_output)} chars\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(raw_output)
+            ok(f"LLM response written to: {response_file}")
         except Exception as e:
             fail(f"LLM call failed: {e}")
             return
