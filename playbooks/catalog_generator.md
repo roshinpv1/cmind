@@ -22,6 +22,7 @@ You must scan the code and use the provided context to understand:
 8.  **Topics**: Searchable tags for discovery
 9.  **Business Functionalities**: Core business capabilities and domain features
 10. **Estimated Cost**: Rough monetary estimation (USD) to build
+11. **Build Complexity**: Developer-months, team size, and complexity tier
 
 **CRITICAL:** You must NOT output a report. You must output a **JSON BLOCK** to invoke the tool.
 **CRITICAL:** You MUST include the `business_functionalities` array and `estimated_cost` integer in your JSON. Do NOT skip them.
@@ -50,6 +51,9 @@ You must scan the code and use the provided context to understand:
     "total_commits": 150,
     "last_pr_title": "Title of last merged PR from context",
     "estimated_cost": 1500,
+    "estimated_dev_months": 3,
+    "team_size_estimate": 2,
+    "complexity_tier": "medium",
     "business_functionalities": ["User Authentication", "Payment Processing", "Inventory Management"]
   }
 }
@@ -77,6 +81,9 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 - **total_commits**: Extract total commit count from the metadata context
 - **last_pr_title**: Extract the last merged PR title from the metadata context
 - **estimated_cost**: Provide a rough monetary estimation (in USD) to build this component from scratch based on its architectural complexity, language/framework, integrations, and logic footprint. Minimum is typically $5000. Maximum could be $5M+.
+- **estimated_dev_months**: How many developer-months it would take to rebuild from scratch (e.g., 2 for a small CLI, 12 for a complex platform)
+- **team_size_estimate**: Ideal team size to build it (1-10)
+- **complexity_tier**: Classify as `low` (simple CRUD/CLI), `medium` (multi-service, integrations), `high` (distributed, ML, real-time), or `extreme` (large-scale platform)
 - **business_functionalities**: Extract or infer the core business use cases, features, and domain operations the application performs (e.g., "Payment Processing", "Order Management").
 
 ## Output Schema
@@ -103,6 +110,9 @@ fields:
   total_commits: {type: integer, default: 0, description: "Total number of commits"}
   last_pr_title: {type: string, default: "", description: "Title of the most recently merged pull request"}
   estimated_cost: {type: integer, required: true, default: 0, description: "Estimated cost in USD to build from scratch"}
+  estimated_dev_months: {type: number, required: true, default: 1, description: "Developer-months to rebuild from scratch"}
+  team_size_estimate: {type: integer, required: true, default: 1, description: "Ideal team size to build (1-10)"}
+  complexity_tier: {type: string, required: true, default: "medium", description: "Complexity: low / medium / high / extreme"}
   business_functionalities: {type: array, required: true, items: string, default: [], description: "Core business capabilities and domain features"}
 ```
 

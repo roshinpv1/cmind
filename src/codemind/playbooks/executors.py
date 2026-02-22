@@ -464,45 +464,106 @@ class PlaybookExecutor:
                     elif output_schema:
                         # JSON-response playbooks: provide a concrete example 
                         # Local LLMs need to see actual populated values, not just field names.
-                        prompt_suffix += (
-                            '\n\nIMPORTANT: You MUST return a JSON object. Here is an EXAMPLE of the expected format '
-                            '(use real data from RETRIEVED CODE above, not these example values):\n'
-                            '```json\n'
-                            '{\n'
-                            '  "requirement_summary": "Build an e-commerce platform",\n'
-                            '  "capabilities": ["User authentication", "Product catalog", "Payment processing"],\n'
-                            '  "decomposition": ["Auth Service", "Catalog Service", "Payment Gateway"],\n'
-                            '  "catalog_matches": [\n'
-                            '    {\n'
-                            '      "capability": "User authentication",\n'
-                            '      "component_name": "ExampleApp",\n'
-                            '      "match_type": "Partial Match",\n'
-                            '      "confidence_score": 65,\n'
-                            '      "reasoning": "ExampleApp has a login system that can be adapted for this use case.",\n'
-                            '      "catalog_entry": {\n'
-                            '        "repo_name": "ExampleApp",\n'
-                            '        "repo_url": "https://github.com/example/app",\n'
-                            '        "description": "An example application",\n'
-                            '        "topics": ["Web", "Auth"],\n'
-                            '        "tech_stack": "Python, React",\n'
-                            '        "architecture": "Microservices",\n'
-                            '        "category": "Web App",\n'
-                            '        "quality_score": 70,\n'
-                            '        "pros": ["Good structure", "Modern stack"],\n'
-                            '        "cons": ["No tests"]\n'
-                            '      }\n'
-                            '    }\n'
-                            '  ],\n'
-                            '  "architecture_composition": "The proposed architecture uses ExampleApp as foundation...",\n'
-                            '  "gaps": ["Payment processing service needs custom development"],\n'
-                            '  "risks": ["ExampleApp is incomplete and may need extra work"],\n'
-                            '  "overall_confidence_score": 60\n'
-                            '}\n'
-                            '```\n\n'
-                            'Now generate YOUR response using the RETRIEVED CODE entries above. '
-                            'Fill in ALL fields with REAL data. Do NOT return empty arrays or strings.\n'
-                            'Wrap your response in ```json ... ```.\n'
-                        )
+                        if playbook.name == "build_vs_buy":
+                            prompt_suffix += (
+                                '\n\nIMPORTANT: You MUST return a JSON object. Here is an EXAMPLE of the expected format '
+                                '(use real data from RETRIEVED CODE above, not these example values):\n'
+                                '```json\n'
+                                '{\n'
+                                '  "requirement_summary": "A payment processing system with...",\n'
+                                '  "functional_blocks": [\n'
+                                '    {"name": "Payment Gateway", "description": "...", "complexity": "high", "architecture_layer": "Business Logic"}\n'
+                                '  ],\n'
+                                '  "build_estimate": {\n'
+                                '    "total_cost_usd": 54000,\n'
+                                '    "dev_months": 6,\n'
+                                '    "team_size": 2,\n'
+                                '    "timeline_weeks": 16,\n'
+                                '    "complexity": "medium",\n'
+                                '    "required_skills": ["Python", "REST APIs"],\n'
+                                '    "key_risks": ["Tight timeline"]\n'
+                                '  },\n'
+                                '  "reuse_estimate": {\n'
+                                '    "components": [\n'
+                                '      {\n'
+                                '        "name": "ExampleApp",\n'
+                                '        "functional_block": "Payment Gateway",\n'
+                                '        "match_quality": "Partial Match",\n'
+                                '        "confidence_score": 55,\n'
+                                '        "integration_effort_days": 5,\n'
+                                '        "customization_effort_days": 10,\n'
+                                '        "annual_maintenance_usd": 3000,\n'
+                                '        "reasoning": "Has payment logic that can be adapted.",\n'
+                                '        "architecture_layer": "Business Logic",\n'
+                                '        "catalog_entry": {"repo_name": "ExampleApp", "description": "..."}\n'
+                                '      }\n'
+                                '    ],\n'
+                                '    "gaps": [\n'
+                                '      {"name": "Custom UI", "description": "...", "build_cost_usd": 18000, "dev_weeks": 4, "architecture_layer": "Presentation"}\n'
+                                '    ],\n'
+                                '    "total_integration_cost_usd": 25000,\n'
+                                '    "total_timeline_weeks": 6,\n'
+                                '    "annual_maintenance_total_usd": 3000\n'
+                                '  },\n'
+                                '  "comparison": {\n'
+                                '    "build_total_usd": 54000,\n'
+                                '    "reuse_total_usd": 25000,\n'
+                                '    "savings_usd": 29000,\n'
+                                '    "savings_pct": 54,\n'
+                                '    "build_timeline_weeks": 16,\n'
+                                '    "reuse_timeline_weeks": 6,\n'
+                                '    "time_saved_weeks": 10,\n'
+                                '    "recommendation": "REUSE",\n'
+                                '    "confidence_score": 65,\n'
+                                '    "reasoning": "Reusing ExampleApp saves 54% cost and 10 weeks..."\n'
+                                '  }\n'
+                                '}\n'
+                                '```\n\n'
+                                'Now generate YOUR response using the RETRIEVED CODE entries above. '
+                                'Fill in ALL fields with REAL data. Do NOT return empty objects or zero values.\n'
+                                'Even if catalog matches are weak, still estimate BUILD costs based on the requirement.\n'
+                                'Wrap your response in ```json ... ```.\n'
+                            )
+                        else:
+                            prompt_suffix += (
+                                '\n\nIMPORTANT: You MUST return a JSON object. Here is an EXAMPLE of the expected format '
+                                '(use real data from RETRIEVED CODE above, not these example values):\n'
+                                '```json\n'
+                                '{\n'
+                                '  "requirement_summary": "Build an e-commerce platform",\n'
+                                '  "capabilities": ["User authentication", "Product catalog", "Payment processing"],\n'
+                                '  "decomposition": ["Auth Service", "Catalog Service", "Payment Gateway"],\n'
+                                '  "catalog_matches": [\n'
+                                '    {\n'
+                                '      "capability": "User authentication",\n'
+                                '      "component_name": "ExampleApp",\n'
+                                '      "match_type": "Partial Match",\n'
+                                '      "confidence_score": 65,\n'
+                                '      "reasoning": "ExampleApp has a login system that can be adapted for this use case.",\n'
+                                '      "catalog_entry": {\n'
+                                '        "repo_name": "ExampleApp",\n'
+                                '        "repo_url": "https://github.com/example/app",\n'
+                                '        "description": "An example application",\n'
+                                '        "topics": ["Web", "Auth"],\n'
+                                '        "tech_stack": "Python, React",\n'
+                                '        "architecture": "Microservices",\n'
+                                '        "category": "Web App",\n'
+                                '        "quality_score": 70,\n'
+                                '        "pros": ["Good structure", "Modern stack"],\n'
+                                '        "cons": ["No tests"]\n'
+                                '      }\n'
+                                '    }\n'
+                                '  ],\n'
+                                '  "architecture_composition": "The proposed architecture uses ExampleApp as foundation...",\n'
+                                '  "gaps": ["Payment processing service needs custom development"],\n'
+                                '  "risks": ["ExampleApp is incomplete and may need extra work"],\n'
+                                '  "overall_confidence_score": 60\n'
+                                '}\n'
+                                '```\n\n'
+                                'Now generate YOUR response using the RETRIEVED CODE entries above. '
+                                'Fill in ALL fields with REAL data. Do NOT return empty arrays or strings.\n'
+                                'Wrap your response in ```json ... ```.\n'
+                            )
 
                     # Data-driven: prepend repo metadata if playbook requests it
                     repo_metadata_section = ""
@@ -570,14 +631,24 @@ class PlaybookExecutor:
                             and code_context.strip()):
                         for retry in range(2):
                             print(f"[EXECUTOR] ⚠️ Output too short ({len(output)} chars), retry {retry + 1}/2 with temp=0.7")
-                            nudge = (
-                                "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
-                                "The RETRIEVED CODE section above contains catalog entries that you MUST use.\n"
-                                "You MUST populate catalog_matches with entries from the RETRIEVED CODE.\n"
-                                "You MUST fill in requirement_summary, capabilities, decomposition, "
-                                "architecture_composition, gaps, risks, and overall_confidence_score.\n"
-                                "Do NOT return empty arrays or empty strings.\n\n"
-                            )
+                            if playbook.name == "build_vs_buy":
+                                nudge = (
+                                    "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
+                                    "The RETRIEVED CODE section above contains catalog entries that you MUST reference.\n"
+                                    "You MUST fill in build_estimate (total_cost_usd, dev_months, team_size, timeline_weeks), "
+                                    "reuse_estimate (components, gaps, total_integration_cost_usd), "
+                                    "and comparison (build_total_usd, reuse_total_usd, recommendation).\n"
+                                    "Do NOT return empty objects or zero values.\n\n"
+                                )
+                            else:
+                                nudge = (
+                                    "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
+                                    "The RETRIEVED CODE section above contains catalog entries that you MUST use.\n"
+                                    "You MUST populate catalog_matches with entries from the RETRIEVED CODE.\n"
+                                    "You MUST fill in requirement_summary, capabilities, decomposition, "
+                                    "architecture_composition, gaps, risks, and overall_confidence_score.\n"
+                                    "Do NOT return empty arrays or empty strings.\n\n"
+                                )
                             retry_output = await self.llm.generate(
                                 nudge + user_msg,
                                 system_prompt=sys_prompt,

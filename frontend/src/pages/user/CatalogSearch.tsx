@@ -51,7 +51,7 @@ export default function CatalogSearch() {
     return (
         <div className="max-w-4xl mx-auto space-y-8">
             <div className="text-center space-y-4">
-                <h1 className="text-4xl font-bold text-gray-900">UnifyX Search</h1>
+                <h1 className="text-4xl font-bold text-gray-900">Discovery Agent Search</h1>
                 <p className="text-xl text-gray-600">
                     Semantic search across your indexed repositories and catalogs.
                 </p>

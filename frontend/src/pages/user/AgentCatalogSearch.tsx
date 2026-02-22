@@ -26,6 +26,7 @@ import {
     Bot,
     GitFork,
     MessageSquareCode,
+    Scale,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -396,6 +397,12 @@ export default function AgentCatalogSearch() {
     const [discoveryLogs, setDiscoveryLogs] = useState<string[]>([]);
     const [discoveryResult, setDiscoveryResult] = useState<any>(null);
 
+    // Build vs Reuse State (separate from discovery)
+    const [bvrJobId, setBvrJobId] = useState<string | null>(null);
+    const [bvrLoading, setBvrLoading] = useState(false);
+    const [bvrLogs, setBvrLogs] = useState<string[]>([]);
+    const [bvrResult, setBvrResult] = useState<any>(null);
+
     // Filters
     const [limit, setLimit] = useState(5);
     const [minScore, setMinScore] = useState(0.5);
@@ -419,6 +426,13 @@ export default function AgentCatalogSearch() {
                             const resultRes = await fetch(`/api/v1/agents/autonomous/${discoveryJobId}/result`);
                             if (resultRes.ok) {
                                 const resultData = await resultRes.json();
+                                // Parse answer if it's a JSON string
+                                if (resultData.answer && typeof resultData.answer === "string") {
+                                    try {
+                                        resultData.answer = JSON.parse(resultData.answer);
+                                    } catch (_) { /* keep as string */ }
+                                }
+                                console.log("[BvR] Result data:", resultData);
                                 setDiscoveryResult(resultData);
                             }
                         }
@@ -431,6 +445,66 @@ export default function AgentCatalogSearch() {
         return () => clearInterval(interval);
     }, [discoveryJobId, loading]);
 
+    // Build vs Reuse Polling Hook
+    useEffect(() => {
+        let interval: ReturnType<typeof setInterval>;
+        if (bvrJobId && bvrLoading) {
+            interval = setInterval(async () => {
+                try {
+                    const res = await fetch(`/api/v1/agents/autonomous/${bvrJobId}/status`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        setBvrLogs(data.logs || []);
+                        if (data.status === "completed" || data.status === "failed") {
+                            clearInterval(interval);
+                            setBvrLoading(false);
+                            const resultRes = await fetch(`/api/v1/agents/autonomous/${bvrJobId}/result`);
+                            if (resultRes.ok) {
+                                const resultData = await resultRes.json();
+                                if (resultData.answer && typeof resultData.answer === "string") {
+                                    try { resultData.answer = JSON.parse(resultData.answer); } catch (_) { }
+                                }
+                                console.log("[BvR] Result data:", resultData);
+                                setBvrResult(resultData);
+                            }
+                        }
+                    }
+                } catch (e) { console.error("BvR polling error", e); }
+            }, 2000);
+        }
+        return () => clearInterval(interval);
+    }, [bvrJobId, bvrLoading]);
+
+    // Trigger Build vs Reuse analysis
+    const handleBuildVsReuse = async () => {
+        if (!query.trim()) return;
+        setBvrLoading(true);
+        setBvrJobId(null);
+        setBvrLogs([]);
+        setBvrResult(null);
+        try {
+            const res = await fetch("/api/v1/agents/autonomous", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    goal: query,
+                    max_iterations: 15,
+                    allowed_playbooks: ["build_vs_buy"]
+                }),
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setBvrJobId(data.job_id);
+            } else {
+                console.error("BvR trigger failed");
+                setBvrLoading(false);
+            }
+        } catch (err) {
+            console.error("BvR error:", err);
+            setBvrLoading(false);
+        }
+    };
+
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!query.trim()) return;
@@ -441,29 +515,33 @@ export default function AgentCatalogSearch() {
         setDiscoveryJobId(null);
         setDiscoveryLogs([]);
         setDiscoveryResult(null);
+        setBvrJobId(null);
+        setBvrLoading(false);
+        setBvrLogs([]);
+        setBvrResult(null);
 
         if (searchMode === "discovery") {
             try {
+                const playbook = "solution_architect";
                 const res = await fetch("/api/v1/agents/autonomous", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         goal: query,
                         max_iterations: 15,
-                        allowed_playbooks: ["solution_architect"]
+                        allowed_playbooks: [playbook]
                     }),
                 });
 
                 if (res.ok) {
                     const data = await res.json();
                     setDiscoveryJobId(data.job_id);
-                    // Loading remains true while polling occurs
                 } else {
-                    console.error("Discovery trigger failed");
+                    console.error("Request trigger failed");
                     setLoading(false);
                 }
             } catch (err) {
-                console.error("Discovery error:", err);
+                console.error("Request error:", err);
                 setLoading(false);
             }
             return;
@@ -558,6 +636,7 @@ export default function AgentCatalogSearch() {
                                 <Lightbulb className="h-4 w-4" /> Intelligent Discovery
                             </span>
                         </button>
+
                     </div>
                 </div>
 
@@ -1026,6 +1105,196 @@ export default function AgentCatalogSearch() {
                                 </div>
                             )}
 
+                            {/* ═══ Build vs Reuse Section (inline within Discovery) ═══ */}
+                            {!loading && discoveryResult && discoveryResult.answer && discoveryResult.answer.catalog_matches && (
+                                <div className="space-y-6">
+                                    {/* Trigger Button */}
+                                    {!bvrResult && !bvrLoading && (
+                                        <button
+                                            onClick={handleBuildVsReuse}
+                                            className="w-full flex items-center justify-center gap-3 py-4 px-6 bg-gradient-to-r from-indigo-50 to-emerald-50 rounded-2xl border-2 border-dashed border-indigo-200 hover:border-indigo-400 hover:from-indigo-100 hover:to-emerald-100 transition-all group"
+                                        >
+                                            <Scale className="h-5 w-5 text-indigo-500 group-hover:scale-110 transition-transform" />
+                                            <span className="text-sm font-bold text-indigo-700">Run Build vs Reuse Analysis</span>
+                                            <span className="text-xs text-indigo-400">Compare build cost vs reusing catalog components</span>
+                                        </button>
+                                    )}
+
+                                    {/* BvR Loading */}
+                                    {bvrLoading && (
+                                        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+                                            <div className="p-4 bg-gray-50/50 border-b border-gray-100 flex items-center gap-2">
+                                                <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                                                <h3 className="text-sm font-bold text-gray-700">Analyzing Build vs Reuse...</h3>
+                                            </div>
+                                            <div className="p-4 space-y-2 max-h-60 overflow-y-auto font-mono text-xs">
+                                                {bvrLogs.map((log: any, i: number) => (
+                                                    <div key={i} className="text-gray-500 flex gap-2">
+                                                        <span className="text-gray-300">[{new Date().toLocaleTimeString()}]</span>
+                                                        {log}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* BvR Result */}
+                                    {bvrResult && bvrResult.answer && bvrResult.answer.comparison && (() => {
+                                        const build = bvrResult.answer.build_estimate || {};
+                                        const reuse = bvrResult.answer.reuse_estimate || {};
+                                        const comp = bvrResult.answer.comparison || {};
+                                        const isBuildCheaper = (comp.build_total_usd || 0) < (comp.reuse_total_usd || 0);
+                                        const recColor = comp.recommendation === "BUILD"
+                                            ? "from-blue-500 to-indigo-600"
+                                            : comp.recommendation === "REUSE"
+                                                ? "from-emerald-500 to-teal-600"
+                                                : "from-amber-500 to-orange-600";
+                                        return (
+                                            <div className="space-y-4">
+                                                {/* Header */}
+                                                <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                                                    <div className="flex items-center gap-2 mb-1">
+                                                        <Scale className="h-5 w-5 text-primary" />
+                                                        <h2 className="text-lg font-black text-gray-900">Build vs Reuse Analysis</h2>
+                                                    </div>
+                                                    <p className="text-sm text-gray-600">{bvrResult.answer.requirement_summary || query}</p>
+                                                </div>
+
+                                                {/* Side-by-Side Cards */}
+                                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                                    {/* BUILD Card */}
+                                                    <div className={`bg-white rounded-2xl shadow-sm border ${!isBuildCheaper ? "border-gray-200" : "border-blue-300 ring-2 ring-blue-100"} p-6`}>
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className="text-sm font-black uppercase tracking-widest text-blue-600">🔨 Build from Scratch</h3>
+                                                            {isBuildCheaper && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">CHEAPER</span>}
+                                                        </div>
+                                                        <div className="text-3xl font-black text-gray-900 mb-4">${(comp.build_total_usd || build.total_cost_usd || 0).toLocaleString()}</div>
+                                                        <div className="space-y-3 text-sm">
+                                                            <div className="flex justify-between"><span className="text-gray-500">Timeline</span><span className="font-bold text-gray-800">{comp.build_timeline_weeks || build.timeline_weeks || "?"} weeks</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Team Size</span><span className="font-bold text-gray-800">{build.team_size || "?"} developers</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Dev-Months</span><span className="font-bold text-gray-800">{build.dev_months || "?"}</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Complexity</span><span className={`font-bold ${build.complexity === "high" || build.complexity === "extreme" ? "text-red-600" : build.complexity === "medium" ? "text-amber-600" : "text-emerald-600"}`}>{(build.complexity || "medium").charAt(0).toUpperCase() + (build.complexity || "medium").slice(1)}</span></div>
+                                                        </div>
+                                                        {build.required_skills?.length > 0 && (
+                                                            <div className="mt-4 pt-4 border-t border-gray-100">
+                                                                <div className="text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-2">Required Skills</div>
+                                                                <div className="flex flex-wrap gap-1">{build.required_skills.map((s: string, i: number) => <span key={i} className="px-2 py-0.5 text-[10px] font-semibold bg-gray-50 text-gray-600 rounded-full border border-gray-100">{s}</span>)}</div>
+                                                            </div>
+                                                        )}
+                                                        {build.key_risks?.length > 0 && (
+                                                            <div className="mt-3 pt-3 border-t border-gray-100">
+                                                                <div className="text-[10px] font-bold uppercase tracking-widest text-red-400 mb-2">Risks</div>
+                                                                <ul className="space-y-1">{build.key_risks.map((r: string, i: number) => <li key={i} className="text-xs text-gray-500 flex items-start gap-1.5"><AlertTriangle className="h-3 w-3 text-red-400 shrink-0 mt-0.5" />{r}</li>)}</ul>
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* REUSE Card */}
+                                                    <div className={`bg-white rounded-2xl shadow-sm border ${isBuildCheaper ? "border-gray-200" : "border-emerald-300 ring-2 ring-emerald-100"} p-6`}>
+                                                        <div className="flex items-center justify-between mb-4">
+                                                            <h3 className="text-sm font-black uppercase tracking-widest text-emerald-600">♻️ Reuse Existing</h3>
+                                                            {!isBuildCheaper && <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">CHEAPER</span>}
+                                                        </div>
+                                                        <div className="text-3xl font-black text-gray-900 mb-4">${(comp.reuse_total_usd || reuse.total_integration_cost_usd || 0).toLocaleString()}</div>
+                                                        <div className="space-y-3 text-sm">
+                                                            <div className="flex justify-between"><span className="text-gray-500">Timeline</span><span className="font-bold text-gray-800">{comp.reuse_timeline_weeks || reuse.total_timeline_weeks || "?"} weeks</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Components</span><span className="font-bold text-gray-800">{(reuse.components || []).length} matched</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Gaps</span><span className="font-bold text-amber-600">{(reuse.gaps || []).length} to build</span></div>
+                                                            <div className="flex justify-between"><span className="text-gray-500">Annual Maintenance</span><span className="font-bold text-gray-800">${(reuse.annual_maintenance_total_usd || 0).toLocaleString()}/yr</span></div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                {/* Recommendation Banner */}
+                                                <div className={`bg-gradient-to-r ${recColor} rounded-2xl p-6 text-white shadow-lg`}>
+                                                    <div className="flex items-center justify-between mb-3">
+                                                        <div className="flex items-center gap-3">
+                                                            <div className="p-2 bg-white/20 rounded-xl"><Scale className="h-6 w-6" /></div>
+                                                            <div>
+                                                                <div className="text-xs font-bold uppercase tracking-widest opacity-80">Recommendation</div>
+                                                                <div className="text-2xl font-black">{comp.recommendation || "HYBRID"}</div>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-right">
+                                                            <div className="text-3xl font-black">{comp.confidence_score || 0}%</div>
+                                                            <div className="text-xs opacity-80">Confidence</div>
+                                                        </div>
+                                                    </div>
+                                                    <p className="text-sm leading-relaxed opacity-90">{comp.reasoning || ""}</p>
+                                                    {(comp.savings_pct > 0 || comp.time_saved_weeks > 0) && (
+                                                        <div className="flex gap-4 mt-4 pt-4 border-t border-white/20">
+                                                            {comp.savings_pct > 0 && <div><div className="text-2xl font-black">{comp.savings_pct}%</div><div className="text-xs opacity-80">Cost Saved</div></div>}
+                                                            {comp.savings_usd > 0 && <div><div className="text-2xl font-black">${comp.savings_usd.toLocaleString()}</div><div className="text-xs opacity-80">$ Saved</div></div>}
+                                                            {comp.time_saved_weeks > 0 && <div><div className="text-2xl font-black">{comp.time_saved_weeks}w</div><div className="text-xs opacity-80">Time Saved</div></div>}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {/* Reusable Components Breakdown */}
+                                                {bvrResult.answer.reuse_estimate?.components?.length > 0 && (
+                                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                                                        <div className="px-6 pt-5 pb-3"><h3 className="text-sm font-bold text-gray-500 uppercase tracking-widest">Reusable Components</h3></div>
+                                                        <div className="divide-y divide-gray-50">
+                                                            {bvrResult.answer.reuse_estimate.components.map((c: any, i: number) => (
+                                                                <div key={i} className="px-6 py-4 hover:bg-gray-50/50 transition-colors">
+                                                                    <div className="flex items-center justify-between mb-2">
+                                                                        <div className="flex items-center gap-3">
+                                                                            <div className={`h-2.5 w-2.5 rounded-full ${c.confidence_score >= 70 ? "bg-emerald-500" : c.confidence_score >= 40 ? "bg-amber-400" : "bg-gray-300"}`} />
+                                                                            <span className="font-bold text-gray-900 text-sm">{c.name}</span>
+                                                                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${c.match_quality === "Full Match" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>{c.match_quality || "Partial"}</span>
+                                                                            <span className="text-[10px] text-gray-400 font-mono">{c.confidence_score || 0}%</span>
+                                                                        </div>
+                                                                        <div className="text-xs text-gray-400">{c.architecture_layer || ""}</div>
+                                                                    </div>
+                                                                    <p className="text-xs text-gray-500 mb-2">{c.reasoning || ""}</p>
+                                                                    <div className="flex gap-4 text-xs">
+                                                                        <span className="text-gray-400">Integration: <strong className="text-gray-600">{c.integration_effort_days || 0}d</strong></span>
+                                                                        <span className="text-gray-400">Customization: <strong className="text-gray-600">{c.customization_effort_days || 0}d</strong></span>
+                                                                        <span className="text-gray-400">Maintenance: <strong className="text-gray-600">${(c.annual_maintenance_usd || 0).toLocaleString()}/yr</strong></span>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {/* Gaps */}
+                                                {bvrResult.answer.reuse_estimate?.gaps?.length > 0 && (
+                                                    <div className="bg-amber-50 rounded-2xl border border-amber-200 p-6">
+                                                        <div className="flex items-center gap-2 mb-4">
+                                                            <AlertTriangle className="h-5 w-5 text-amber-600" />
+                                                            <h3 className="text-sm font-bold text-amber-900 uppercase tracking-wider">Gaps — Custom Build Required</h3>
+                                                        </div>
+                                                        <div className="space-y-3">
+                                                            {bvrResult.answer.reuse_estimate.gaps.map((g: any, i: number) => (
+                                                                <div key={i} className="flex items-center justify-between bg-white/60 rounded-lg px-4 py-3 border border-amber-200/50">
+                                                                    <div>
+                                                                        <div className="text-sm font-bold text-amber-900">{g.name}</div>
+                                                                        <div className="text-xs text-amber-700">{g.description || ""}</div>
+                                                                    </div>
+                                                                    <div className="text-right shrink-0">
+                                                                        <div className="text-sm font-black text-gray-800">${(g.build_cost_usd || 0).toLocaleString()}</div>
+                                                                        <div className="text-[10px] text-gray-400">{g.dev_weeks || 0} weeks</div>
+                                                                    </div>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+
+                                    {/* BvR Error State */}
+                                    {!bvrLoading && bvrResult && (!bvrResult.answer || !bvrResult.answer.comparison) && (
+                                        <div className="bg-amber-50 rounded-2xl border border-amber-200 p-4 text-center">
+                                            <p className="text-sm text-amber-700">Build vs Reuse analysis could not generate a comparison. Try again.</p>
+                                            <button onClick={handleBuildVsReuse} className="mt-2 text-xs font-bold text-amber-800 underline">Retry</button>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             {/* Empty / Error State */}
                             {!loading && hasSearched && (!discoveryResult || !discoveryResult.answer || !discoveryResult.answer.catalog_matches) && (
                                 <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -1035,6 +1304,8 @@ export default function AgentCatalogSearch() {
                             )}
                         </>
                     )}
+
+
                 </div>
             </main>
         </div>

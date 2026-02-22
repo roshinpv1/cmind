@@ -142,7 +142,8 @@ class PlannerAgent:
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
                 "code_explorer": {"search_codebase", "read_file", "search_symbol",
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
-                "solution_architect": {"search_catalogs"}
+                "solution_architect": {"search_catalogs"},
+                "build_vs_buy": {"search_catalogs"},
             }
             for pb in allowed_playbooks:
                 relevant |= PLAYBOOK_TOOLS.get(pb, set())
@@ -402,7 +403,7 @@ class PlannerAgent:
                 if isinstance(outputs, dict):
                     if "result" in outputs:
                         playbook_output = outputs["result"]
-                    elif "catalog_matches" in outputs or "summary" in outputs:
+                    elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate")):
                         playbook_output = outputs
                     
                     for key, val in outputs.items():
@@ -422,7 +423,7 @@ class PlannerAgent:
                         if isinstance(parsed, dict):
                             if "result" in parsed:
                                 playbook_output = parsed["result"]
-                            elif "catalog_matches" in parsed or "summary" in parsed:
+                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate")):
                                 playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
                         pass

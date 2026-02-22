@@ -662,6 +662,9 @@ class PlaybookTools:
                 "total_commits": params.get("total_commits", 0),
                 "last_pr_title": params.get("last_pr_title", ""),
                 "estimated_cost": params.get("estimated_cost", 0),
+                "estimated_dev_months": params.get("estimated_dev_months", 0),
+                "team_size_estimate": params.get("team_size_estimate", 0),
+                "complexity_tier": params.get("complexity_tier", "medium"),
                 "business_functionalities": params.get("business_functionalities", [])
             }
             

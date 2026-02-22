@@ -36,7 +36,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                 isOpen ? "translate-x-0" : "-translate-x-full"
             )}>
                 <div className="h-16 flex items-center px-6 border-b border-gray-200">
-                    <span className="text-xl font-bold text-primary">UnifyX</span>
+                    <span className="text-xl font-bold text-primary">Discovery Agent</span>
                 </div>
                 <nav className="p-4 space-y-1">
                     {navigation.map((item) => {
@@ -85,7 +85,7 @@ export function UserLayout({ children }: { children: React.ReactNode }) {
             <header className="bg-white border-b border-gray-200 shadow-sm">
                 <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
                     <div className="flex items-center gap-8">
-                        <span className="text-xl font-bold text-primary">UnifyX</span>
+                        <span className="text-xl font-bold text-primary">Discovery Agent</span>
                         <nav className="hidden md:flex gap-4">
                             <Link to="/catalog-search" className="text-sm font-medium text-gray-600 hover:text-primary">
                                 Catalog Search

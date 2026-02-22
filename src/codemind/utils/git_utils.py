@@ -139,7 +139,7 @@ def _fetch_installation_token(
     headers = {
         "Authorization": f"Bearer {jwt_token}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "UnifyX/1.0",
+        "User-Agent": "Discovery Agent/1.0",
     }
 
     parsed = urlparse(repo_url)
@@ -351,7 +351,7 @@ class GitRepoManager:
         else:
             api_url = f"https://api.github.com/repos/{owner}/{repo_name}/zipball/{branch}"
 
-        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "UnifyX/1.0"}
+        headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "Discovery Agent/1.0"}
         if token:
             headers["Authorization"] = f"token {token}"
 
@@ -849,7 +849,7 @@ class GitIntegration:
         return resolve_token(f"https://{endpoint}/org/repo")
 
     def _gh_headers(self, token):
-        h = {"Accept": "application/vnd.github.v3+json", "User-Agent": "UnifyX/1.0"}
+        h = {"Accept": "application/vnd.github.v3+json", "User-Agent": "Discovery Agent/1.0"}
         if token:
             h["Authorization"] = f"token {token}"
         return h
