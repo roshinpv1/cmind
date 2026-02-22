@@ -99,6 +99,13 @@ class ApigeeDriver(LLMDriver):
         if not all([enterprise_base_url, wf_use_case_id, wf_client_id, wf_api_key]):
             raise ValueError("Apigee enterprise configuration incomplete")
 
+        # Build messages with optional system prompt
+        messages = []
+        system_prompt = kwargs.pop("system_prompt", None)
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         headers = {
             "x-wf-request-date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "Authorization": f"Bearer {token}",
@@ -116,7 +123,7 @@ class ApigeeDriver(LLMDriver):
                 headers=headers,
                 json={
                     "model": self.config.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "temperature": kwargs.get("temperature", self.config.temperature),
                     "max_tokens": kwargs.get("max_tokens", self.config.max_tokens)
                 }
@@ -132,7 +139,7 @@ class ApigeeDriver(LLMDriver):
                     headers=headers,
                     json={
                         "model": self.config.model,
-                        "messages": [{"role": "user", "content": prompt}],
+                        "messages": messages,
                         "temperature": kwargs.get("temperature", self.config.temperature),
                         "max_tokens": kwargs.get("max_tokens", self.config.max_tokens)
                     }
