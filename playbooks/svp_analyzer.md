@@ -128,9 +128,9 @@ inject_repo_metadata: false
 
 ## Search Strategy
 ```yaml
-limit: 200
+limit: 100
 mode: hybrid
-min_score: 0.15
+min_score: 0.25
 queries:
   - "main entry point application startup bootstrap"
   - "business logic domain rules workflow"
