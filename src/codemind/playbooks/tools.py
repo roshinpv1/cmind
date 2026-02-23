@@ -409,6 +409,7 @@ class PlaybookTools:
             # Identity & Metadata
             if metadata.get("repo_url"): parts.append(f"Repository URL: {metadata['repo_url']}")
             if metadata.get("branch"): parts.append(f"Branch: {metadata['branch']}")
+            if metadata.get("org"): parts.append(f"Organization: {metadata['org']}")
             if metadata.get("category"): parts.append(f"Category: {metadata['category']}")
 
             # Summaries
@@ -652,6 +653,7 @@ class PlaybookTools:
                 "repo_name": params.get("repo_name", ""),
                 "repo_url": params.get("repo_url", ""),
                 "branch": params.get("branch", ""),
+                "org": params.get("org", ""),
                 "summary_high_level": params.get("summary_high_level", ""),
                 "category": params.get("category", "Uncategorized"),
                 "quality_score": params.get("quality_score", 0),
@@ -686,11 +688,13 @@ class PlaybookTools:
                             existing.content = full_content_str
                             existing.metadata_json = metadata_dict
                             existing.repo_name = params.get("repo_name")
+                            existing.org = params.get("org", "")
                             existing.updated_at = int(datetime.now(UTC).timestamp())
                         else:
                             new_entry = CatalogStore(
                                 repo_id=repo_id,
                                 repo_name=params.get("repo_name"),
+                                org=params.get("org", ""),
                                 content=full_content_str,
                                 metadata_json=metadata_dict,
                                 created_at=int(datetime.now(UTC).timestamp()),

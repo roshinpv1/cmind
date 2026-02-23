@@ -67,6 +67,11 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
                     result = await executor.execute(pb_name_inner, user_input)
                     if result.get("success"):
                         outputs = result.get("outputs", {})
+                        # If a tool was executed (e.g. save_catalog_entry),
+                        # return the human-readable result so the planner
+                        # can detect completion and auto-finish.
+                        if outputs.get("tool_executed"):
+                            return outputs.get("result", "Tool executed successfully.")
                         # Return the structured data if available so _finish parses it natively
                         if outputs.get("data"):
                             # Pydantic dicts might have non-serializable objects (like dates), default=str
@@ -237,6 +242,23 @@ class PlannerAgent:
         ]
         successful_runs += len(tool_messages)
         has_data = successful_runs > 0
+        
+        # Auto-finish if last tool message indicates a terminal action (e.g., catalog saved)
+        terminal_signals = [
+            "Catalog entry generated and saved",
+            "catalog entry saved",
+            '"tool_executed": true',
+            '"tool_executed":true',
+        ]
+        if tool_messages:
+            last_tool_content = tool_messages[-1].content or ""
+            if any(sig.lower() in last_tool_content.lower() for sig in terminal_signals):
+                print(f"[PLANNER] Auto-finishing: terminal tool result detected")
+                return {
+                    "finished": True,
+                    "final_result": last_tool_content,
+                    "iteration": iteration + 1,
+                }
         
         # Auto-finish after many successful runs
         if successful_runs >= 10:

@@ -27,6 +27,7 @@ class IndexRequest(BaseModel):
     repo_path: str | None = None  # Local filesystem path
     repo_url: str | None = None  # Git repository URL (https/ssh)
     branch: str = "main"  # Branch to index (for git URLs)
+    org: str | None = None  # Organization owning this component
 
     def model_post_init(self, __context):
         """Validate that either repo_path or repo_url is provided."""
@@ -176,6 +177,7 @@ async def index_repository(request: IndexRequest):
         repo_url=request.repo_url,
         branch=request.branch,
         repo_id=repo_id,
+        org=request.org,
     )
 
     return IndexResponse(job_id=job_id, status="pending", repo_id=repo_id)
@@ -705,13 +707,14 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
             "cons": metadata.get("cons", []),
             "repo_url": metadata.get("repo_url", ""),
             "branch": metadata.get("branch", ""),
+            "org": metadata.get("org", ""),
             "estimated_cost": metadata.get("estimated_cost", 0),
             "business_functionalities": metadata.get("business_functionalities", [])
         }
         
         # Coerce None values to safe defaults (metadata.get returns None when key exists but value is None)
         for k in ["repo_id", "repo_name", "category", "description", "summary_detailed", 
-                   "architecture", "tech_stack", "specification", "repo_url", "branch"]:
+                   "architecture", "tech_stack", "specification", "repo_url", "branch", "org"]:
             if entry[k] is None:
                 entry[k] = ""
         for k in ["topics", "pros", "cons", "business_functionalities"]:

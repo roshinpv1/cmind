@@ -36,6 +36,7 @@ class IndexingState:
     deleted_files: list[str] = field(default_factory=list)
     commit_hash: str | None = None  # Git commit hash if using git detection
     metadata: dict = field(default_factory=dict)
+    org: str | None = None  # Organization owning this component
 
 
 class IndexingWorkflow:
@@ -423,7 +424,8 @@ class IndexingWorkflow:
                 self.manifest.create_repository(
                     state.repo_path, 
                     repo_id=state.repo_id,
-                    branch=branch
+                    branch=branch,
+                    org=getattr(state, 'org', None)
                 )
                 repo = self.manifest.get_repository(state.repo_path)
             
@@ -431,6 +433,7 @@ class IndexingWorkflow:
             self.manifest.update_repository(
                 state.repo_id,  # Use state ID to be sure
                 branch=branch,
+                org=getattr(state, 'org', None),
                 last_commit_hash=state.commit_hash,
                 metadata=metadata
             )

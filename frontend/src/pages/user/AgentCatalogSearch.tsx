@@ -45,6 +45,7 @@ interface CatalogResult {
     cons: string[];
     repo_url: string;
     branch: string;
+    org?: string;
     estimated_cost: number;
     business_functionalities: string[];
     reasoning?: string; // Appears during Discovery Agent mode
@@ -114,6 +115,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         specification: typeof rawItem.specification === 'object' ? JSON.stringify(rawItem.specification) : (rawItem.specification ?? ""),
         repo_url: safeStr(rawItem.repo_url ?? ""),
         branch: safeStr(rawItem.branch ?? ""),
+        org: safeStr(rawItem.org ?? ""),
         category: safeStr(rawItem.category ?? ""),
         estimated_cost: rawItem.estimated_cost ?? 0,
         business_functionalities: (rawItem.business_functionalities ?? []).map(safeStr),
@@ -166,6 +168,11 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                             {item.branch && (
                                 <span className="text-xs text-gray-400 font-mono">
                                     ⎇ {item.branch}
+                                </span>
+                            )}
+                            {item.org && (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-bold bg-teal-50 text-teal-700 ring-1 ring-teal-100">
+                                    {item.org}
                                 </span>
                             )}
                             {item.estimated_cost > 0 && (
@@ -997,6 +1004,7 @@ export default function AgentCatalogSearch() {
                                                                         const name = m.component_name || m.catalog_entry?.repo_name || "Component";
                                                                         const score = m.confidence_score || 0;
                                                                         const matchType = m.match_type || "";
+                                                                        const compOrg = m.catalog_entry?.org || "";
                                                                         const opacity = score >= 70 ? "opacity-100" : score >= 40 ? "opacity-85" : "opacity-70";
                                                                         return (
                                                                             <div
@@ -1006,6 +1014,11 @@ export default function AgentCatalogSearch() {
                                                                             >
                                                                                 <div className={`h-2 w-2 rounded-full shrink-0 ${score >= 70 ? "bg-emerald-500" : score >= 40 ? "bg-amber-400" : "bg-gray-300"}`} />
                                                                                 <span className="text-xs font-bold text-gray-800">{name}</span>
+                                                                                {compOrg && (
+                                                                                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-teal-50 text-teal-600">
+                                                                                        {compOrg}
+                                                                                    </span>
+                                                                                )}
                                                                                 {matchType && (
                                                                                     <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${matchType === "Full Match" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"}`}>
                                                                                         {matchType === "Full Match" ? "Full" : "Partial"}
@@ -1079,6 +1092,7 @@ export default function AgentCatalogSearch() {
                                                     pros: entry.pros || [],
                                                     cons: entry.cons || [],
                                                     branch: entry.branch || "main",
+                                                    org: entry.org || "",
                                                 };
                                                 return <CatalogCard key={idx} item={resultObj} />;
                                             });

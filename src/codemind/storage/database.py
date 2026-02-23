@@ -72,6 +72,7 @@ class CatalogStore(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     repo_id: Mapped[str] = mapped_column(String, unique=True, index=True)
     repo_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    org: Mapped[str | None] = mapped_column(String, nullable=True)  # Organization owning this component
     content: Mapped[str] = mapped_column(Text)  # Full JSON/Markdown content
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Structured metadata
     

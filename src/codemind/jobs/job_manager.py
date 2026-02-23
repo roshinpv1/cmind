@@ -35,6 +35,7 @@ class JobModel(Base):
     repo_url: Mapped[str | None] = mapped_column(String, nullable=True)  # Git URL (if remote)
     branch: Mapped[str] = mapped_column(String, default="main")
     repo_id: Mapped[str | None] = mapped_column(String, nullable=True)  # Computed repo ID
+    org: Mapped[str | None] = mapped_column(String, nullable=True)  # Organization owning this component
     status: Mapped[JobStatus] = mapped_column(
         SQLEnum(JobStatus), default=JobStatus.PENDING, index=True
     )
@@ -62,6 +63,7 @@ class JobManager:
         repo_url: str | None = None,
         branch: str = "main",
         repo_id: str | None = None,
+        org: str | None = None,
     ) -> str:
         """Create new indexing job."""
         job_id = str(uuid.uuid4())
@@ -73,6 +75,7 @@ class JobManager:
                 repo_url=repo_url,
                 branch=branch,
                 repo_id=repo_id,
+                org=org,
                 status=JobStatus.PENDING,
             )
             session.add(job)

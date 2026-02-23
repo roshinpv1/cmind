@@ -22,6 +22,7 @@ class RepositoryManifest(Base):
     repo_id: Mapped[str] = mapped_column(String, unique=True, index=True)
     repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
     branch: Mapped[str | None] = mapped_column(String, nullable=True)  # New field for uniqueness
+    org: Mapped[str | None] = mapped_column(String, nullable=True)  # Organization owning this component
     last_indexed_at: Mapped[datetime] = mapped_column(DateTime)
     last_commit_hash: Mapped[str | None] = mapped_column(String, nullable=True)
     embedding_model: Mapped[str] = mapped_column(String, default="all-MiniLM-L6-v2")

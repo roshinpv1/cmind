@@ -99,7 +99,8 @@ class ManifestManager:
         repo_path: str,
         repo_id: str | None = None,
         repo_url: str | None = None,
-        branch: str = "main",  # Added branch
+        branch: str = "main",
+        org: str | None = None,
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_version: int = 1,
     ) -> RepositoryManifest:
@@ -111,6 +112,7 @@ class ManifestManager:
             repo_id: Optional explicit repository ID (if not provided, computed from path)
             repo_url: Optional repository URL
             branch: Optional branch name
+            org: Optional organization name
             embedding_model: Name of embedding model
             embedding_version: Version of embeddings
 
@@ -128,6 +130,7 @@ class ManifestManager:
                 repo_id=repo_id,
                 repo_url=repo_url,
                 branch=branch,
+                org=org,
                 last_indexed_at=datetime.now(UTC),
                 embedding_model=embedding_model,
                 embedding_version=embedding_version,
@@ -151,7 +154,8 @@ class ManifestManager:
         self,
         repo_id: str,
         repo_url: str | None = None,
-        branch: str | None = None,  # Added branch
+        branch: str | None = None,
+        org: str | None = None,
         last_commit_hash: str | None = None,
         total_files: int | None = None,
         embedding_version: int | None = None,
@@ -183,6 +187,8 @@ class ManifestManager:
                 repo.repo_url = repo_url
             if branch is not None:
                 repo.branch = branch
+            if org is not None:
+                repo.org = org
             if last_commit_hash is not None:
                 repo.last_commit_hash = last_commit_hash
             if total_files is not None:

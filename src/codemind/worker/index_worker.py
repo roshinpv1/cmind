@@ -121,6 +121,7 @@ class IndexWorker:
             repo_url = job.repo_url
             branch = job.branch
             repo_id = job.repo_id
+            org = getattr(job, 'org', None)
 
         # Return a plain dict to avoid detached-instance issues
         return {
@@ -129,6 +130,7 @@ class IndexWorker:
             "repo_url": repo_url,
             "branch": branch,
             "repo_id": repo_id,
+            "org": org,
         }
 
     def _execute_job(self, job: dict):
@@ -158,6 +160,7 @@ class IndexWorker:
                 repo_path=actual_repo_path,
                 repo_id=actual_repo_id,
                 job_id=job_id,
+                org=job.get("org"),
             )
 
             # Run the full indexing workflow

@@ -328,6 +328,7 @@ async def execute_playbook(request: PlaybookRequest):
                 "repo_id": repo.repo_id,
                 "name": repo.repo_path.split("/")[-2] if len(repo.repo_path.split("/")) > 2 else "unknown",
                 "path": repo.repo_path,
+                "org": getattr(repo, 'org', None) or "",
                 "first_author": repo.first_author,
                 "total_commits": repo.total_commits,
                 "last_pr_title": repo.last_pr_title,

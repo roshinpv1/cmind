@@ -5,6 +5,7 @@ import { GitGraph, Loader2 } from "lucide-react";
 export default function RepoIndex() {
     const [url, setUrl] = useState("");
     const [branch, setBranch] = useState("main"); // specific branch if needed
+    const [org, setOrg] = useState(""); // organization owning this component
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState("");
     const navigate = useNavigate();
@@ -22,7 +23,7 @@ export default function RepoIndex() {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 // Adjust payload based on actual API
-                body: JSON.stringify({ repo_url: url, branch: branch || "main" })
+                body: JSON.stringify({ repo_url: url, branch: branch || "main", org: org || undefined })
             });
 
             if (!res.ok) {
@@ -91,6 +92,26 @@ export default function RepoIndex() {
                                 onChange={(e) => setBranch(e.target.value)}
                             />
                         </div>
+                    </div>
+
+                    <div>
+                        <label htmlFor="org" className="block text-sm font-medium text-gray-700">
+                            Organization (Optional)
+                        </label>
+                        <div className="mt-1 relative rounded-md shadow-sm">
+                            <input
+                                type="text"
+                                name="org"
+                                id="org"
+                                className="focus:ring-primary focus:border-primary block w-full sm:text-sm border-gray-300 rounded-md py-2 border pl-3"
+                                placeholder="e.g. Platform Engineering"
+                                value={org}
+                                onChange={(e) => setOrg(e.target.value)}
+                            />
+                        </div>
+                        <p className="mt-2 text-sm text-gray-500">
+                            Team or org that owns this component. Shown in catalog and discovery results.
+                        </p>
                     </div>
 
                     <div className="flex justify-end">

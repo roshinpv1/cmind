@@ -47,6 +47,9 @@ class CatalogEntry(BaseModel):
     quality_score: int = Field(default=0, ge=0, le=100)
     pros: list[str] = Field(default_factory=list)
     cons: list[str] = Field(default_factory=list)
+    org: str = Field(default="", description="Organization owning this component")
+    branch: str = Field(default="", description="Branch name")
+    estimated_cost: int = Field(default=0, description="Estimated cost in USD")
 
     @model_validator(mode="before")
     @classmethod

@@ -24,7 +24,7 @@ You must utilize the provided `RETRIEVED CODE` context—which consists of rich 
 ### Proposal Format Requirements
 Your final response MUST be a detailed JSON object satisfying the Output Schema parameters.
 
-Ensure you meticulously fill out the `catalog_matches` array. For each chosen component, provide the `component_name`, your confidence `score` (0-100), a detailed `reasoning` string explaining why it fits into the architectural chain, and an `architecture_layer` classifying which tier it belongs to.
+Ensure you meticulously fill out the `catalog_matches` array. For each chosen component, provide the `component_name`, your confidence `score` (0-100), a detailed `reasoning` string explaining why it fits into the architectural chain, an `architecture_layer` classifying which tier it belongs to, and the `catalog_entry` dict which should include the `org` (organization) field if present in the retrieved context.
 
 For each `gap` (component not found in the catalog), also classify its `architecture_layer`.
 
@@ -35,6 +35,7 @@ List any missing systems in the `gaps` array, and write a cohesive summary in `a
 - **Lenient Matching:** Do not reject components just because they aren't a 100% exact match. If a retrieved component is even 50% related to the requested capabilities, you MUST include it in your `catalog_matches` with an explanation of how it could be adapted, customized, or extended. Assign it a lower `confidence_score`.
 - Do NOT hallucinate components. Only propose components that you actually found in the `RETRIEVED CODE` section.
 - If (and only if) no remotely relevant components are found in the catalog, your proposal must explicitly state that the entire solution requires custom development, listing the systems in the `gaps` array.
+- **Organization attribution:** When a catalog entry includes an `Organization` field, preserve it in the `catalog_entry` output so the user knows which team/org owns each proposed component.
 
 ## Search Strategy
 ```yaml
@@ -53,7 +54,7 @@ fields:
   catalog_matches: 
     type: array
     items: dict
-    description: "Array of matched catalog components. Each item MUST contain 'capability' (what is being matched), 'component_name', 'match_type' ('Full Match' or 'Partial Match'), 'confidence_score' (int), 'reasoning', 'architecture_layer' (one of: 'Presentation', 'Business Logic', 'Data & Storage', 'Infrastructure'), and 'catalog_entry' (dict of the retrieved data)."
+    description: "Array of matched catalog components. Each item MUST contain 'capability' (what is being matched), 'component_name', 'match_type' ('Full Match' or 'Partial Match'), 'confidence_score' (int), 'reasoning', 'architecture_layer' (one of: 'Presentation', 'Business Logic', 'Data & Storage', 'Infrastructure'), and 'catalog_entry' (dict of the retrieved data including 'org' if available)."
   architecture_composition: {type: string, required: true, description: "A cohesive paragraph explaining how the retrieved components weave together"}
   gaps:
     type: array

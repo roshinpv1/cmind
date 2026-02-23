@@ -824,8 +824,50 @@ class PlaybookExecutor:
                                 
                                 fixed_matches.append(m)
                             data["catalog_matches"] = fixed_matches
-
-                        parsed_data = data # Capture for output
+                        
+                        # Enrich catalog_entry dicts with metadata from search chunks
+                        # (LLM often omits fields like org, repo_url, branch)
+                        if "catalog_matches" in data:
+                            # Build repo_name → metadata lookup from search chunks
+                            chunk_meta_lookup: dict[str, dict] = {}
+                            for chunk in state.get("code_chunks", []):
+                                chunk_text = chunk.get("chunk_text", "")
+                                rn = chunk.get("repo_name", "")
+                                if not rn:
+                                    for line in chunk_text.split("\n"):
+                                        if line.startswith("CATALOG ENTRY:"):
+                                            rn = line.replace("CATALOG ENTRY:", "").strip()
+                                            break
+                                if rn:
+                                    meta: dict[str, str] = {}
+                                    for line in chunk_text.split("\n"):
+                                        if line.startswith("Organization: "):
+                                            meta["org"] = line.replace("Organization: ", "").strip()
+                                        elif line.startswith("Repository URL: "):
+                                            meta["repo_url"] = line.replace("Repository URL: ", "").strip()
+                                        elif line.startswith("Branch: "):
+                                            meta["branch"] = line.replace("Branch: ", "").strip()
+                                    if meta:
+                                        chunk_meta_lookup[rn.lower()] = meta
+                            
+                            print(f"[EXECUTOR] Enrichment lookup: {chunk_meta_lookup}", flush=True)
+                            
+                            # Inject missing metadata into each catalog_entry
+                            if chunk_meta_lookup:
+                                for m in data["catalog_matches"]:
+                                    entry = m.get("catalog_entry", {})
+                                    entry_name = entry.get("repo_name", m.get("component_name", "")).lower()
+                                    if entry_name in chunk_meta_lookup:
+                                        enrichment = chunk_meta_lookup[entry_name]
+                                        for field in ["org", "repo_url", "branch"]:
+                                            if field in enrichment and not entry.get(field):
+                                                entry[field] = enrichment[field]
+                                        m["catalog_entry"] = entry
+                                        print(f"[EXECUTOR] Enriched '{entry_name}' with: {enrichment}", flush=True)
+                                    else:
+                                        print(f"[EXECUTOR] No enrichment match for '{entry_name}' (lookup keys: {list(chunk_meta_lookup.keys())})", flush=True)
+                        
+                        parsed_data = data  # Capture for output
                         
                         # Pydantic validation + coercion (Phase 3: Schema Compliance)
                         schema_class = get_schema_for_playbook(playbook.name, playbook_def=playbook)
@@ -868,7 +910,7 @@ class PlaybookExecutor:
                                  context = state["user_input"].get("context", {})
                                  if context:
                                      # Fields to inject if missing or template or empty
-                                     fields_to_inject = ["repo_name", "repo_url", "branch"]
+                                     fields_to_inject = ["repo_name", "repo_url", "branch", "org"]
                                      for field in fields_to_inject:
                                          # Map 'name' from context to 'repo_name' in params
                                          ctx_key = "name" if field == "repo_name" else field
