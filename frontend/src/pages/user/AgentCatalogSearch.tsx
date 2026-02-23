@@ -87,26 +87,37 @@ function ScoreBar({ score }: { score: number }) {
     );
 }
 
+// Safely convert any value to a renderable string — handles objects from LLM
+function safeStr(v: any): string {
+    if (typeof v === 'string') return v;
+    if (v == null) return '';
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (typeof v === 'object') {
+        return v.component_name || v.name || v.title || v.risk || v.description || v.label || v.value || JSON.stringify(v);
+    }
+    return String(v);
+}
+
 function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
     const [expanded, setExpanded] = useState(false);
 
-    // Normalize null/undefined fields to safe defaults
+    // Normalize null/undefined fields to safe defaults — use safeStr to guard against objects from LLM
     const item = {
         ...rawItem,
-        topics: rawItem.topics ?? [],
-        pros: rawItem.pros ?? [],
-        cons: rawItem.cons ?? [],
-        architecture: rawItem.architecture ?? "",
-        description: rawItem.description ?? "",
-        summary_detailed: rawItem.summary_detailed ?? "",
-        tech_stack: rawItem.tech_stack ?? "",
-        specification: rawItem.specification ?? "",
-        repo_url: rawItem.repo_url ?? "",
-        branch: rawItem.branch ?? "",
-        category: rawItem.category ?? "",
+        topics: (rawItem.topics ?? []).map(safeStr),
+        pros: (rawItem.pros ?? []).map(safeStr),
+        cons: (rawItem.cons ?? []).map(safeStr),
+        architecture: safeStr(rawItem.architecture ?? ""),
+        description: safeStr(rawItem.description ?? ""),
+        summary_detailed: safeStr(rawItem.summary_detailed ?? ""),
+        tech_stack: Array.isArray(rawItem.tech_stack) ? rawItem.tech_stack.join(", ") : safeStr(rawItem.tech_stack ?? ""),
+        specification: typeof rawItem.specification === 'object' ? JSON.stringify(rawItem.specification) : (rawItem.specification ?? ""),
+        repo_url: safeStr(rawItem.repo_url ?? ""),
+        branch: safeStr(rawItem.branch ?? ""),
+        category: safeStr(rawItem.category ?? ""),
         estimated_cost: rawItem.estimated_cost ?? 0,
-        business_functionalities: rawItem.business_functionalities ?? [],
-        reasoning: rawItem.reasoning ?? "",
+        business_functionalities: (rawItem.business_functionalities ?? []).map(safeStr),
+        reasoning: safeStr(rawItem.reasoning ?? ""),
     };
 
     // Parse specification JSON
@@ -196,10 +207,10 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                     <Tag className="h-3.5 w-3.5 text-gray-300 shrink-0" />
                     {item.topics.map((topic) => (
                         <span
-                            key={topic}
+                            key={safeStr(topic)}
                             className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-gray-50 text-gray-500 border border-gray-100 hover:bg-gray-100 hover:text-gray-700 transition-colors cursor-default"
                         >
-                            {topic}
+                            {safeStr(topic)}
                         </span>
                     ))}
                 </div>
@@ -251,7 +262,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                 {item.business_functionalities.map((func, i) => (
                                     <li key={i} className="flex items-start gap-2">
                                         <span className="text-indigo-500 mt-0.5">•</span>
-                                        {func}
+                                        {safeStr(func)}
                                     </li>
                                 ))}
                             </ul>
@@ -349,7 +360,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                                     className="text-xs text-gray-600 flex items-start gap-2 p-2 bg-emerald-50/50 rounded-lg"
                                                 >
                                                     <span className="text-emerald-500 shrink-0 mt-0.5">✓</span>
-                                                    {pro}
+                                                    {safeStr(pro)}
                                                 </li>
                                             ))}
                                         </ul>
@@ -367,7 +378,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                                     className="text-xs text-gray-600 flex items-start gap-2 p-2 bg-red-50/50 rounded-lg"
                                                 >
                                                     <span className="text-red-400 shrink-0 mt-0.5">✗</span>
-                                                    {con}
+                                                    {safeStr(con)}
                                                 </li>
                                             ))}
                                         </ul>
@@ -840,7 +851,7 @@ export default function AgentCatalogSearch() {
                                                     <h2 className="text-lg font-black text-gray-900">Requirement Analysis</h2>
                                                 </div>
                                                 <p className="text-sm text-gray-600 leading-relaxed">
-                                                    {discoveryResult.answer.requirement_summary || discoveryResult.goal || "—"}
+                                                    {safeStr(discoveryResult.answer.requirement_summary || discoveryResult.goal || "—")}
                                                 </p>
                                             </div>
                                             {discoveryResult.answer.overall_confidence_score > 0 && (
@@ -1011,7 +1022,7 @@ export default function AgentCatalogSearch() {
                                                                             title={g.description || "Needs custom development"}
                                                                         >
                                                                             <div className="h-2 w-2 rounded-full bg-amber-400 shrink-0 animate-pulse" />
-                                                                            <span className="text-xs font-bold text-gray-500">{g.name || g}</span>
+                                                                            <span className="text-xs font-bold text-gray-500">{safeStr(g.name || g)}</span>
                                                                             <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">Gap</span>
                                                                         </div>
                                                                     ))}
@@ -1083,7 +1094,7 @@ export default function AgentCatalogSearch() {
                                             </div>
                                             <ul className="space-y-2">
                                                 {discoveryResult.answer.gaps.map((gap: any, i: number) => {
-                                                    const gapName = typeof gap === "string" ? gap : gap.name || "Unknown";
+                                                    const gapName = typeof gap === "string" ? gap : (gap.component_name || gap.name || "Unknown");
                                                     const gapDesc = typeof gap === "object" && gap.description ? ` — ${gap.description}` : "";
                                                     const gapLayer = typeof gap === "object" && gap.architecture_layer ? ` [${gap.architecture_layer}]` : "";
                                                     return (
@@ -1105,12 +1116,19 @@ export default function AgentCatalogSearch() {
                                                 <h3 className="text-sm font-bold text-red-800 uppercase tracking-wider">Risks & Considerations</h3>
                                             </div>
                                             <ul className="space-y-2">
-                                                {discoveryResult.answer.risks.map((risk: any, i: number) => (
-                                                    <li key={i} className="text-sm text-red-700 flex items-start gap-2">
-                                                        <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
-                                                        {typeof risk === 'string' ? risk : (risk.name || risk.description || JSON.stringify(risk))}
-                                                    </li>
-                                                ))}
+                                                {discoveryResult.answer.risks.map((riskItem: any, i: number) => {
+                                                    const riskText = typeof riskItem === 'string' ? riskItem : (riskItem.risk || riskItem.name || riskItem.description || JSON.stringify(riskItem));
+                                                    const mitigation = typeof riskItem === 'object' && riskItem.mitigation ? riskItem.mitigation : null;
+                                                    return (
+                                                        <li key={i} className="text-sm text-red-700 flex items-start gap-2">
+                                                            <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-red-400 shrink-0" />
+                                                            <span>
+                                                                {riskText}
+                                                                {mitigation && <span className="text-red-500/70 text-xs ml-1">→ {mitigation}</span>}
+                                                            </span>
+                                                        </li>
+                                                    );
+                                                })}
                                             </ul>
                                         </div>
                                     )}
