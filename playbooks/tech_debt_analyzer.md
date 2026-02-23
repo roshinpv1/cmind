@@ -54,7 +54,7 @@ inject_repo_metadata: false
 
 ## Search Strategy
 ```yaml
-limit: 30
+limit: 200
 mode: hybrid
 min_score: 0.2
 queries:

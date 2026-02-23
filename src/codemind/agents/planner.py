@@ -243,15 +243,24 @@ class PlannerAgent:
         successful_runs += len(tool_messages)
         has_data = successful_runs > 0
         
-        # Auto-finish if last tool message indicates a terminal action (e.g., catalog saved)
+        # Auto-finish if last tool message indicates a terminal action
         terminal_signals = [
             "Catalog entry generated and saved",
             "catalog entry saved",
             '"tool_executed": true',
             '"tool_executed":true',
         ]
+        # Also auto-finish when a playbook returns a large structured JSON result
+        # (e.g. svp_analyzer, tech_debt_analyzer, build_vs_buy, etc.)
+        json_completion_keys = [
+            "report_markdown", "executive_summary", "product_name",
+            "overall_health_score", "findings",
+            "build_estimate", "reuse_estimate",
+            "requirement_summary",
+        ]
         if tool_messages:
             last_tool_content = tool_messages[-1].content or ""
+            # Check string-based terminal signals
             if any(sig.lower() in last_tool_content.lower() for sig in terminal_signals):
                 print(f"[PLANNER] Auto-finishing: terminal tool result detected")
                 return {
@@ -259,6 +268,19 @@ class PlannerAgent:
                     "final_result": last_tool_content,
                     "iteration": iteration + 1,
                 }
+            # Check if it's a large JSON result from a completed playbook
+            if len(last_tool_content) > 500:
+                try:
+                    parsed_check = json.loads(last_tool_content)
+                    if isinstance(parsed_check, dict) and any(k in parsed_check for k in json_completion_keys):
+                        print(f"[PLANNER] Auto-finishing: large JSON playbook result detected ({len(last_tool_content)} chars)")
+                        return {
+                            "finished": True,
+                            "final_result": last_tool_content,
+                            "iteration": iteration + 1,
+                        }
+                except (json.JSONDecodeError, TypeError):
+                    pass
         
         # Auto-finish after many successful runs
         if successful_runs >= 10:
@@ -425,7 +447,7 @@ class PlannerAgent:
                 if isinstance(outputs, dict):
                     if "result" in outputs:
                         playbook_output = outputs["result"]
-                    elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate")):
+                    elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
                         playbook_output = outputs
                     
                     for key, val in outputs.items():
@@ -445,7 +467,7 @@ class PlannerAgent:
                         if isinstance(parsed, dict):
                             if "result" in parsed:
                                 playbook_output = parsed["result"]
-                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate")):
+                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
                                 playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
                         pass
@@ -468,6 +490,10 @@ class PlannerAgent:
             # Output can be dict or a string
             chars = len(str(playbook_output))
             print(f"[PLANNER] ✅ Using playbook output directly ({chars} chars)")
+            if isinstance(playbook_output, dict):
+                print(f"[PLANNER] Output keys: {list(playbook_output.keys())}")
+                if "report_markdown" in playbook_output:
+                    print(f"[PLANNER] report_markdown: {len(playbook_output['report_markdown'])} chars")
             return {
                 "final_answer": {
                     "goal": state["goal"],

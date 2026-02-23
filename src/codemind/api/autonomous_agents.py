@@ -177,6 +177,17 @@ async def run_autonomous_task(
         autonomous_jobs[job_id]["iterations"] = result.get("iterations", 0)
         autonomous_jobs[job_id]["steps_taken"] = result.get("steps_taken", 0)
         
+        # Debug dump
+        import json as _json
+        try:
+            with open("/tmp/autonomous_result_debug.json", "w") as f:
+                _json.dump(result, f, indent=2, default=str)
+            print(f"[AUTONOMOUS] Debug result dumped to /tmp/autonomous_result_debug.json")
+            answer = result.get("answer")
+            print(f"[AUTONOMOUS] Answer type: {type(answer).__name__}, keys: {list(answer.keys()) if isinstance(answer, dict) else 'N/A'}")
+        except Exception as de:
+            print(f"[AUTONOMOUS] Debug dump failed: {de}")
+        
         print(f"[AUTONOMOUS] ✓ Job {job_id} completed successfully")
         
     except Exception as e:

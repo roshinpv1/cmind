@@ -4,6 +4,7 @@ import RepoList from "./pages/admin/RepoList";
 import RepoIndex from "./pages/admin/RepoIndex";
 import CatalogCreate from "./pages/admin/CatalogCreate";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
+import ChatInterface from "./pages/user/ChatInterface";
 
 function App() {
   return (
@@ -12,6 +13,7 @@ function App() {
         {/* Main Entry Points */}
         <Route path="/" element={<Navigate to="/catalog-search" replace />} />
         <Route path="/catalog-search" element={<UserLayout><AgentCatalogSearch /></UserLayout>} />
+        <Route path="/reasoning-lab" element={<UserLayout><ChatInterface /></UserLayout>} />
 
         {/* Admin Routes */}
         <Route path="/admin" element={<AdminLayout><RepoList /></AdminLayout>} />

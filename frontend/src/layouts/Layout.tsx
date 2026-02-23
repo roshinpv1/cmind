@@ -90,6 +90,9 @@ export function UserLayout({ children }: { children: React.ReactNode }) {
                             <Link to="/catalog-search" className="text-sm font-medium text-gray-600 hover:text-primary">
                                 Catalog Search
                             </Link>
+                            <Link to="/reasoning-lab" className="text-sm font-medium text-gray-600 hover:text-primary">
+                                Reasoning Lab
+                            </Link>
                         </nav>
                     </div>
                     <Link to="/admin" className="text-sm text-gray-500 hover:text-gray-900">

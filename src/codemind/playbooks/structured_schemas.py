@@ -132,6 +132,23 @@ class SolutionArchitectOutput(CatalogSearchOutput):
     pass
 
 
+# ─── SVP Analyzer ────────────────────────────────────────────────────────────
+
+class SvpAnalyzerOutput(BaseModel):
+    """Structured output for svp_analyzer playbook."""
+    product_name: str = Field(default="", description="Name of the software product")
+    domain: str = Field(default="", description="Business domain")
+    executive_summary: str = Field(default="", description="Executive overview")
+    business_functionalities: list[dict] = Field(default_factory=list, description="Business capabilities with impact")
+    modules: list[dict] = Field(default_factory=list, description="Software modules with responsibilities")
+    integration_points: dict = Field(default_factory=dict, description="APIs exposed/consumed, events, external systems")
+    data_architecture: dict = Field(default_factory=dict, description="Data models, storage, flow patterns")
+    change_impact_matrix: list[dict] = Field(default_factory=list, description="Impact entries per business function")
+    modernization_assessment: dict = Field(default_factory=dict, description="Tech stack score, dependency health, risks")
+    key_metrics: dict = Field(default_factory=dict, description="Quantitative indicators")
+    report_markdown: str = Field(default="", description="Complete structured markdown report")
+
+
 # ─── Schema Registry ────────────────────────────────────────────────────────
 
 PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -140,6 +157,7 @@ PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
     "code_analyzer": CodeAnalyzerOutput,
     "code_explorer": CodeExplorerOutput,
     "solution_architect": SolutionArchitectOutput,
+    "svp_analyzer": SvpAnalyzerOutput,
 }
 
 

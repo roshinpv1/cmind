@@ -17,7 +17,7 @@ interface AgentJob {
     job_id: string;
     status: "pending" | "running" | "completed" | "failed";
     result?: {
-        answer: string;
+        answer: any;
         iterations: number;
         steps_taken: number;
     };
@@ -178,6 +178,7 @@ export default function ChatInterface() {
                             <option value="code_analyzer">💻 Deep Code Analysis</option>
                             <option value="catalog_browser">📚 Catalog Search</option>
                             <option value="catalog_generator">🏗️ Catalog Generator</option>
+                            <option value="svp_analyzer">📊 SVP Product Analyzer</option>
                         </select>
                     </div>
                 </div>
@@ -274,7 +275,13 @@ export default function ChatInterface() {
                     </div>
                     <div className="flex-1 overflow-y-auto p-6 prose prose-red max-w-none">
                         {jobStatus?.result?.answer ? (
-                            <Markdown>{jobStatus.result.answer}</Markdown>
+                            <Markdown>{
+                                typeof jobStatus.result.answer === "string"
+                                    ? jobStatus.result.answer
+                                    : jobStatus.result.answer.report_markdown
+                                        ? jobStatus.result.answer.report_markdown
+                                        : JSON.stringify(jobStatus.result.answer, null, 2)
+                            }</Markdown>
                         ) : (
                             <div className="text-center text-gray-400 mt-20 italic">
                                 Final answer will appear here when analysis is complete.
