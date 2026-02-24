@@ -130,7 +130,30 @@ async def lifespan(app: FastAPI):
     app.state.graph_db.close()
 
 
+import logging
+import sys
+
+logger = logging.getLogger("codemind.api")
+
+# Force flush for print statements so they appear even when stdout is redirected
+import functools
+_original_print = print
+print = functools.partial(_original_print, flush=True)
+
 app = FastAPI(title="CodeMind API", version="0.1.0", lifespan=lifespan)
+
+@app.on_event("startup")
+async def log_all_routes():
+    """Print all registered API routes at startup."""
+    msg = "\n===== REGISTERED ROUTES =====\n"
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            for method in route.methods:
+                msg += f"  {method:6s} {route.path}\n"
+    msg += "============================="
+    # Use BOTH print and logging to guarantee visibility
+    print(msg, file=sys.stderr)
+    logger.warning(msg)
 
 
 # Debug middleware: log all incoming requests to /repos endpoints
@@ -149,6 +172,17 @@ class RepoDebugMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(RepoDebugMiddleware)
 
+
+# Diagnostic endpoint — defined early so it always registers
+@app.get("/api/v1/debug/routes")
+async def debug_routes():
+    """Return all registered routes. Use this to verify endpoint registration."""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            for method in route.methods:
+                routes.append({"method": method, "path": route.path})
+    return {"total": len(routes), "routes": sorted(routes, key=lambda r: r["path"])}
 
 @app.post("/api/v1/index", response_model=IndexResponse)
 async def index_repository(request: IndexRequest):
