@@ -405,21 +405,17 @@ async def list_repos():
     repos = manifest.list_repositories()
     
     results = []
+    seen_repo_ids = set()
+    
     for r in repos:
         # Infer properties from path
-        # Expected path format: .../data/repos/<name>/<branch>
         path_parts = str(r.repo_path).split("/")
         name = None
         branch = None
         
-        # Heuristic: verify if it looks like our git cache structure
         if len(path_parts) >= 2:
-            # Check if parent is 'repos' (maybe too specific?)
-            # Just take last two parts
             potential_branch = path_parts[-1]
             potential_name = path_parts[-2]
-             
-            # Exclude standard dirs if any
             if potential_name != "repos":
                  name = potential_name
                  branch = potential_branch
@@ -439,8 +435,31 @@ async def list_repos():
             last_pr_user=r.last_pr_user,
             last_pr_merged_at=r.last_pr_merged_at
         ))
+        seen_repo_ids.add(r.repo_id)
 
-    
+    # Also include catalog-only repos (enterprise-indexed, not in local manifest)
+    from codemind.storage.database import CatalogStore
+    db_inst = manifest.db
+    with db_inst.get_session() as session:
+        catalogs = session.query(CatalogStore).all()
+        for c in catalogs:
+            if c.repo_id not in seen_repo_ids:
+                results.append(RepoListItem(
+                    repo_id=c.repo_id,
+                    name=c.repo_name or c.repo_id,
+                    branch=None,
+                    path=c.repo_id,
+                    repo_url=None,
+                    status="catalog-only",
+                    total_files=0,
+                    last_indexed=str(c.updated_at or c.created_at or 0),
+                    first_author=None,
+                    total_commits=None,
+                    last_pr_title=None,
+                    last_pr_user=None,
+                    last_pr_merged_at=None,
+                ))
+
     return results
 
 
@@ -470,32 +489,71 @@ async def get_repo_detail(repo_id: str):
     """Get detailed info for a single repository."""
     manifest: ManifestManager = app.state.manifest
     r = manifest.get_repository_by_id(repo_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Repository not found")
+    
+    if r:
+        # Found in manifest
+        path_parts = str(r.repo_path).split("/")
+        name = path_parts[-2] if len(path_parts) >= 2 and path_parts[-2] != "repos" else "unknown"
+        branch = path_parts[-1] if len(path_parts) >= 2 else "unknown"
 
-    path_parts = str(r.repo_path).split("/")
-    name = path_parts[-2] if len(path_parts) >= 2 and path_parts[-2] != "repos" else "unknown"
-    branch = path_parts[-1] if len(path_parts) >= 2 else "unknown"
+        return RepoDetail(
+            repo_id=r.repo_id,
+            name=name,
+            branch=r.branch or branch,
+            path=r.repo_path,
+            repo_url=r.repo_url,
+            org=r.org,
+            status="indexed",
+            total_files=r.total_files_indexed,
+            last_indexed=r.last_indexed_at.isoformat(),
+            first_author=r.first_author,
+            total_commits=r.total_commits,
+            last_pr_title=r.last_pr_title,
+            last_pr_user=r.last_pr_user,
+            last_pr_merged_at=r.last_pr_merged_at,
+            embedding_model=r.embedding_model,
+            embedding_version=r.embedding_version,
+            last_commit_hash=r.last_commit_hash,
+        )
 
-    return RepoDetail(
-        repo_id=r.repo_id,
-        name=name,
-        branch=r.branch or branch,
-        path=r.repo_path,
-        repo_url=r.repo_url,
-        org=r.org,
-        status="indexed",
-        total_files=r.total_files_indexed,
-        last_indexed=r.last_indexed_at.isoformat(),
-        first_author=r.first_author,
-        total_commits=r.total_commits,
-        last_pr_title=r.last_pr_title,
-        last_pr_user=r.last_pr_user,
-        last_pr_merged_at=r.last_pr_merged_at,
-        embedding_model=r.embedding_model,
-        embedding_version=r.embedding_version,
-        last_commit_hash=r.last_commit_hash,
-    )
+    # Fallback: check catalog_store (for enterprise-indexed repos)
+    from codemind.storage.database import CatalogStore
+    db = app.state.lance_storage  # need the Database instance
+    db_inst = manifest.db
+    with db_inst.get_session() as session:
+        catalog = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if catalog:
+            import json as _json
+            meta = {}
+            if catalog.metadata_json:
+                meta = catalog.metadata_json if isinstance(catalog.metadata_json, dict) else _json.loads(catalog.metadata_json)
+            content = {}
+            try:
+                content = _json.loads(catalog.content) if catalog.content else {}
+            except (ValueError, TypeError):
+                pass
+            
+            return RepoDetail(
+                repo_id=catalog.repo_id,
+                name=catalog.repo_name or repo_id,
+                branch=meta.get("branch"),
+                path=meta.get("repo_url", repo_id),
+                repo_url=meta.get("repo_url"),
+                org=catalog.org,
+                status="catalog-only",
+                total_files=0,
+                last_indexed=str(catalog.updated_at or catalog.created_at or 0),
+                first_author=None,
+                total_commits=None,
+                last_pr_title=None,
+                last_pr_user=None,
+                last_pr_merged_at=None,
+                embedding_model=None,
+                embedding_version=None,
+                last_commit_hash=None,
+            )
+
+    raise HTTPException(status_code=404, detail="Repository not found in manifest or catalog")
 
 
 @app.put("/api/v1/repos/{repo_id}")
@@ -503,9 +561,7 @@ async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
     """Update repository metadata."""
     manifest: ManifestManager = app.state.manifest
     r = manifest.get_repository_by_id(repo_id)
-    if not r:
-        raise HTTPException(status_code=404, detail="Repository not found")
-
+    
     # Build kwargs for update — only include non-None fields
     update_kwargs = {}
     for field in ["org", "repo_url", "branch", "first_author", "total_commits",
@@ -517,9 +573,38 @@ async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
     if not update_kwargs:
         raise HTTPException(status_code=400, detail="No fields to update")
 
-    manifest.update_repository(repo_id, **update_kwargs)
+    if r:
+        # Update manifest
+        manifest.update_repository(repo_id, **update_kwargs)
+        updated_in = "manifest"
+    else:
+        # Fallback: update catalog_store
+        from codemind.storage.database import CatalogStore
+        db_inst = manifest.db
+        with db_inst.get_session() as session:
+            catalog = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+            if not catalog:
+                raise HTTPException(status_code=404, detail="Repository not found in manifest or catalog")
+            
+            if "org" in update_kwargs:
+                catalog.org = update_kwargs["org"]
+            if "repo_url" in update_kwargs or "branch" in update_kwargs:
+                import json as _json
+                meta = catalog.metadata_json or {}
+                if isinstance(meta, str):
+                    meta = _json.loads(meta)
+                if "repo_url" in update_kwargs:
+                    meta["repo_url"] = update_kwargs["repo_url"]
+                if "branch" in update_kwargs:
+                    meta["branch"] = update_kwargs["branch"]
+                catalog.metadata_json = meta
+            
+            from datetime import UTC, datetime
+            catalog.updated_at = int(datetime.now(UTC).timestamp())
+            session.commit()
+            updated_in = "catalog"
 
-    return {"status": "updated", "repo_id": repo_id, "fields_updated": list(update_kwargs.keys())}
+    return {"status": "updated", "repo_id": repo_id, "source": updated_in, "fields_updated": list(update_kwargs.keys())}
 
 
 @app.get("/api/v1/stats")
