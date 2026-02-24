@@ -444,6 +444,84 @@ async def list_repos():
     return results
 
 
+class RepoUpdateRequest(BaseModel):
+    """Request to update repository metadata."""
+    org: str | None = None
+    repo_url: str | None = None
+    branch: str | None = None
+    first_author: str | None = None
+    total_commits: int | None = None
+    last_pr_title: str | None = None
+    last_pr_user: str | None = None
+    last_pr_merged_at: str | None = None
+
+
+class RepoDetail(RepoListItem):
+    """Detailed repository info for edit page."""
+    org: str | None = None
+    embedding_model: str | None = None
+    embedding_version: int | None = None
+    last_commit_hash: str | None = None
+    last_pr_merged_at: str | None = None
+
+
+@app.get("/api/v1/repos/{repo_id}", response_model=RepoDetail)
+async def get_repo_detail(repo_id: str):
+    """Get detailed info for a single repository."""
+    manifest: ManifestManager = app.state.manifest
+    r = manifest.get_repository_by_id(repo_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    path_parts = str(r.repo_path).split("/")
+    name = path_parts[-2] if len(path_parts) >= 2 and path_parts[-2] != "repos" else "unknown"
+    branch = path_parts[-1] if len(path_parts) >= 2 else "unknown"
+
+    return RepoDetail(
+        repo_id=r.repo_id,
+        name=name,
+        branch=r.branch or branch,
+        path=r.repo_path,
+        repo_url=r.repo_url,
+        org=r.org,
+        status="indexed",
+        total_files=r.total_files_indexed,
+        last_indexed=r.last_indexed_at.isoformat(),
+        first_author=r.first_author,
+        total_commits=r.total_commits,
+        last_pr_title=r.last_pr_title,
+        last_pr_user=r.last_pr_user,
+        last_pr_merged_at=r.last_pr_merged_at,
+        embedding_model=r.embedding_model,
+        embedding_version=r.embedding_version,
+        last_commit_hash=r.last_commit_hash,
+    )
+
+
+@app.put("/api/v1/repos/{repo_id}")
+async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
+    """Update repository metadata."""
+    manifest: ManifestManager = app.state.manifest
+    r = manifest.get_repository_by_id(repo_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    # Build kwargs for update — only include non-None fields
+    update_kwargs = {}
+    for field in ["org", "repo_url", "branch", "first_author", "total_commits",
+                  "last_pr_title", "last_pr_user", "last_pr_merged_at"]:
+        val = getattr(request, field, None)
+        if val is not None:
+            update_kwargs[field] = val
+
+    if not update_kwargs:
+        raise HTTPException(status_code=400, detail="No fields to update")
+
+    manifest.update_repository(repo_id, **update_kwargs)
+
+    return {"status": "updated", "repo_id": repo_id, "fields_updated": list(update_kwargs.keys())}
+
+
 @app.get("/api/v1/stats")
 async def get_stats():
     """Get system stats."""

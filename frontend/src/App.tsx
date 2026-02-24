@@ -3,6 +3,7 @@ import { AdminLayout, UserLayout } from "./layouts/Layout";
 import RepoList from "./pages/admin/RepoList";
 import RepoIndex from "./pages/admin/RepoIndex";
 import CatalogCreate from "./pages/admin/CatalogCreate";
+import RepoEdit from "./pages/admin/RepoEdit";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
 
@@ -18,6 +19,7 @@ function App() {
         {/* Admin Routes */}
         <Route path="/admin" element={<AdminLayout><RepoList /></AdminLayout>} />
         <Route path="/admin/repos" element={<AdminLayout><RepoList /></AdminLayout>} />
+        <Route path="/admin/repos/:repoId/edit" element={<AdminLayout><RepoEdit /></AdminLayout>} />
         <Route path="/admin/index" element={<AdminLayout><RepoIndex /></AdminLayout>} />
         <Route path="/admin/catalog/create" element={<AdminLayout><CatalogCreate /></AdminLayout>} />
 

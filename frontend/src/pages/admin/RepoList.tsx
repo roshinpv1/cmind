@@ -4,9 +4,8 @@ import {
     GitBranch,
     FileText,
     Clock,
-    CheckCircle,
-    AlertCircle,
-    Plus
+    Plus,
+    Pencil
 } from "lucide-react";
 
 interface Repo {
@@ -83,15 +82,24 @@ export default function RepoList() {
                                             </div>
                                         </div>
                                     </div>
-                                    <div className="flex flex-col items-end text-sm text-gray-500 space-y-1">
-                                        <div className="flex items-center">
-                                            <FileText className="h-4 w-4 mr-1" />
-                                            {repo.total_files} files
+                                    <div className="flex items-center gap-4">
+                                        <div className="flex flex-col items-end text-sm text-gray-500 space-y-1">
+                                            <div className="flex items-center">
+                                                <FileText className="h-4 w-4 mr-1" />
+                                                {repo.total_files} files
+                                            </div>
+                                            <div className="flex items-center">
+                                                <Clock className="h-4 w-4 mr-1" />
+                                                {new Date(repo.last_indexed).toLocaleDateString()}
+                                            </div>
                                         </div>
-                                        <div className="flex items-center">
-                                            <Clock className="h-4 w-4 mr-1" />
-                                            {new Date(repo.last_indexed).toLocaleDateString()}
-                                        </div>
+                                        <Link
+                                            to={`/admin/repos/${encodeURIComponent(repo.repo_id)}/edit`}
+                                            className="p-2 text-gray-400 hover:text-primary hover:bg-red-50 rounded-md transition-colors"
+                                            title="Edit metadata"
+                                        >
+                                            <Pencil className="h-4 w-4" />
+                                        </Link>
                                     </div>
                                 </div>
                                 {repo.last_pr_title && (
