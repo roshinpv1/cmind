@@ -3,12 +3,14 @@ FastAPI control plane for CodeMind.
 
 REST API for indexing, search, and system management.
 """
-
 from dotenv import load_dotenv
 load_dotenv()  # Load .env before anything reads os.environ
 
 from contextlib import asynccontextmanager
 import os
+import sys
+import logging
+import functools
 
 from datetime import UTC, datetime
 from fastapi import FastAPI, HTTPException
@@ -124,36 +126,28 @@ async def lifespan(app: FastAPI):
     app.include_router(autonomous_router)
     print("[SERVER] ✅ Autonomous agent system initialized (LangChain)")
 
+    # Log all registered routes at startup
+    routes_msg = "\n===== REGISTERED ROUTES =====\n"
+    for route in app.routes:
+        if hasattr(route, "methods"):
+            for method in route.methods:
+                routes_msg += f"  {method:6s} {route.path}\n"
+    routes_msg += "============================="
+    print(routes_msg, file=sys.stderr)
+
     yield
 
     # Cleanup
     app.state.graph_db.close()
 
 
-import logging
-import sys
-
 logger = logging.getLogger("codemind.api")
 
 # Force flush for print statements so they appear even when stdout is redirected
-import functools
 _original_print = print
 print = functools.partial(_original_print, flush=True)
 
 app = FastAPI(title="CodeMind API", version="0.1.0", lifespan=lifespan)
-
-@app.on_event("startup")
-async def log_all_routes():
-    """Print all registered API routes at startup."""
-    msg = "\n===== REGISTERED ROUTES =====\n"
-    for route in app.routes:
-        if hasattr(route, "methods"):
-            for method in route.methods:
-                msg += f"  {method:6s} {route.path}\n"
-    msg += "============================="
-    # Use BOTH print and logging to guarantee visibility
-    print(msg, file=sys.stderr)
-    logger.warning(msg)
 
 
 # Debug middleware: log all incoming requests to /repos endpoints
@@ -514,25 +508,35 @@ async def list_repos():
     return results
 
 
-class RepoUpdateRequest(BaseModel):
-    """Request to update repository metadata."""
-    org: str | None = None
-    repo_url: str | None = None
-    branch: str | None = None
-    first_author: str | None = None
-    total_commits: int | None = None
-    last_pr_title: str | None = None
-    last_pr_user: str | None = None
-    last_pr_merged_at: str | None = None
+try:
+    class RepoUpdateRequest(BaseModel):
+        """Request to update repository metadata."""
+        org: str | None = None
+        repo_url: str | None = None
+        branch: str | None = None
+        first_author: str | None = None
+        total_commits: int | None = None
+        last_pr_title: str | None = None
+        last_pr_user: str | None = None
+        last_pr_merged_at: str | None = None
 
 
-class RepoDetail(RepoListItem):
-    """Detailed repository info for edit page."""
-    org: str | None = None
-    embedding_model: str | None = None
-    embedding_version: int | None = None
-    last_commit_hash: str | None = None
-    last_pr_merged_at: str | None = None
+    class RepoDetail(RepoListItem):
+        """Detailed repository info for edit page."""
+        org: str | None = None
+        embedding_model: str | None = None
+        embedding_version: int | None = None
+        last_commit_hash: str | None = None
+        # Note: last_pr_merged_at is already inherited from RepoListItem
+except Exception as _model_err:
+    print(f"[SERVER] ❌ CRITICAL: Failed to define RepoDetail/RepoUpdateRequest: {_model_err}", file=sys.stderr)
+    # Fallback: define minimal versions so endpoints still register
+    class RepoUpdateRequest(BaseModel):  # type: ignore[no-redef]
+        org: str | None = None
+    class RepoDetail(BaseModel):  # type: ignore[no-redef]
+        repo_id: str
+        name: str | None = None
+        status: str = "unknown"
 
 
 @app.get("/api/v1/repos/{repo_id}", response_model=RepoDetail)
