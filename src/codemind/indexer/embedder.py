@@ -35,6 +35,24 @@ logger = logging.getLogger(__name__)
 class EmbeddingProvider(ABC):
     """Abstract base class for embedding providers."""
     
+    def _truncate_texts(self, texts: List[str], max_tokens: int) -> List[str]:
+        """Truncate texts to approximate max_tokens length (safety net).
+        
+        The chunker should normally produce texts within limits.
+        This is a last-resort safety net for API-based providers
+        to prevent token-limit errors. Uses ~4 chars/token estimate.
+        """
+        char_limit = max_tokens * 4
+        result = []
+        for t in texts:
+            if len(t) > char_limit:
+                logger.warning(f"[EMBEDDING] Truncating text from {len(t)} to {char_limit} chars "
+                               f"(max_tokens={max_tokens}). Consider adjusting chunker settings.")
+                result.append(t[:char_limit])
+            else:
+                result.append(t)
+        return result
+    
     @abstractmethod
     def get_embedding_dim(self) -> int:
         pass
@@ -78,11 +96,12 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 class ApigeeEmbeddingProvider(EmbeddingProvider):
     """Apigee-hosted embedding API."""
     
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, max_tokens: int = 512):
         if not ApigeeTokenManager:
             raise ImportError("ApigeeTokenManager not available")
             
         self.model_name = model_name
+        self.max_tokens = max_tokens
         self.token_manager = ApigeeTokenManager()
         self.base_url = os.environ.get("ENTERPRISE_BASE_URL")
         
@@ -96,7 +115,7 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
 
         # Use EMBEDDING_DIMENSION (same env var as LanceDB schema) for consistency
         self.embedding_dim = int(os.getenv("EMBEDDING_DIMENSION", "768"))
-        logger.info(f"[EMBEDDING] Initialized Apigee provider for model {model_name} (assumed dim: {self.embedding_dim})")
+        logger.info(f"[EMBEDDING] Initialized Apigee provider for model {model_name} (max_tokens={max_tokens}, dim={self.embedding_dim})")
 
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
@@ -118,8 +137,9 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
             "Content-Type": "application/json"
         }
         
-        # Replace newlines as recommended by OpenAI for embeddings
-        cleaned_texts = [t.replace("\n", " ") for t in texts]
+        # Truncate to max_tokens and replace newlines
+        truncated = self._truncate_texts(texts, self.max_tokens)
+        cleaned_texts = [t.replace("\n", " ") for t in truncated]
         
         async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
             response = await client.post(
@@ -164,8 +184,9 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
 class RemoteEmbeddingProvider(EmbeddingProvider):
     """Remote embedding API (OpenAI-compatible)."""
     
-    def __init__(self, model_name: str):
+    def __init__(self, model_name: str, max_tokens: int = 512):
         self.model_name = model_name
+        self.max_tokens = max_tokens
         self.base_url = os.environ.get("EMBEDDING_API_URL")
         self.api_key = os.environ.get("EMBEDDING_API_KEY")
         
@@ -174,7 +195,7 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
             
         # Auto-detect dimension via probe request, fall back to EMBEDDING_DIMENSION env
         self.embedding_dim = self._detect_dimension()
-        logger.info(f"[EMBEDDING] Initialized Remote provider for model {model_name} at {self.base_url} (dim: {self.embedding_dim})")
+        logger.info(f"[EMBEDDING] Initialized Remote provider for model {model_name} at {self.base_url} (max_tokens={max_tokens}, dim={self.embedding_dim})")
 
     def _detect_dimension(self) -> int:
         """Detect embedding dimension by sending a probe request to the remote API."""
@@ -209,8 +230,9 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         
-        # Replace newlines as recommended by OpenAI for embeddings
-        cleaned_texts = [t.replace("\n", " ") for t in texts]
+        # Truncate to max_tokens and replace newlines
+        truncated = self._truncate_texts(texts, self.max_tokens)
+        cleaned_texts = [t.replace("\n", " ") for t in truncated]
         
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
@@ -255,15 +277,15 @@ class EmbeddingGenerator:
         logger.info(f"[EMBEDDING] Initializing {self.provider_type} provider for {self.model_name}")
         
         if self.provider_type == "apigee":
-            self.provider = ApigeeEmbeddingProvider(self.model_name)
+            self.provider = ApigeeEmbeddingProvider(self.model_name, self.max_tokens)
         elif self.provider_type == "remote":
-            self.provider = RemoteEmbeddingProvider(self.model_name)
+            self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
         elif self.provider_type == "local":
             self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
         elif os.environ.get("EMBEDDING_API_URL"):
             # Fallback: use remote if API URL is set and provider type is unrecognized
             logger.info(f"[EMBEDDING] Unknown provider '{self.provider_type}', using remote (EMBEDDING_API_URL is set)")
-            self.provider = RemoteEmbeddingProvider(self.model_name)
+            self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
         else:
             self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
             

@@ -902,9 +902,16 @@ class PlaybookExecutor:
                              if tool_name == "save_catalog_entry":
                                  state["logs"].append(f"Executing tool: {tool_name}")
                                  
-                                 # inject repo_id if missing or template
-                                 if not params.get("repo_id") or params.get("repo_id") == "{{repo_id}}":
-                                     params["repo_id"] = state["user_input"].get("repo_id")
+                                 # Always enforce the real repo_id from user_input
+                                 # to maintain consistency across manifest/catalog/lancedb.
+                                 # If the LLM generated a friendly name, preserve it as repo_name.
+                                 real_repo_id = state["user_input"].get("repo_id")
+                                 if real_repo_id:
+                                     llm_repo_id = params.get("repo_id", "")
+                                     if llm_repo_id and llm_repo_id != real_repo_id and not params.get("repo_name"):
+                                         # LLM likely used a friendly name as repo_id — save it as repo_name
+                                         params["repo_name"] = llm_repo_id
+                                     params["repo_id"] = real_repo_id
                                  
                                  # Inject metadata from context if available
                                  context = state["user_input"].get("context", {})

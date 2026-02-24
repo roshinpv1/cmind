@@ -20,15 +20,21 @@ class ASTChunker:
     Falls back to character-based chunking for files without AST support.
     """
 
-    def __init__(self, max_chunk_chars: int = 2000, overlap_lines: int = 2, min_chunk_chars: int = 50):
+    def __init__(self, max_chunk_chars: int | None = None, overlap_lines: int = 2, min_chunk_chars: int = 50):
         """
         Initialize AST chunker.
 
         Args:
-            max_chunk_chars: Max characters per chunk (large symbols get split)
+            max_chunk_chars: Max characters per chunk. If None, derived from
+                             EMBEDDING_MAX_TOKENS env var (tokens × 4 chars/token).
+                             Defaults to 2048 (512 tokens × 4).
             overlap_lines: Lines of overlap for split large symbols
             min_chunk_chars: Minimum characters for a chunk to be kept
         """
+        import os
+        if max_chunk_chars is None:
+            max_tokens = int(os.getenv("EMBEDDING_MAX_TOKENS", "512"))
+            max_chunk_chars = max_tokens * 4  # ~4 chars per token
         self.max_chunk_chars = max_chunk_chars
         self.overlap_lines = overlap_lines
         self.min_chunk_chars = min_chunk_chars
@@ -207,7 +213,9 @@ class ASTChunker:
         lines = content.split("\n")
         chunks = []
         i = 0
-        chunk_size_lines = 40  # ~40 lines per chunk
+        # Use max_chunk_chars to derive line count (~40 chars/line average)
+        avg_chars_per_line = max(1, sum(len(l) for l in lines) // max(1, len(lines))) if lines else 40
+        chunk_size_lines = max(5, self.max_chunk_chars // avg_chars_per_line)
 
         while i < len(lines):
             end = min(i + chunk_size_lines, len(lines))

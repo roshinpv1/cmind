@@ -701,6 +701,41 @@ class CatalogSearchRequest(BaseModel):
     min_score: float = 0.8
 
 
+@app.get("/api/v1/catalogs/list")
+async def list_catalog_entries():
+    """List all catalog entries."""
+    from codemind.storage.database import CatalogStore
+    import json as _json
+    
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    results = []
+    with db_inst.get_session() as session:
+        entries = session.query(CatalogStore).order_by(CatalogStore.updated_at.desc()).all()
+        for entry in entries:
+            meta = {}
+            if entry.metadata_json:
+                meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else _json.loads(entry.metadata_json)
+            
+            results.append({
+                "repo_id": entry.repo_id,
+                "repo_name": entry.repo_name or entry.repo_id,
+                "org": entry.org or "",
+                "description": meta.get("summary_high_level", "")[:200],
+                "tech_stack": meta.get("tech_stack", ""),
+                "category": meta.get("category", ""),
+                "quality_score": meta.get("quality_score", 0),
+                "topics": meta.get("topics", []),
+                "repo_url": meta.get("repo_url", ""),
+                "branch": meta.get("branch", ""),
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at,
+            })
+    
+    return results
+
+
 @app.post("/api/v1/catalogs")
 async def create_catalog_entry(request: CatalogCreateRequest):
     """

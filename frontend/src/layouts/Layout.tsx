@@ -5,6 +5,7 @@ import {
     Search,
     Library,
     LayoutDashboard,
+    BookOpen,
     Menu,
     X
 } from "lucide-react";
@@ -18,6 +19,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         { name: "Dashboard", href: "/admin", icon: LayoutDashboard },
         { name: "Index Repo", href: "/admin/index", icon: Database },
         { name: "Repositories", href: "/admin/repos", icon: Library },
+        { name: "Catalogs", href: "/admin/catalogs", icon: BookOpen },
     ];
 
     return (
