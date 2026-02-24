@@ -484,14 +484,20 @@ class RepoDetail(RepoListItem):
     last_pr_merged_at: str | None = None
 
 
-@app.get("/api/v1/repos/{repo_id}", response_model=RepoDetail)
+@app.get("/api/v1/repos/{repo_id:path}", response_model=RepoDetail)
 async def get_repo_detail(repo_id: str):
     """Get detailed info for a single repository."""
+    from urllib.parse import unquote
+    repo_id = unquote(repo_id)  # Handle URL-encoded IDs
+    
+    print(f"[SERVER] get_repo_detail called with repo_id='{repo_id}' (len={len(repo_id)})")
+    
     manifest: ManifestManager = app.state.manifest
     r = manifest.get_repository_by_id(repo_id)
     
     if r:
         # Found in manifest
+        print(f"[SERVER] Found repo in manifest: {r.repo_id}")
         path_parts = str(r.repo_path).split("/")
         name = path_parts[-2] if len(path_parts) >= 2 and path_parts[-2] != "repos" else "unknown"
         branch = path_parts[-1] if len(path_parts) >= 2 else "unknown"
@@ -517,12 +523,18 @@ async def get_repo_detail(repo_id: str):
         )
 
     # Fallback: check catalog_store (for enterprise-indexed repos)
+    print(f"[SERVER] Repo not in manifest, checking catalog_store...")
     from codemind.storage.database import CatalogStore
-    db = app.state.lance_storage  # need the Database instance
     db_inst = manifest.db
     with db_inst.get_session() as session:
+        # Debug: list all catalog repo_ids
+        all_catalogs = session.query(CatalogStore).all()
+        catalog_ids = [c.repo_id for c in all_catalogs]
+        print(f"[SERVER] Catalog repo_ids in DB: {catalog_ids}")
+        
         catalog = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
         if catalog:
+            print(f"[SERVER] Found repo in catalog_store: {catalog.repo_id}")
             import json as _json
             meta = {}
             if catalog.metadata_json:
@@ -553,12 +565,16 @@ async def get_repo_detail(repo_id: str):
                 last_commit_hash=None,
             )
 
+    print(f"[SERVER] ❌ Repo '{repo_id}' not found in manifest or catalog")
     raise HTTPException(status_code=404, detail="Repository not found in manifest or catalog")
 
 
-@app.put("/api/v1/repos/{repo_id}")
+@app.put("/api/v1/repos/{repo_id:path}")
 async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
     """Update repository metadata."""
+    from urllib.parse import unquote
+    repo_id = unquote(repo_id)
+    
     manifest: ManifestManager = app.state.manifest
     r = manifest.get_repository_by_id(repo_id)
     
