@@ -133,6 +133,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CodeMind API", version="0.1.0", lifespan=lifespan)
 
 
+# Debug middleware: log all incoming requests to /repos endpoints
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+
+class RepoDebugMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if "/repos" in path:
+            print(f"[MIDDLEWARE] {request.method} {path} (full URL: {request.url})")
+        response = await call_next(request)
+        if "/repos" in path:
+            print(f"[MIDDLEWARE] → Response status: {response.status_code}")
+        return response
+
+app.add_middleware(RepoDebugMiddleware)
+
+
 @app.post("/api/v1/index", response_model=IndexResponse)
 async def index_repository(request: IndexRequest):
     """Start indexing a repository (queues a job for the worker)."""
@@ -484,7 +501,7 @@ class RepoDetail(RepoListItem):
     last_pr_merged_at: str | None = None
 
 
-@app.get("/api/v1/repos/{repo_id:path}", response_model=RepoDetail)
+@app.get("/api/v1/repos/{repo_id}", response_model=RepoDetail)
 async def get_repo_detail(repo_id: str):
     """Get detailed info for a single repository."""
     from urllib.parse import unquote
@@ -569,7 +586,7 @@ async def get_repo_detail(repo_id: str):
     raise HTTPException(status_code=404, detail="Repository not found in manifest or catalog")
 
 
-@app.put("/api/v1/repos/{repo_id:path}")
+@app.put("/api/v1/repos/{repo_id}")
 async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
     """Update repository metadata."""
     from urllib.parse import unquote
