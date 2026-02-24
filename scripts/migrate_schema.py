@@ -2,11 +2,13 @@
 Schema migration script for CodeMind SQLite database.
 
 Adds missing columns to existing tables without losing data.
+Also backfills NULL org values with random org assignments.
 Run: python3 scripts/migrate_schema.py [--db-path data/codemind.db]
 
 Safe to run multiple times — only adds columns that don't already exist.
 """
 import argparse
+import random
 import sqlite3
 import sys
 from pathlib import Path
@@ -143,6 +145,9 @@ def main():
         print(f"\n{'='*40}")
         print(f"Migration complete! {total_added} column(s) added.")
         
+        # Backfill NULL org values with random assignments
+        backfill_org_values(cursor, conn)
+        
         # Verify final state
         print(f"\n--- Final Schema ---")
         for table_name in EXPECTED_COLUMNS:
@@ -151,6 +156,47 @@ def main():
                 print(f"{table_name}: {sorted(cols)}")
     
     conn.close()
+
+
+ORG_VALUES = ["CT", "DTI", "CTO"]
+
+
+def backfill_org_values(cursor, conn):
+    """Randomly assign org values to rows with NULL org."""
+    print(f"\n--- Backfilling org values ---")
+    
+    tables = ["repository_manifests", "catalog_store"]
+    for table in tables:
+        if table not in get_existing_tables(cursor):
+            continue
+        
+        # Check if org column exists
+        cols = get_existing_columns(cursor, table)
+        if "org" not in cols:
+            print(f"  ⚠️  {table}: no 'org' column, skipping")
+            continue
+        
+        # Get rows with NULL org
+        cursor.execute(f"SELECT rowid FROM {table} WHERE org IS NULL")
+        null_rows = cursor.fetchall()
+        
+        if not null_rows:
+            print(f"  ✓ {table}: no NULL org values")
+            continue
+        
+        # Update each row with a random org
+        for (rowid,) in null_rows:
+            org = random.choice(ORG_VALUES)
+            cursor.execute(f"UPDATE {table} SET org = ? WHERE rowid = ?", (org, rowid))
+        
+        conn.commit()
+        print(f"  ✅ {table}: assigned random org to {len(null_rows)} row(s)")
+        
+        # Show distribution
+        cursor.execute(f"SELECT org, COUNT(*) FROM {table} GROUP BY org")
+        dist = cursor.fetchall()
+        for org_val, count in dist:
+            print(f"      {org_val}: {count}")
 
 
 if __name__ == "__main__":
