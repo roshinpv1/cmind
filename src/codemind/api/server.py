@@ -508,35 +508,24 @@ async def list_repos():
     return results
 
 
-try:
-    class RepoUpdateRequest(BaseModel):
-        """Request to update repository metadata."""
-        org: str | None = None
-        repo_url: str | None = None
-        branch: str | None = None
-        first_author: str | None = None
-        total_commits: int | None = None
-        last_pr_title: str | None = None
-        last_pr_user: str | None = None
-        last_pr_merged_at: str | None = None
+class RepoUpdateRequest(BaseModel):
+    """Request to update repository metadata."""
+    org: str | None = None
+    repo_url: str | None = None
+    branch: str | None = None
+    first_author: str | None = None
+    total_commits: int | None = None
+    last_pr_title: str | None = None
+    last_pr_user: str | None = None
+    last_pr_merged_at: str | None = None
 
 
-    class RepoDetail(RepoListItem):
-        """Detailed repository info for edit page."""
-        org: str | None = None
-        embedding_model: str | None = None
-        embedding_version: int | None = None
-        last_commit_hash: str | None = None
-        # Note: last_pr_merged_at is already inherited from RepoListItem
-except Exception as _model_err:
-    print(f"[SERVER] ❌ CRITICAL: Failed to define RepoDetail/RepoUpdateRequest: {_model_err}", file=sys.stderr)
-    # Fallback: define minimal versions so endpoints still register
-    class RepoUpdateRequest(BaseModel):  # type: ignore[no-redef]
-        org: str | None = None
-    class RepoDetail(BaseModel):  # type: ignore[no-redef]
-        repo_id: str
-        name: str | None = None
-        status: str = "unknown"
+class RepoDetail(RepoListItem):
+    """Detailed repository info for edit page."""
+    org: str | None = None
+    embedding_model: str | None = None
+    embedding_version: int | None = None
+    last_commit_hash: str | None = None
 
 
 @app.get("/api/v1/repos/{repo_id}", response_model=RepoDetail)
