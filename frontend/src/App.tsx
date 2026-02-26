@@ -5,6 +5,7 @@ import RepoIndex from "./pages/admin/RepoIndex";
 import CatalogCreate from "./pages/admin/CatalogCreate";
 import CatalogList from "./pages/admin/CatalogList";
 import RepoEdit from "./pages/admin/RepoEdit";
+import ProposalCreate from "./pages/admin/ProposalCreate";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
 
@@ -24,6 +25,7 @@ function App() {
         <Route path="/admin/index" element={<AdminLayout><RepoIndex /></AdminLayout>} />
         <Route path="/admin/catalogs" element={<AdminLayout><CatalogList /></AdminLayout>} />
         <Route path="/admin/catalog/create" element={<AdminLayout><CatalogCreate /></AdminLayout>} />
+        <Route path="/admin/catalogs/propose" element={<AdminLayout><ProposalCreate /></AdminLayout>} />
 
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />

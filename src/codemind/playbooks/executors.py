@@ -3,7 +3,7 @@ Playbook Executor - Prompt-based playbook execution.
 
 New architecture:
 1. Linear mode (default): search → LLM → format → END
-2. ReAct mode (code_explorer): agent ↔ tools loop until done
+2. ReAct mode (explore_codebase): agent ↔ tools loop until done
 
 All playbooks use same executor, different modes.
 """
@@ -167,7 +167,7 @@ class PlaybookExecutor:
     
     Supports two modes:
     1. Linear (default): search → LLM → format → END
-    2. ReAct (code_explorer): agent ↔ tools cyclic loop
+    2. ReAct (explore_codebase): agent ↔ tools cyclic loop
     """
     
     def __init__(self, registry, tools, llm_client):
@@ -464,7 +464,7 @@ class PlaybookExecutor:
                     elif output_schema:
                         # JSON-response playbooks: provide a concrete example 
                         # Local LLMs need to see actual populated values, not just field names.
-                        if playbook.name == "build_vs_buy":
+                        if playbook.name == "evaluate_build_vs_reuse":
                             prompt_suffix += (
                                 '\n\nIMPORTANT: You MUST return a JSON object. Here is an EXAMPLE of the expected format '
                                 '(use real data from RETRIEVED CODE above, not these example values):\n'
@@ -631,7 +631,7 @@ class PlaybookExecutor:
                             and code_context.strip()):
                         for retry in range(2):
                             print(f"[EXECUTOR] ⚠️ Output too short ({len(output)} chars), retry {retry + 1}/2 with temp=0.7")
-                            if playbook.name == "build_vs_buy":
+                            if playbook.name == "evaluate_build_vs_reuse":
                                 nudge = (
                                     "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
                                     "The RETRIEVED CODE section above contains catalog entries that you MUST reference.\n"
@@ -736,7 +736,7 @@ class PlaybookExecutor:
             # Try Pydantic schema validation first
             output_schema = get_schema_for_playbook(playbook.name)
             validated_data = None
-            if output_schema and playbook.name != "catalog_generator":
+            if output_schema and playbook.name != "generate_catalog":
                 try:
                     from ..llm.chat_wrapper import _parse_structured_output
                     validated_data = _parse_structured_output(output_text, output_schema)
@@ -963,7 +963,7 @@ class PlaybookExecutor:
 
             state["logs"].append(f"Success: {playbook.name}")
             
-            # If we parsed valid JSON but didn't execute a tool (e.g. catalog_search report),
+            # If we parsed valid JSON but didn't execute a tool (e.g. search_catalogs report),
             # ensure the output result is the clean JSON string.
             if not tool_executed and 'parsed_data' in locals() and parsed_data:
                 import json

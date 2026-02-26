@@ -1,5 +1,5 @@
-# Playbook: build_vs_buy
-name: build_vs_buy
+# Playbook: evaluate_build_vs_reuse
+name: evaluate_build_vs_reuse
 description: Analyzes a user requirement and compares the cost/effort of building from scratch vs reusing existing catalog components.
 
 ## Description

@@ -49,6 +49,8 @@ interface CatalogResult {
     estimated_cost: number;
     business_functionalities: string[];
     reasoning?: string; // Appears during Discovery Agent mode
+    status?: string;
+    source_gap?: string;
 }
 
 function QualityBadge({ score }: { score: number }) {
@@ -186,6 +188,28 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                     <div className="shrink-0 text-right space-y-2">
                         <QualityBadge score={item.quality_score} />
                         <ScoreBar score={item.score} />
+                        {(rawItem.status === "proposed" || rawItem.status === "qualified") && (
+                            <div className="flex flex-col items-end gap-1.5 mt-2">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 ring-1 ring-amber-200">
+                                    <Sparkles className="h-3 w-3" />
+                                    Proposed
+                                </span>
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        const params = new URLSearchParams({
+                                            gap_name: item.repo_name,
+                                            repo_id: item.repo_id,
+                                            contribute: "true",
+                                        });
+                                        window.location.href = `/admin/catalogs/propose?${params.toString()}`;
+                                    }}
+                                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm transition-colors"
+                                >
+                                    ⚡ Contribute
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>
@@ -414,6 +438,7 @@ export default function AgentCatalogSearch() {
     const [discoveryJobId, setDiscoveryJobId] = useState<string | null>(null);
     const [discoveryLogs, setDiscoveryLogs] = useState<string[]>([]);
     const [discoveryResult, setDiscoveryResult] = useState<any>(null);
+    const [proposedGapMatches, setProposedGapMatches] = useState<Record<string, any>>({});
 
     // Build vs Reuse State (separate from discovery)
     const [bvrJobId, setBvrJobId] = useState<string | null>(null);
@@ -452,6 +477,24 @@ export default function AgentCatalogSearch() {
                                 }
                                 console.log("[BvR] Result data:", resultData);
                                 setDiscoveryResult(resultData);
+
+                                // Check gaps against proposed catalog entries
+                                const gaps = resultData?.answer?.gaps || [];
+                                if (gaps.length > 0) {
+                                    try {
+                                        const matchRes = await fetch("/api/v1/catalogs/match-gaps", {
+                                            method: "POST",
+                                            headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ gaps }),
+                                        });
+                                        if (matchRes.ok) {
+                                            const matchData = await matchRes.json();
+                                            setProposedGapMatches(matchData);
+                                        }
+                                    } catch (e) {
+                                        console.warn("Failed to match gaps to proposed entries", e);
+                                    }
+                                }
                             }
                         }
                     }
@@ -507,7 +550,7 @@ export default function AgentCatalogSearch() {
                 body: JSON.stringify({
                     goal: query,
                     max_iterations: 15,
-                    allowed_playbooks: ["build_vs_buy"]
+                    allowed_playbooks: ["evaluate_build_vs_reuse"]
                 }),
             });
             if (res.ok) {
@@ -540,7 +583,7 @@ export default function AgentCatalogSearch() {
 
         if (searchMode === "discovery") {
             try {
-                const playbook = "solution_architect";
+                const playbook = "design_solution";
                 const res = await fetch("/api/v1/agents/autonomous", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -1028,17 +1071,63 @@ export default function AgentCatalogSearch() {
                                                                             </div>
                                                                         );
                                                                     })}
-                                                                    {lGaps.map((g: any, i: number) => (
-                                                                        <div
-                                                                            key={`gap-${i}`}
-                                                                            className="flex items-center gap-2 px-3 py-2 bg-white/50 rounded-lg border-2 border-dashed border-gray-300 hover:border-amber-400 transition-colors"
-                                                                            title={g.description || "Needs custom development"}
-                                                                        >
-                                                                            <div className="h-2 w-2 rounded-full bg-amber-400 shrink-0 animate-pulse" />
-                                                                            <span className="text-xs font-bold text-gray-500">{safeStr(g.name || g)}</span>
-                                                                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">Gap</span>
-                                                                        </div>
-                                                                    ))}
+                                                                    {lGaps.map((g: any, i: number) => {
+                                                                        const gapKey = safeStr(g.name || g);
+                                                                        const proposedMatch = proposedGapMatches[gapKey];
+                                                                        const isProposed = !!proposedMatch;
+                                                                        return (
+                                                                            <div
+                                                                                key={`gap-${i}`}
+                                                                                className={`flex items-center gap-2 px-3 py-2 bg-white/50 rounded-lg border-2 border-dashed cursor-pointer transition-all group ${isProposed
+                                                                                    ? "border-violet-300 hover:border-violet-500 hover:bg-violet-50/50"
+                                                                                    : "border-amber-300 hover:border-amber-500 hover:bg-amber-50/50"
+                                                                                    }`}
+                                                                                title={isProposed
+                                                                                    ? `Proposed by ${proposedMatch.created_by || "someone"} — click to contribute`
+                                                                                    : (g.description || "Click to create a proposal for this gap")
+                                                                                }
+                                                                                onClick={() => {
+                                                                                    if (isProposed) {
+                                                                                        // Navigate to promote/contribute page for existing proposal
+                                                                                        const params = new URLSearchParams({
+                                                                                            gap_name: gapKey,
+                                                                                            repo_id: proposedMatch.repo_id,
+                                                                                            contribute: "true",
+                                                                                        });
+                                                                                        window.location.href = `/admin/catalogs/propose?${params.toString()}`;
+                                                                                    } else {
+                                                                                        const params = new URLSearchParams({
+                                                                                            gap_name: gapKey,
+                                                                                            gap_description: safeStr(g.description || ""),
+                                                                                            architecture_layer: safeStr(g.architecture_layer || layer),
+                                                                                            user_query: query,
+                                                                                        });
+                                                                                        if (g.build_cost_usd) params.set("build_cost_usd", String(g.build_cost_usd));
+                                                                                        if (g.dev_weeks) params.set("dev_weeks", String(g.dev_weeks));
+                                                                                        window.location.href = `/admin/catalogs/propose?${params.toString()}`;
+                                                                                    }
+                                                                                }}
+                                                                            >
+                                                                                <div className={`h-2 w-2 rounded-full shrink-0 ${isProposed ? "bg-violet-500" : "bg-amber-400 animate-pulse"}`} />
+                                                                                <span className="text-xs font-bold text-gray-500">{gapKey}</span>
+                                                                                {isProposed ? (
+                                                                                    <>
+                                                                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700">Proposed</span>
+                                                                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                                            ⚡ Contribute
+                                                                                        </span>
+                                                                                    </>
+                                                                                ) : (
+                                                                                    <>
+                                                                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600">Gap</span>
+                                                                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-50 text-violet-600 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                                                            + Propose
+                                                                                        </span>
+                                                                                    </>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
                                                                 </div>
                                                             </div>
                                                         );
@@ -1339,8 +1428,26 @@ export default function AgentCatalogSearch() {
                                 </div>
                             )}
 
-                            {/* Empty / Error State */}
-                            {!loading && hasSearched && (!discoveryResult || !discoveryResult.answer || !discoveryResult.answer.catalog_matches) && (
+                            {/* Fallback: answer is a plain string (not structured JSON) */}
+                            {!loading && discoveryResult && discoveryResult.answer && typeof discoveryResult.answer === "string" && (
+                                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-6 space-y-4">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <Bot className="h-5 w-5 text-primary" />
+                                        <h3 className="text-lg font-black text-gray-900">Discovery Analysis</h3>
+                                    </div>
+                                    <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap leading-relaxed">
+                                        {discoveryResult.answer}
+                                    </div>
+                                    <div className="flex items-center gap-3 pt-3 border-t border-gray-100 text-xs text-gray-400">
+                                        <span>Playbooks: {discoveryResult.playbooks_used?.join(", ") || "—"}</span>
+                                        <span>·</span>
+                                        <span>{discoveryResult.iterations || 0} iterations</span>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Empty / Error State — only when truly no answer */}
+                            {!loading && hasSearched && (!discoveryResult || !discoveryResult.answer) && (
                                 <div className="flex flex-col items-center justify-center py-20 text-center">
                                     <h3 className="text-lg font-bold text-gray-700">Discovery Completed</h3>
                                     <p className="text-sm text-gray-500 mt-2">Could not synthesize architecture or find matches.</p>

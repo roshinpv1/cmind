@@ -1,5 +1,5 @@
-# Playbook: solution_architect
-name: solution_architect
+# Playbook: design_solution
+name: design_solution
 description: Synthesizes a multi-component architecture by analyzing user intent and searching the catalog for existing building blocks.
 
 ## Description

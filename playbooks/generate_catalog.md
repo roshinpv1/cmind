@@ -1,5 +1,5 @@
-# Playbook: catalog_generator
-name: catalog_generator
+# Playbook: generate_catalog
+name: generate_catalog
 description: Analyzes a repository to generate a comprehensive catalog entry describing its purpose, architecture, tech stack, and quality assessment.
 
 ## Description

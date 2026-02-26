@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, model_validator
 # ─── Catalog Generator ──────────────────────────────────────────────────────
 
 class CatalogGeneratorOutput(BaseModel):
-    """Structured output for catalog_generator playbook."""
+    """Structured output for generate_catalog playbook."""
     repo_id: str = Field(description="Repository identifier")
     repo_name: str = Field(description="Human-readable project name")
     repo_url: str = Field(default="", description="Repository URL")
@@ -76,7 +76,7 @@ class CatalogMatch(BaseModel):
 
 
 class CatalogSearchOutput(BaseModel):
-    """Structured output for catalog_search playbook."""
+    """Structured output for search_catalogs playbook."""
     requirement_summary: str = Field(default="", description="Summary of the requirement")
     capabilities: Any = Field(
         default_factory=lambda: {"functional": [], "non_functional": []},
@@ -117,7 +117,7 @@ class CodeAnalyzerOutput(BaseModel):
 # ─── Code Explorer (ReAct) ──────────────────────────────────────────────────
 
 class CodeExplorerOutput(BaseModel):
-    """Structured output for code_explorer ReAct playbook."""
+    """Structured output for explore_codebase ReAct playbook."""
     summary: str = Field(description="Direct answer to the question")
     analysis: str = Field(description="Detailed walkthrough of findings")
     key_files: list[str] = Field(default_factory=list, description="Relevant files with their roles")
@@ -128,14 +128,14 @@ class CodeExplorerOutput(BaseModel):
 # ─── Solution Architect ──────────────────────────────────────────────────────
 
 class SolutionArchitectOutput(CatalogSearchOutput):
-    """Structured output for solution_architect playbook."""
+    """Structured output for design_solution playbook."""
     pass
 
 
 # ─── SVP Analyzer ────────────────────────────────────────────────────────────
 
 class SvpAnalyzerOutput(BaseModel):
-    """Structured output for svp_analyzer playbook."""
+    """Structured output for analyze_svp playbook."""
     product_name: str = Field(default="", description="Name of the software product")
     domain: str = Field(default="", description="Business domain")
     executive_summary: str = Field(default="", description="Executive overview")
@@ -152,12 +152,12 @@ class SvpAnalyzerOutput(BaseModel):
 # ─── Schema Registry ────────────────────────────────────────────────────────
 
 PLAYBOOK_SCHEMAS: dict[str, type[BaseModel]] = {
-    "catalog_generator": CatalogGeneratorOutput,
-    "catalog_search": CatalogSearchOutput,
+    "generate_catalog": CatalogGeneratorOutput,
+    "search_catalogs": CatalogSearchOutput,
     "code_analyzer": CodeAnalyzerOutput,
-    "code_explorer": CodeExplorerOutput,
-    "solution_architect": SolutionArchitectOutput,
-    "svp_analyzer": SvpAnalyzerOutput,
+    "explore_codebase": CodeExplorerOutput,
+    "design_solution": SolutionArchitectOutput,
+    "analyze_svp": SvpAnalyzerOutput,
 }
 
 

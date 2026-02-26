@@ -1,5 +1,5 @@
-# Playbook: svp_analyzer
-name: svp_analyzer
+# Playbook: analyze_svp
+name: analyze_svp
 description: Performs comprehensive software product analysis — extracts business functionalities, modules, integrations, impact areas, and modernization scope for product and tech teams.
 
 ## Description

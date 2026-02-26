@@ -100,7 +100,7 @@ class PlannerAgent:
     
     The LLM decides what to do by making tool calls. Each tool call is 
     automatically dispatched by ToolNode. Playbooks are exposed as 
-    "meta-tools" (playbook_catalog_search, playbook_code_analyzer, etc.).
+    "meta-tools" (playbook_search_catalogs, playbook_code_analyzer, etc.).
     
     This eliminates:
     - _parse_action() regex parsing
@@ -141,14 +141,14 @@ class PlannerAgent:
         if allowed_playbooks:
             relevant = set()
             PLAYBOOK_TOOLS = {
-                "catalog_search": {"search_catalogs"},
-                "catalog_generator": {"search_codebase", "save_catalog_entry"},
+                "search_catalogs": {"search_catalogs"},
+                "generate_catalog": {"search_codebase", "save_catalog_entry"},
                 "code_analyzer": {"search_codebase", "read_file", "search_symbol",
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
-                "code_explorer": {"search_codebase", "read_file", "search_symbol",
+                "explore_codebase": {"search_codebase", "read_file", "search_symbol",
                                  "get_callers", "get_callees", "get_dependencies", "list_files"},
-                "solution_architect": {"search_catalogs"},
-                "build_vs_buy": {"search_catalogs"},
+                "design_solution": {"search_catalogs"},
+                "evaluate_build_vs_reuse": {"search_catalogs"},
             }
             for pb in allowed_playbooks:
                 relevant |= PLAYBOOK_TOOLS.get(pb, set())
@@ -251,7 +251,7 @@ class PlannerAgent:
             '"tool_executed":true',
         ]
         # Also auto-finish when a playbook returns a large structured JSON result
-        # (e.g. svp_analyzer, tech_debt_analyzer, build_vs_buy, etc.)
+        # (e.g. analyze_svp, analyze_tech_debt, evaluate_build_vs_reuse, etc.)
         json_completion_keys = [
             "report_markdown", "executive_summary", "product_name",
             "overall_health_score", "findings",
@@ -422,10 +422,10 @@ class PlannerAgent:
         if allowed_playbooks:
             return allowed_playbooks[0]
         available = self.registry.list_playbooks()
-        for preferred in ["catalog_search", "code_analyzer"]:
+        for preferred in ["search_catalogs", "code_analyzer"]:
             if preferred in available:
                 return preferred
-        return available[0] if available else "catalog_search"
+        return available[0] if available else "search_catalogs"
     
     async def _finish(self, state: PlannerState) -> dict:
         """

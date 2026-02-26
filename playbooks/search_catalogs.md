@@ -1,5 +1,5 @@
-# Playbook: catalog_search
-name: catalog_search
+# Playbook: search_catalogs
+name: search_catalogs
 description: Searches the software catalog to find components that satisfy a specific build requirement or software need.
 
 ## Description

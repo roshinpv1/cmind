@@ -177,8 +177,8 @@ export default function ChatInterface() {
                             <option value="auto">🤖 Auto-Pilot (Let Agent Decide)</option>
                             <option value="code_analyzer">💻 Deep Code Analysis</option>
                             <option value="catalog_browser">📚 Catalog Search</option>
-                            <option value="catalog_generator">🏗️ Catalog Generator</option>
-                            <option value="svp_analyzer">📊 SVP Product Analyzer</option>
+                            <option value="generate_catalog">🏗️ Catalog Generator</option>
+                            <option value="analyze_svp">📊 SVP Product Analyzer</option>
                         </select>
                     </div>
                 </div>
@@ -249,7 +249,7 @@ export default function ChatInterface() {
                                 className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent font-sans"
                                 placeholder={
                                     selectedPlaybook === 'catalog_browser' ? "Search for architectural patterns or repo features..." :
-                                        selectedPlaybook === 'catalog_generator' ? "Analyze repo and generate catalog entry..." :
+                                        selectedPlaybook === 'generate_catalog' ? "Analyze repo and generate catalog entry..." :
                                             "Describe your coding task or question..."
                                 }
                                 value={goal}

@@ -1,5 +1,5 @@
-# Playbook: code_explorer
-name: code_explorer
+# Playbook: explore_codebase
+name: explore_codebase
 description: Multi-hop code exploration agent that iteratively searches, reads, and traces code to answer deep analysis questions.
 
 ## Description

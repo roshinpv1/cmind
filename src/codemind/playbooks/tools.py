@@ -448,6 +448,72 @@ class PlaybookTools:
                 "repo_name": repo_name,
                 "metadata": json.dumps(metadata)
             })
+        
+        # Supplement with proposed/qualified entries from SQLite (not in LanceDB)
+        existing_rids = {r["repo_id"] for r in results}
+        if self.db:
+            try:
+                import json as _json
+                with self.db.get_session() as session:
+                    proposed_entries = session.query(CatalogStore).filter(
+                        CatalogStore.status.in_(["proposed", "qualified"])
+                    ).all()
+                    for entry in proposed_entries:
+                        if entry.repo_id in existing_rids:
+                            continue
+                        # Keyword match: check if any query word appears in repo_name, source_gap, or content
+                        entry_text = f"{entry.repo_name or ''} {entry.source_gap or ''} {entry.content or ''}".lower()
+                        match_score = 0.0
+                        for q in queries:
+                            q_words = q.lower().split()
+                            matched_words = sum(1 for w in q_words if w in entry_text)
+                            word_score = matched_words / max(len(q_words), 1)
+                            match_score = max(match_score, word_score * 0.5)  # Cap at 0.5 for keyword matches
+                        
+                        if match_score < 0.1:
+                            continue
+                        
+                        try:
+                            content_obj = _json.loads(entry.content) if entry.content else {}
+                        except:
+                            content_obj = {}
+                        
+                        meta = entry.metadata_json or {}
+                        meta["status"] = entry.status
+                        meta["source_gap"] = entry.source_gap
+                        
+                        repo_name = entry.repo_name or entry.repo_id
+                        parts = [
+                            f"CATALOG ENTRY: {repo_name} [PROPOSED]",
+                            f"Status: {entry.status}",
+                            f"Relevance Score: {match_score:.2f}",
+                        ]
+                        if entry.source_gap:
+                            parts.append(f"Source Gap: {entry.source_gap}")
+                        desc = content_obj.get("description", "")
+                        if desc:
+                            parts.append(f"Description: {desc}")
+                        if meta.get("tech_stack"):
+                            parts.append(f"Tech Stack: {meta['tech_stack']}")
+                        
+                        results.append({
+                            "file_path": f"catalog://{entry.repo_id}",
+                            "chunk_text": "\n".join(parts),
+                            "score": match_score,
+                            "start_line": 0,
+                            "end_line": 0,
+                            "repo_id": entry.repo_id,
+                            "repo_name": repo_name,
+                            "metadata": _json.dumps(meta),
+                            "status": entry.status,
+                        })
+                        existing_rids.add(entry.repo_id)
+            except Exception as e:
+                print(f"[WARN] Failed to supplement with proposed entries: {e}")
+        
+        # Re-sort by score and limit
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results = results[:limit]
             
         return results
 

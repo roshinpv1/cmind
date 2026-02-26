@@ -1,5 +1,5 @@
-# Playbook: tech_debt_analyzer
-name: tech_debt_analyzer
+# Playbook: analyze_tech_debt
+name: analyze_tech_debt
 description: Analyzes a repository to identify and assess technical debt, code smells, and areas needing refactoring.
 
 ## Description

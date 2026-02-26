@@ -14,6 +14,7 @@ import functools
 
 from datetime import UTC, datetime
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from codemind.jobs import JobManager, JobStatus
@@ -148,6 +149,16 @@ _original_print = print
 print = functools.partial(_original_print, flush=True)
 
 app = FastAPI(title="CodeMind API", version="0.1.0", lifespan=lifespan)
+
+# CORS middleware — allow frontend dev server (Vite) to make API calls
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # Debug middleware: log all incoming requests to /repos endpoints
@@ -762,8 +773,8 @@ class CatalogSearchRequest(BaseModel):
 
 
 @app.get("/api/v1/catalogs/list")
-async def list_catalog_entries():
-    """List all catalog entries."""
+async def list_catalog_entries(status: str | None = None):
+    """List catalog entries, optionally filtered by status."""
     from codemind.storage.database import CatalogStore
     import json as _json
     
@@ -772,7 +783,10 @@ async def list_catalog_entries():
     
     results = []
     with db_inst.get_session() as session:
-        entries = session.query(CatalogStore).order_by(CatalogStore.updated_at.desc()).all()
+        query = session.query(CatalogStore)
+        if status:
+            query = query.filter(CatalogStore.status == status)
+        entries = query.order_by(CatalogStore.updated_at.desc()).all()
         for entry in entries:
             meta = {}
             if entry.metadata_json:
@@ -785,15 +799,423 @@ async def list_catalog_entries():
                 "description": meta.get("summary_high_level", "")[:200],
                 "tech_stack": meta.get("tech_stack", ""),
                 "category": meta.get("category", ""),
-                "quality_score": meta.get("quality_score", 0),
+                "quality_score": entry.quality_score or meta.get("quality_score", 0),
                 "topics": meta.get("topics", []),
-                "repo_url": meta.get("repo_url", ""),
-                "branch": meta.get("branch", ""),
+                "repo_url": entry.git_url or meta.get("repo_url", ""),
+                "branch": entry.git_branch or meta.get("branch", ""),
+                "status": getattr(entry, 'status', 'active') or 'active',
+                "created_by": getattr(entry, 'created_by', None),
+                "source_gap": getattr(entry, 'source_gap', None),
+                "created_at": entry.created_at,
+                "updated_at": entry.updated_at,
+                "contributors": meta.get("contributors", []),
+            })
+    
+    return results
+
+
+class ProposalRequest(BaseModel):
+    """Request to create a proposal from a gap."""
+    gap_name: str
+    gap_description: str
+    architecture_layer: str | None = None
+    user_query: str | None = None
+    org: str | None = None
+    created_by: str | None = None
+    source_analysis_id: str | None = None
+    build_cost_usd: int | None = None
+    dev_weeks: int | None = None
+
+
+class ProposalRequirementsUpdate(BaseModel):
+    """Request to update proposal requirements."""
+    requirements: dict
+
+
+class PromoteRequest(BaseModel):
+    """Request to promote a proposal."""
+    git_url: str
+    git_branch: str | None = "main"
+    quality_score: int | None = None
+
+
+@app.post("/api/v1/catalogs/propose")
+async def create_proposal(request: ProposalRequest):
+    """Create a proposed catalog entry from a gap, auto-generating requirements via LLM."""
+    import uuid
+    import time
+    import json
+    from codemind.storage.database import CatalogStore
+    
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    # --- Deduplication check: reject if ≥75% matching component exists ---
+    gap_name_lower = request.gap_name.lower().strip()
+    gap_words = set(gap_name_lower.split())
+    
+    with db_inst.get_session() as session:
+        all_entries = session.query(CatalogStore).all()
+        for entry in all_entries:
+            entry_name = (entry.repo_name or entry.source_gap or "").lower().strip()
+            entry_words = set(entry_name.split())
+            
+            if not gap_words or not entry_words:
+                continue
+            
+            # Word overlap score
+            overlap = len(gap_words & entry_words) / max(len(gap_words), 1)
+            
+            # Substring match bonus
+            if gap_name_lower in entry_name or entry_name in gap_name_lower:
+                overlap = max(overlap, 0.9)
+            
+            if overlap >= 0.75:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": f"A similar component already exists: '{entry.repo_name}' ({entry.status or 'active'})",
+                        "existing_entry": {
+                            "repo_id": entry.repo_id,
+                            "repo_name": entry.repo_name,
+                            "status": entry.status or "active",
+                            "match_score": round(overlap, 2),
+                        }
+                    }
+                )
+    
+    # Generate a unique repo_id for the proposal
+    proposal_id = f"proposed-{uuid.uuid4().hex[:12]}"
+    
+    # Auto-generate requirements via LLM
+    requirements = {}
+    try:
+        from codemind.llm.factory import get_chat_model
+        llm = get_chat_model()
+        
+        req_prompt = (
+            f"Generate detailed software requirements for a component called '{request.gap_name}'.\n\n"
+            f"Description: {request.gap_description}\n"
+        )
+        if request.architecture_layer:
+            req_prompt += f"Architecture Layer: {request.architecture_layer}\n"
+        if request.user_query:
+            req_prompt += f"Original User Need: {request.user_query}\n"
+        if request.build_cost_usd:
+            req_prompt += f"Estimated Build Cost: ${request.build_cost_usd}\n"
+        if request.dev_weeks:
+            req_prompt += f"Estimated Dev Weeks: {request.dev_weeks}\n"
+        
+        req_prompt += (
+            "\n\nGenerate a JSON object with these fields:\n"
+            "{\n"
+            '  "functional_requirements": ["list of functional requirements"],\n'
+            '  "non_functional_requirements": ["list of NFRs like performance, security"],\n'
+            '  "api_contracts": ["list of API endpoints/contracts needed"],\n'
+            '  "data_model": "description of data model needed",\n'
+            '  "integration_points": ["list of integration points with other systems"],\n'
+            '  "acceptance_criteria": ["list of acceptance criteria"],\n'
+            '  "tech_stack_suggestion": "suggested technology stack",\n'
+            '  "estimated_effort": "effort estimate"\n'
+            "}\n\n"
+            "Return ONLY the JSON object, no other text."
+        )
+        
+        raw_output = await llm.ainvoke(req_prompt)
+        raw_text = raw_output.content if hasattr(raw_output, 'content') else str(raw_output)
+        
+        # Parse JSON from LLM output
+        import re
+        json_match = re.search(r'```json\s*({.*?})\s*```', raw_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'({[\s\S]*})', raw_text)
+        if json_match:
+            requirements = json.loads(json_match.group(1))
+        else:
+            requirements = {"raw_response": raw_text}
+            
+    except Exception as e:
+        print(f"[PROPOSAL] Failed to auto-generate requirements: {e}")
+        requirements = {
+            "functional_requirements": [f"Implement {request.gap_name}"],
+            "non_functional_requirements": [],
+            "api_contracts": [],
+            "data_model": "",
+            "integration_points": [],
+            "acceptance_criteria": [],
+            "error": f"Auto-generation failed: {str(e)}"
+        }
+    
+    # Build content JSON (similar to catalog entry format)
+    content = {
+        "product_name": request.gap_name,
+        "summary_high_level": request.gap_description,
+        "architecture_layer": request.architecture_layer or "Unknown",
+        "category": "Proposed Component",
+        "tech_stack": requirements.get("tech_stack_suggestion", "TBD"),
+        "quality_score": 0,
+        "requirements": requirements,
+    }
+    if request.build_cost_usd:
+        content["estimated_cost"] = request.build_cost_usd
+    if request.dev_weeks:
+        content["dev_weeks"] = request.dev_weeks
+    
+    # Save to catalog_store
+    now = int(time.time())
+    with db_inst.get_session() as session:
+        entry = CatalogStore(
+            repo_id=proposal_id,
+            repo_name=request.gap_name,
+            org=request.org,
+            content=json.dumps(content),
+            metadata_json=content,
+            status="proposed",
+            created_by=request.created_by,
+            source_gap=request.gap_name,
+            source_analysis_id=request.source_analysis_id,
+            requirements=requirements,
+            quality_score=0,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(entry)
+        session.commit()
+    
+    return {
+        "repo_id": proposal_id,
+        "status": "proposed",
+        "gap_name": request.gap_name,
+        "requirements": requirements,
+        "content": content,
+    }
+
+
+@app.get("/api/v1/catalogs/proposed")
+async def list_proposed_entries(org: str | None = None):
+    """List all proposed catalog entries."""
+    from codemind.storage.database import CatalogStore
+    import json as _json
+    
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    results = []
+    with db_inst.get_session() as session:
+        query = session.query(CatalogStore).filter(CatalogStore.status.in_(["proposed", "qualified"]))
+        if org:
+            query = query.filter(CatalogStore.org == org)
+        entries = query.order_by(CatalogStore.updated_at.desc()).all()
+        for entry in entries:
+            meta = {}
+            if entry.metadata_json:
+                meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else _json.loads(entry.metadata_json)
+            
+            results.append({
+                "repo_id": entry.repo_id,
+                "repo_name": entry.repo_name or entry.repo_id,
+                "org": entry.org or "",
+                "description": meta.get("summary_high_level", "")[:200],
+                "architecture_layer": meta.get("architecture_layer", ""),
+                "status": entry.status,
+                "created_by": getattr(entry, 'created_by', None),
+                "source_gap": getattr(entry, 'source_gap', None),
+                "requirements": getattr(entry, 'requirements', None),
+                "git_url": getattr(entry, 'git_url', None),
+                "git_branch": getattr(entry, 'git_branch', None),
+                "quality_score": entry.quality_score,
                 "created_at": entry.created_at,
                 "updated_at": entry.updated_at,
             })
     
     return results
+
+
+@app.post("/api/v1/catalogs/match-gaps")
+async def match_gaps_to_proposed(request: Request):
+    """Check if any gaps match existing proposed/qualified catalog entries.
+    Returns a mapping of gap_name -> proposed_entry."""
+    body = await request.json()
+    gaps = body.get("gaps", [])
+    if not gaps:
+        return {}
+    
+    from codemind.storage.database import CatalogStore
+    db = app.state.job_manager.db
+    if not db:
+        return {}
+    
+    matches = {}
+    with db.get_session() as session:
+        proposed = session.query(CatalogStore).filter(
+            CatalogStore.status.in_(["proposed", "qualified"])
+        ).all()
+        
+        for gap in gaps:
+            gap_name = (gap.get("name", gap) if isinstance(gap, dict) else str(gap)).lower()
+            gap_words = set(gap_name.split())
+            best_match = None
+            best_score = 0
+            
+            for entry in proposed:
+                entry_name = (entry.repo_name or entry.source_gap or "").lower()
+                entry_words = set(entry_name.split())
+                
+                # Check for word overlap
+                if not gap_words or not entry_words:
+                    continue
+                overlap = len(gap_words & entry_words) / max(len(gap_words), 1)
+                
+                # Also check substring match
+                if gap_name in entry_name or entry_name in gap_name:
+                    overlap = max(overlap, 0.8)
+                
+                if overlap > best_score and overlap >= 0.3:
+                    best_score = overlap
+                    best_match = entry
+            
+            if best_match:
+                import json as _json
+                key = gap.get("name", gap) if isinstance(gap, dict) else str(gap)
+                matches[key] = {
+                    "repo_id": best_match.repo_id,
+                    "repo_name": best_match.repo_name,
+                    "status": best_match.status,
+                    "source_gap": best_match.source_gap,
+                    "created_by": best_match.created_by,
+                    "match_score": round(best_score, 2),
+                }
+    
+    return matches
+
+
+@app.put("/api/v1/catalogs/{repo_id}/requirements")
+async def update_proposal_requirements(repo_id: str, request: ProposalRequirementsUpdate):
+    """Update requirements for a proposed catalog entry."""
+    import time
+    from urllib.parse import unquote
+    from codemind.storage.database import CatalogStore
+    
+    repo_id = unquote(repo_id)
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    with db_inst.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Catalog entry not found")
+        if getattr(entry, 'status', 'active') == "active":
+            raise HTTPException(status_code=400, detail="Cannot update requirements for active catalog entries")
+        
+        entry.requirements = request.requirements
+        entry.updated_at = int(time.time())
+        
+        # Also update content JSON with requirements
+        import json
+        try:
+            content = json.loads(entry.content) if isinstance(entry.content, str) else entry.content
+            content["requirements"] = request.requirements
+            entry.content = json.dumps(content)
+        except:
+            pass
+        
+        session.commit()
+    
+    return {"repo_id": repo_id, "status": "updated", "requirements": request.requirements}
+@app.post("/api/v1/catalogs/{repo_id}/contribute")
+async def contribute_to_proposal(repo_id: str, request: Request):
+    """Record a contributor's UID and Org against an existing proposed catalog entry."""
+    import time
+    import json
+    from codemind.storage.database import CatalogStore
+    
+    body = await request.json()
+    uid = body.get("uid", "").strip()
+    org = body.get("org", "").strip()
+    
+    if not uid:
+        raise HTTPException(status_code=400, detail="uid is required")
+    
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    with db_inst.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        
+        # Append to contributors list in metadata
+        meta = dict(entry.metadata_json or {})  # copy to ensure new object
+        contributors = list(meta.get("contributors", []))
+        # Avoid duplicate contributor
+        already = any(c.get("uid") == uid for c in contributors)
+        if not already:
+            contributors.append({
+                "uid": uid,
+                "org": org,
+                "contributed_at": int(time.time()),
+            })
+            meta["contributors"] = contributors
+            entry.metadata_json = meta
+            entry.updated_at = int(time.time())
+            # Force SQLAlchemy to detect JSON column change
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(entry, "metadata_json")
+            session.commit()
+    
+    return {"repo_id": repo_id, "status": "contributed", "uid": uid, "org": org}
+
+
+@app.put("/api/v1/catalogs/{repo_id}/promote")
+async def promote_proposal(repo_id: str, request: PromoteRequest):
+    """Promote a proposed catalog entry by adding Git info and optionally qualifying it."""
+    import time
+    from urllib.parse import unquote
+    from codemind.storage.database import CatalogStore
+    
+    repo_id = unquote(repo_id)
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+    
+    with db_inst.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Catalog entry not found")
+        
+        entry.git_url = request.git_url
+        entry.git_branch = request.git_branch or "main"
+        entry.updated_at = int(time.time())
+        
+        if request.quality_score is not None:
+            entry.quality_score = request.quality_score
+        
+        # Determine new status based on quality
+        quality = entry.quality_score or 0
+        if quality >= 60 and request.git_url:
+            entry.status = "active"
+        elif request.git_url:
+            entry.status = "qualified"
+        
+        # Update metadata with git info
+        import json
+        try:
+            meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else json.loads(entry.metadata_json or "{}")
+            meta["repo_url"] = request.git_url
+            meta["branch"] = request.git_branch
+            entry.metadata_json = meta
+        except:
+            pass
+        
+        new_status = entry.status
+        session.commit()
+    
+    return {
+        "repo_id": repo_id,
+        "status": new_status,
+        "git_url": request.git_url,
+        "git_branch": request.git_branch,
+        "quality_score": request.quality_score,
+    }
 
 
 @app.post("/api/v1/catalogs")
@@ -967,7 +1389,9 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
             "branch": metadata.get("branch", ""),
             "org": metadata.get("org", ""),
             "estimated_cost": metadata.get("estimated_cost", 0),
-            "business_functionalities": metadata.get("business_functionalities", [])
+            "business_functionalities": metadata.get("business_functionalities", []),
+            "status": item.get("status", metadata.get("status", "active")),
+            "source_gap": metadata.get("source_gap", "")
         }
         
         # Coerce None values to safe defaults (metadata.get returns None when key exists but value is None)

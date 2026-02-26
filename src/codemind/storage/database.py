@@ -66,6 +66,7 @@ class CatalogStore(Base):
     """
     Store full catalog entries for retrieval.
     Decoupled from vector store to avoid context window limits.
+    Supports lifecycle: proposed → qualified → active
     """
     __tablename__ = "catalog_store"
 
@@ -75,6 +76,16 @@ class CatalogStore(Base):
     org: Mapped[str | None] = mapped_column(String, nullable=True)  # Organization owning this component
     content: Mapped[str] = mapped_column(Text)  # Full JSON/Markdown content
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Structured metadata
+    
+    # Proposal lifecycle
+    status: Mapped[str] = mapped_column(String, default="active", index=True)  # proposed | qualified | active
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)  # Who created the proposal
+    source_gap: Mapped[str | None] = mapped_column(String, nullable=True)  # Original gap name from analysis
+    source_analysis_id: Mapped[str | None] = mapped_column(String, nullable=True)  # Links to analysis job
+    requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Auto-generated requirements
+    git_url: Mapped[str | None] = mapped_column(String, nullable=True)  # Git repo URL (for promotion)
+    git_branch: Mapped[str | None] = mapped_column(String, nullable=True)  # Git branch
+    quality_score: Mapped[int] = mapped_column(Integer, default=0)  # 0-100, computed during qualification
     
     created_at: Mapped[int] = mapped_column(Integer, default=0) # timestamp
     updated_at: Mapped[int] = mapped_column(Integer, default=0)

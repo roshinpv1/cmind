@@ -5,7 +5,7 @@ Proxies requests to the running CodeMind FastAPI server.
 
 Tools:
   Code Intelligence:
-    - catalog_search  — semantic search across all repo catalogs
+    - catalog_search  — semantic search across all repo catalogs (search_catalogs playbook)
     - code_search     — semantic/hybrid search over indexed code
     - catalog_browse  — get full catalog for a specific repo
 
