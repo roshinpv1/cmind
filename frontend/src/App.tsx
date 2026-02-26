@@ -6,6 +6,7 @@ import CatalogCreate from "./pages/admin/CatalogCreate";
 import CatalogList from "./pages/admin/CatalogList";
 import RepoEdit from "./pages/admin/RepoEdit";
 import ProposalCreate from "./pages/admin/ProposalCreate";
+import Dashboard from "./pages/admin/Dashboard";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
 
@@ -19,7 +20,8 @@ function App() {
         <Route path="/reasoning-lab" element={<UserLayout><ChatInterface /></UserLayout>} />
 
         {/* Admin Routes */}
-        <Route path="/admin" element={<AdminLayout><RepoList /></AdminLayout>} />
+        <Route path="/admin" element={<AdminLayout><Dashboard /></AdminLayout>} />
+        <Route path="/admin/dashboard" element={<AdminLayout><Dashboard /></AdminLayout>} />
         <Route path="/admin/repos" element={<AdminLayout><RepoList /></AdminLayout>} />
         <Route path="/admin/repos/:repoId/edit" element={<AdminLayout><RepoEdit /></AdminLayout>} />
         <Route path="/admin/index" element={<AdminLayout><RepoIndex /></AdminLayout>} />
