@@ -91,7 +91,7 @@ class ApigeeDriver(LLMDriver):
     async def generate(self, prompt: str, **kwargs) -> str:
         token = await self.token_manager.get_token()
         
-        enterprise_base_url = self.config.base_url or os.environ.get("ENTERPRISE_BASE_URL")
+        enterprise_base_url = (self.config.base_url or os.environ.get("ENTERPRISE_BASE_URL", "")).rstrip("/")
         wf_use_case_id = os.environ.get("WF_USE_CASE_ID")
         wf_client_id = os.environ.get("WF_CLIENT_ID")
         wf_api_key = os.environ.get("WF_API_KEY")
@@ -99,12 +99,27 @@ class ApigeeDriver(LLMDriver):
         if not all([enterprise_base_url, wf_use_case_id, wf_client_id, wf_api_key]):
             raise ValueError("Apigee enterprise configuration incomplete")
 
+        # Normalize URL: avoid duplicating /v1/chat/completions
+        if enterprise_base_url.endswith("/v1/chat/completions"):
+            api_url = enterprise_base_url
+        elif enterprise_base_url.endswith("/v1"):
+            api_url = f"{enterprise_base_url}/chat/completions"
+        else:
+            api_url = f"{enterprise_base_url}/v1/chat/completions"
+
         # Build messages with optional system prompt
         messages = []
         system_prompt = kwargs.pop("system_prompt", None)
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+
+        # Cap max_tokens to APIGEE model output limit
+        apigee_max_output = int(os.environ.get("APIGEE_MAX_OUTPUT_TOKENS", "8192"))
+        max_tokens = min(
+            kwargs.get("max_tokens", self.config.max_tokens),
+            apigee_max_output
+        )
 
         headers = {
             "x-wf-request-date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -117,34 +132,28 @@ class ApigeeDriver(LLMDriver):
             "Content-Type": "application/json"
         }
 
+        request_body = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.temperature),
+            "max_tokens": max_tokens
+        }
+
+        print(f"[APIGEE] POST {api_url} | model={self.config.model} | max_tokens={max_tokens}", flush=True)
+
         async with httpx.AsyncClient(timeout=self.config.timeout, verify=False) as client:
-            response = await client.post(
-                f"{enterprise_base_url}/v1/chat/completions",
-                headers=headers,
-                json={
-                    "model": self.config.model,
-                    "messages": messages,
-                    "temperature": kwargs.get("temperature", self.config.temperature),
-                    "max_tokens": kwargs.get("max_tokens", self.config.max_tokens)
-                }
-            )
+            response = await client.post(api_url, headers=headers, json=request_body)
             
             if response.status_code == 401:
                 # Retry once after clearing token
                 self.token_manager.clear_token()
                 token = await self.token_manager.get_token()
                 headers["Authorization"] = f"Bearer {token}"
-                response = await client.post(
-                    f"{enterprise_base_url}/v1/chat/completions",
-                    headers=headers,
-                    json={
-                        "model": self.config.model,
-                        "messages": messages,
-                        "temperature": kwargs.get("temperature", self.config.temperature),
-                        "max_tokens": kwargs.get("max_tokens", self.config.max_tokens)
-                    }
-                )
+                response = await client.post(api_url, headers=headers, json=request_body)
 
+            if response.status_code != 200:
+                error_body = response.text[:500]
+                print(f"[APIGEE] Error {response.status_code}: {error_body}", flush=True)
             response.raise_for_status()
             data = response.json()
             return data["choices"][0]["message"]["content"]
