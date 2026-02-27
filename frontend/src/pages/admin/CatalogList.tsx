@@ -12,6 +12,7 @@ import {
     GitBranch,
     CheckCircle2,
     Users,
+    Trash2,
 } from "lucide-react";
 
 interface CatalogEntry {
@@ -100,6 +101,21 @@ export default function CatalogList() {
     };
 
     useEffect(() => { fetchCatalogs(statusFilter || undefined); }, [statusFilter]);
+
+    const deleteCatalog = async (repoId: string, name: string) => {
+        if (!window.confirm(`Are you sure you want to delete "${name}"? This cannot be undone.`)) return;
+        try {
+            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(repoId)}`, { method: "DELETE" });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: "Delete failed" }));
+                alert(err.detail || "Delete failed");
+                return;
+            }
+            fetchCatalogs(statusFilter || undefined);
+        } catch {
+            alert("Failed to delete catalog entry");
+        }
+    };
 
     const counts = {
         "": entries.length,
@@ -293,6 +309,15 @@ export default function CatalogList() {
                                                     >
                                                         <Globe className="w-4 h-4" />
                                                     </Link>
+                                                    {(entry.status === "proposed" || entry.status === "qualified") && (
+                                                        <button
+                                                            onClick={() => deleteCatalog(entry.repo_id, entry.repo_name || entry.repo_id)}
+                                                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors"
+                                                            title="Delete entry"
+                                                        >
+                                                            <Trash2 className="w-4 h-4" />
+                                                        </button>
+                                                    )}
                                                 </div>
                                             </td>
                                         </tr>

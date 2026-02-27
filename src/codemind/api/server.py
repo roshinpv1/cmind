@@ -1079,7 +1079,10 @@ async def match_gaps_to_proposed(request: Request):
             
             if best_match:
                 import json as _json
-                key = gap.get("name", gap) if isinstance(gap, dict) else str(gap)
+                if isinstance(gap, dict):
+                    key = str(gap.get("name") or gap.get("description") or gap.get("component_name") or _json.dumps(gap))
+                else:
+                    key = str(gap)
                 matches[key] = {
                     "repo_id": best_match.repo_id,
                     "repo_name": best_match.repo_name,
@@ -1220,6 +1223,34 @@ async def promote_proposal(repo_id: str, request: PromoteRequest):
         "quality_score": request.quality_score,
     }
 
+
+@app.delete("/api/v1/catalogs/{repo_id}")
+async def delete_catalog_entry(repo_id: str):
+    """Delete a proposed catalog entry."""
+    from codemind.storage.database import CatalogStore
+    db = app.state.job_manager.db
+    if not db:
+        raise HTTPException(status_code=500, detail="Database not available")
+    
+    with db.get_session() as session:
+        entry = session.query(CatalogStore).filter(
+            CatalogStore.repo_id == repo_id
+        ).first()
+        
+        if not entry:
+            raise HTTPException(status_code=404, detail=f"Catalog entry '{repo_id}' not found")
+        
+        if entry.status not in ("proposed", "qualified"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot delete catalog with status '{entry.status}'. Only proposed/qualified entries can be deleted."
+            )
+        
+        entry_name = entry.repo_name or entry.repo_id
+        session.delete(entry)
+        session.commit()
+    
+    return {"message": f"Catalog entry '{entry_name}' deleted successfully", "repo_id": repo_id}
 
 @app.post("/api/v1/catalogs")
 async def create_catalog_entry(request: CatalogCreateRequest):
