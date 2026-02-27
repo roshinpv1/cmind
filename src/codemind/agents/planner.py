@@ -445,8 +445,26 @@ class PlannerAgent:
             if obs.get("success") and obs.get("outputs"):
                 outputs = obs["outputs"]
                 if isinstance(outputs, dict):
-                    if "result" in outputs:
-                        playbook_output = outputs["result"]
+                    # Prefer structured "data" dict (Pydantic-validated) over raw "result" string
+                    structured_data = outputs.get("data")
+                    if isinstance(structured_data, dict) and any(
+                        k in structured_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")
+                    ):
+                        playbook_output = structured_data
+                    elif "result" in outputs:
+                        # Try to parse result string as JSON to get structured data
+                        result_val = outputs["result"]
+                        if isinstance(result_val, str):
+                            try:
+                                parsed_result = json.loads(result_val)
+                                if isinstance(parsed_result, dict):
+                                    playbook_output = parsed_result
+                                else:
+                                    playbook_output = result_val
+                            except (json.JSONDecodeError, TypeError):
+                                playbook_output = result_val
+                        else:
+                            playbook_output = result_val
                     elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
                         playbook_output = outputs
                     
@@ -465,8 +483,25 @@ class PlannerAgent:
                     try:
                         parsed = json.loads(content)
                         if isinstance(parsed, dict):
-                            if "result" in parsed:
-                                playbook_output = parsed["result"]
+                            # Prefer structured "data" dict if present
+                            struct_data = parsed.get("data")
+                            if isinstance(struct_data, dict) and any(
+                                k in struct_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")
+                            ):
+                                playbook_output = struct_data
+                            elif "result" in parsed:
+                                result_val = parsed["result"]
+                                if isinstance(result_val, str):
+                                    try:
+                                        inner = json.loads(result_val)
+                                        if isinstance(inner, dict):
+                                            playbook_output = inner
+                                        else:
+                                            playbook_output = result_val
+                                    except (json.JSONDecodeError, TypeError):
+                                        playbook_output = result_val
+                                else:
+                                    playbook_output = result_val
                             elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
                                 playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
