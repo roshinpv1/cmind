@@ -921,8 +921,13 @@ async def create_proposal(request: ProposalRequest):
             "Return ONLY the JSON object, no other text."
         )
         
-        raw_output = await llm.ainvoke(req_prompt)
-        raw_text = raw_output.content if hasattr(raw_output, 'content') else str(raw_output)
+        # Use a small max_tokens — requirement generation doesn't need 100K
+        from langchain_core.messages import HumanMessage as _HumanMessage
+        raw_output = await llm._agenerate_impl(
+            [_HumanMessage(content=req_prompt)],
+            max_tokens=4096
+        )
+        raw_text = raw_output.generations[0].message.content if raw_output.generations else ""
         
         # Parse JSON from LLM output
         import re
@@ -935,7 +940,9 @@ async def create_proposal(request: ProposalRequest):
             requirements = {"raw_response": raw_text}
             
     except Exception as e:
+        import traceback
         print(f"[PROPOSAL] Failed to auto-generate requirements: {e}")
+        traceback.print_exc()
         requirements = {
             "functional_requirements": [f"Implement {request.gap_name}"],
             "non_functional_requirements": [],
