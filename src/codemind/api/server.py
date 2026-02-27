@@ -1052,7 +1052,10 @@ async def match_gaps_to_proposed(request: Request):
         ).all()
         
         for gap in gaps:
-            gap_name = (gap.get("name", gap) if isinstance(gap, dict) else str(gap)).lower()
+            if isinstance(gap, dict):
+                gap_name = str(gap.get("name") or gap.get("description") or gap.get("component_name") or "").lower()
+            else:
+                gap_name = str(gap).lower()
             gap_words = set(gap_name.split())
             best_match = None
             best_score = 0
