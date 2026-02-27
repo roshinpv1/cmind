@@ -91,7 +91,7 @@ class ApigeeDriver(LLMDriver):
     async def generate(self, prompt: str, **kwargs) -> str:
         token = await self.token_manager.get_token()
         
-        enterprise_base_url = os.environ.get("ENTERPRISE_BASE_URL")
+        enterprise_base_url = self.config.base_url or os.environ.get("ENTERPRISE_BASE_URL")
         wf_use_case_id = os.environ.get("WF_USE_CASE_ID")
         wf_client_id = os.environ.get("WF_CLIENT_ID")
         wf_api_key = os.environ.get("WF_API_KEY")

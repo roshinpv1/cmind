@@ -652,6 +652,8 @@ class PlannerAgent:
         print(f"[PLANNER] Goal: {goal}")
         print(f"[PLANNER] Repo: {repo_id or 'ALL'}")
         if allowed_playbooks:
+            # Normalize to lowercase — playbook names are always lowercase
+            allowed_playbooks = [p.lower().strip() for p in allowed_playbooks]
             print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
         print(f"{'='*60}")
         
