@@ -1,149 +1,154 @@
 {
     "info": {
-        "_postman_id": "codemind-api-collection",
         "name": "CodeMind API",
-        "description": "CodeMind v2 — AI-Powered Code Intelligence Platform\n\nArchitecture:\n- API Server: handles search, agents, graph queries, job queuing\n- Indexing Worker: standalone process that polls for pending jobs and executes indexing\n- MCP Server: exposes tools via Model Context Protocol for Claude Desktop / Cursor\n\nFeatures:\n- Repository indexing (local path + Git URL) via job queue\n- Semantic & hybrid code search\n- Autonomous LangGraph agents with playbook-based reasoning\n- SQLite graph queries (callers, callees, dependencies)\n- Catalogs for high-level repository documentation\n- System health & stats",
+        "description": "Complete API collection for CodeMind — AI-powered code intelligence platform.\n\nBase URL: {{base_url}} (default: http://localhost:8000)",
         "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
     },
     "variable": [
         {
             "key": "base_url",
             "value": "http://localhost:8000",
-            "description": "CodeMind server base URL"
+            "type": "string"
         },
         {
             "key": "repo_id",
-            "value": "c03b42a23b1fdc85",
-            "description": "Default repo ID for testing (set after indexing)"
+            "value": "",
+            "type": "string"
         },
         {
             "key": "job_id",
             "value": "",
-            "description": "Job ID from indexing"
-        },
-        {
-            "key": "agent_job_id",
-            "value": "",
-            "description": "Job ID from autonomous agent execution"
+            "type": "string"
         }
     ],
     "item": [
         {
-            "name": "1. Indexing",
-            "description": "Index repositories from local folders or Git URLs.\n\nThe API queues a job and returns immediately. The standalone Indexing Worker picks up pending jobs and executes them.\n\nRun the worker: `python -m codemind.worker.index_worker`",
+            "name": "Health & Debug",
             "item": [
                 {
-                    "name": "Index Local Folder",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('job_id', jsonData.job_id);",
-                                    "pm.collectionVariables.set('repo_id', jsonData.repo_id);",
-                                    "pm.test('Index request accepted', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_path\": \"/path/to/your/local/project\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/index",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "index"
-                            ]
-                        },
-                        "description": "Queue indexing for a local folder. The repo_path must be an absolute path to an existing directory.\n\nReturns job_id and repo_id immediately. The Indexing Worker will pick up this job.\nUse 'Get Job Status' to poll progress."
-                    }
-                },
-                {
-                    "name": "Index Git URL",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('job_id', jsonData.job_id);",
-                                    "pm.collectionVariables.set('repo_id', jsonData.repo_id);",
-                                    "pm.test('Index request accepted', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_url\": \"https://github.com/fastapi/fastapi.git\",\n  \"branch\": \"master\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/index",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "index"
-                            ]
-                        },
-                        "description": "Queue indexing for a Git repository by URL. The Worker will clone the repo locally.\n\nSupported: GitHub, GitLab, Bitbucket, or any Git URL.\nDefault branch: main"
-                    }
-                },
-                {
-                    "name": "List Repositories",
+                    "name": "Health Check",
                     "request": {
                         "method": "GET",
+                        "header": [],
                         "url": {
-                            "raw": "{{base_url}}/api/v1/repos",
+                            "raw": "{{base_url}}/api/v1/health",
                             "host": [
                                 "{{base_url}}"
                             ],
                             "path": [
                                 "api",
                                 "v1",
-                                "repos"
+                                "health"
                             ]
                         },
-                        "description": "List all indexed repositories with metadata.\n\nResponse includes: repo_id, name, branch, path, repo_url, status, total_files, last_indexed, first_author, total_commits, last_pr_title, last_pr_user, last_pr_merged_at"
+                        "description": "Check API health, embedding model, and embedding dimensions."
+                    }
+                },
+                {
+                    "name": "Debug Routes",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/debug/routes",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "debug",
+                                "routes"
+                            ]
+                        },
+                        "description": "List all registered API routes."
+                    }
+                },
+                {
+                    "name": "System Stats",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/stats",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "stats"
+                            ]
+                        },
+                        "description": "Get system statistics — total/pending/running/completed/failed jobs."
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Indexing",
+            "item": [
+                {
+                    "name": "Index Repository (Local Path)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_path\": \"/path/to/local/repo\",\n  \"branch\": \"main\",\n  \"org\": \"my-org\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/index",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "index"
+                            ]
+                        },
+                        "description": "Start indexing a local repository. Returns a job_id for tracking."
+                    }
+                },
+                {
+                    "name": "Index Repository (Git URL)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"repo_url\": \"https://github.com/owner/repo.git\",\n  \"branch\": \"main\",\n  \"org\": \"my-org\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/index",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "index"
+                            ]
+                        },
+                        "description": "Start indexing a remote Git repository. Returns a job_id for tracking."
                     }
                 },
                 {
                     "name": "Get Job Status",
                     "request": {
                         "method": "GET",
+                        "header": [],
                         "url": {
                             "raw": "{{base_url}}/api/v1/jobs/{{job_id}}",
                             "host": [
@@ -156,14 +161,13 @@
                                 "{{job_id}}"
                             ]
                         },
-                        "description": "Poll indexing job status.\n\nStatuses:\n- pending: queued, waiting for the Indexing Worker to pick up\n- running: Worker is actively indexing\n- completed: indexing finished successfully\n- failed: indexing failed (see error field)\n\nIncludes: stage, progress (0-100), error (if failed), repo_id"
+                        "description": "Get the status of an indexing job."
                     }
                 }
             ]
         },
         {
-            "name": "2. Search",
-            "description": "Search indexed codebases using semantic vectors or hybrid (vector + graph) modes.",
+            "name": "Search",
             "item": [
                 {
                     "name": "Semantic Search",
@@ -177,7 +181,7 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"query\": \"authentication functions\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"semantic\",\n  \"limit\": 10\n}"
+                            "raw": "{\n  \"query\": \"authentication middleware\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"limit\": 10,\n  \"search_mode\": \"hybrid\",\n  \"filters\": null,\n  \"expand_context\": true\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/search",
@@ -190,11 +194,11 @@
                                 "search"
                             ]
                         },
-                        "description": "Pure semantic search using embedding vectors.\n\nReturns: chunk_text, file_path, start_line, score (0-1, higher is better), context (classes/functions)"
+                        "description": "Semantic/hybrid search across indexed code. Modes: semantic, structural, hybrid."
                     }
                 },
                 {
-                    "name": "Hybrid Search with Filters",
+                    "name": "Graph Query",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -205,86 +209,170 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"query\": \"API endpoints\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"hybrid\",\n  \"filters\": {\n    \"file_types\": [\".py\"],\n    \"file_patterns\": [\"api\", \"routes\"],\n    \"exclude_patterns\": [\"test_\"]\n  },\n  \"limit\": 10\n}"
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"classes\",\n  \"pattern\": \"Service\",\n  \"file_type\": null,\n  \"class_name\": null,\n  \"symbol_name\": null\n}"
                         },
                         "url": {
-                            "raw": "{{base_url}}/api/v1/search",
+                            "raw": "{{base_url}}/api/v1/graph/query",
                             "host": [
                                 "{{base_url}}"
                             ],
                             "path": [
                                 "api",
                                 "v1",
-                                "search"
+                                "graph",
+                                "query"
                             ]
                         },
-                        "description": "Hybrid search combining semantic vectors with structural filters.\n\nAvailable filters:\n- file_types: list of extensions [\".py\", \".ts\"]\n- file_patterns: filter by path patterns\n- class_names: filter by class names\n- exclude_patterns: exclude paths matching patterns"
-                    }
-                },
-                {
-                    "name": "Structural Search",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"query\": \"graph related code\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"structural\",\n  \"filters\": {\n    \"file_types\": [\".py\"],\n    \"class_names\": [\"SQLiteGraphAdapter\"]\n  },\n  \"limit\": 5\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/search",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "search"
-                            ]
-                        },
-                        "description": "Pure structural search — graph-only, no semantic matching.\n\nReturns files matching the structural filters without vector similarity."
-                    }
-                },
-                {
-                    "name": "Search by Symbol",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"query\": \"PlannerAgent class\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"search_mode\": \"semantic\",\n  \"filters\": {\n    \"symbol_type\": \"class\"\n  },\n  \"limit\": 5\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/search",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "search"
-                            ]
-                        },
-                        "description": "Search for specific code symbols (classes, functions, methods)."
+                        "description": "Query code structure graph. query_type: files, classes, functions, symbol."
                     }
                 }
             ]
         },
         {
-            "name": "3. Autonomous Agents",
-            "description": "LangGraph-powered autonomous agents that use Think→Act→Observe loops with playbook-based reasoning.\n\nWorkflow:\n1. POST to start agent → returns job_id\n2. GET status to poll progress\n3. GET result when completed\n\nAlso includes direct playbook execution for simpler, specialized tasks.",
+            "name": "Repositories",
             "item": [
                 {
-                    "name": "Direct Playbook Execution",
+                    "name": "List Repositories",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/repos",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "repos"
+                            ]
+                        },
+                        "description": "List all indexed repositories."
+                    }
+                },
+                {
+                    "name": "Get Repository Detail",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/repos/{{repo_id}}",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "repos",
+                                "{{repo_id}}"
+                            ]
+                        },
+                        "description": "Get detailed info for a single repository."
+                    }
+                },
+                {
+                    "name": "Update Repository Metadata",
+                    "request": {
+                        "method": "PUT",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"org\": \"updated-org\",\n  \"repo_url\": \"https://github.com/owner/repo\",\n  \"branch\": \"main\",\n  \"first_author\": \"john.doe\",\n  \"total_commits\": 150,\n  \"last_pr_title\": \"Fix auth bug\",\n  \"last_pr_user\": \"jane.doe\",\n  \"last_pr_merged_at\": \"2026-02-27T10:00:00Z\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/repos/{{repo_id}}",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "repos",
+                                "{{repo_id}}"
+                            ]
+                        },
+                        "description": "Update repository metadata. Only non-null fields are updated."
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Catalogs",
+            "item": [
+                {
+                    "name": "List Catalog Entries",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/list",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "list"
+                            ]
+                        },
+                        "description": "List all catalog entries."
+                    }
+                },
+                {
+                    "name": "List Catalog Entries (Filtered)",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/list?status=proposed",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "list"
+                            ],
+                            "query": [
+                                {
+                                    "key": "status",
+                                    "value": "proposed",
+                                    "description": "Filter: active, proposed, qualified"
+                                }
+                            ]
+                        },
+                        "description": "List catalog entries filtered by status (active, proposed, qualified)."
+                    }
+                },
+                {
+                    "name": "Get Catalog Entry",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "{{repo_id}}"
+                            ]
+                        },
+                        "description": "Get a single catalog entry by repo_id."
+                    }
+                },
+                {
+                    "name": "Create Catalog Entry",
                     "request": {
                         "method": "POST",
                         "header": [
@@ -295,7 +383,389 @@
                         ],
                         "body": {
                             "mode": "raw",
-                            "raw": "{\n  \"playbook_name\": \"code_explorer\",\n  \"prompt\": \"Explain how the authentication flow works in this repository\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
+                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"playbook_name\": \"code_analyzer\",\n  \"prompt\": \"Analyze this repository and generate a catalog entry\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs"
+                            ]
+                        },
+                        "description": "Execute a playbook on a repo and store the result as a catalog entry."
+                    }
+                },
+                {
+                    "name": "Create Proposal (from Gap)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"gap_name\": \"API Gateway Service\",\n  \"gap_description\": \"A centralized API gateway for routing, authentication, and rate limiting\",\n  \"architecture_layer\": \"Infrastructure\",\n  \"user_query\": \"We need an API gateway for our microservices\",\n  \"org\": \"platform-team\",\n  \"created_by\": \"john.doe\",\n  \"build_cost_usd\": 50000,\n  \"dev_weeks\": 8\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/propose",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "propose"
+                            ]
+                        },
+                        "description": "Create a proposed catalog entry from a gap analysis. Auto-generates requirements via LLM."
+                    }
+                },
+                {
+                    "name": "List Proposed Entries",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/proposed",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "proposed"
+                            ]
+                        },
+                        "description": "List all proposed catalog entries (status=proposed or qualified)."
+                    }
+                },
+                {
+                    "name": "Match Gaps to Proposed",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"gaps\": [\n    { \"name\": \"API Gateway\", \"description\": \"Centralized routing service\" },\n    { \"name\": \"Auth Service\", \"description\": \"OAuth2 authentication\" }\n  ]\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/match-gaps",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "match-gaps"
+                            ]
+                        },
+                        "description": "Match gap names against existing proposed catalog entries using fuzzy matching."
+                    }
+                },
+                {
+                    "name": "Update Proposal Requirements",
+                    "request": {
+                        "method": "PUT",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"requirements\": {\n    \"functional_requirements\": [\"JWT authentication\", \"Rate limiting\"],\n    \"non_functional_requirements\": [\"<100ms latency\", \"99.9% uptime\"],\n    \"api_contracts\": [\"POST /auth/token\", \"GET /auth/validate\"],\n    \"data_model\": \"User, Token, Session tables\",\n    \"integration_points\": [\"LDAP\", \"OAuth2 providers\"],\n    \"acceptance_criteria\": [\"All tests pass\", \"Load test 1000rps\"]\n  }\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}/requirements",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "{{repo_id}}",
+                                "requirements"
+                            ]
+                        },
+                        "description": "Update requirements for a proposed catalog entry."
+                    }
+                },
+                {
+                    "name": "Contribute to Proposal",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"uid\": \"john.doe\",\n  \"org\": \"platform-team\"\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}/contribute",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "{{repo_id}}",
+                                "contribute"
+                            ]
+                        },
+                        "description": "Record a contributor's UID and Org against an existing proposed catalog entry."
+                    }
+                },
+                {
+                    "name": "Promote Proposal",
+                    "request": {
+                        "method": "PUT",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"git_url\": \"https://github.com/owner/repo\",\n  \"git_branch\": \"main\",\n  \"quality_score\": 8\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}/promote",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "{{repo_id}}",
+                                "promote"
+                            ]
+                        },
+                        "description": "Promote a proposed/qualified catalog entry to active status with a git URL."
+                    }
+                },
+                {
+                    "name": "Delete Catalog Entry",
+                    "request": {
+                        "method": "DELETE",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "{{repo_id}}"
+                            ]
+                        },
+                        "description": "Delete a proposed or qualified catalog entry. Cannot delete active entries."
+                    }
+                },
+                {
+                    "name": "Catalog Search (GET)",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/search?q=authentication&limit=5",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "search"
+                            ],
+                            "query": [
+                                {
+                                    "key": "q",
+                                    "value": "authentication"
+                                },
+                                {
+                                    "key": "limit",
+                                    "value": "5"
+                                }
+                            ]
+                        },
+                        "description": "Search catalog entries by keyword (GET variant)."
+                    }
+                },
+                {
+                    "name": "Catalog Search (POST)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"query\": \"authentication service\",\n  \"repo_id\": null,\n  \"limit\": 5,\n  \"min_score\": 0.8\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/catalogs/search",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "catalogs",
+                                "search"
+                            ]
+                        },
+                        "description": "Search catalog entries semantically (POST variant with more options)."
+                    }
+                }
+            ]
+        },
+        {
+            "name": "Autonomous Agents",
+            "item": [
+                {
+                    "name": "Execute Autonomous Agent",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"Analyze the architecture of this codebase and identify design patterns\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous"
+                            ]
+                        },
+                        "description": "Execute an autonomous agent with a natural language goal. Returns a job_id for tracking."
+                    }
+                },
+                {
+                    "name": "Execute Autonomous (Catalog Search)",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"goal\": \"Find reusable components for building a payment processing system\",\n  \"repo_id\": [\"repo1\", \"repo2\"],\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": [\"design_solution\"]\n}"
+                        },
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous"
+                            ]
+                        },
+                        "description": "Execute autonomous agent restricted to specific playbooks (e.g., design_solution for catalog search)."
+                    }
+                },
+                {
+                    "name": "Get Agent Job Status",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{job_id}}/status",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous",
+                                "{{job_id}}",
+                                "status"
+                            ]
+                        },
+                        "description": "Get status of an autonomous agent job (pending, running, completed, failed)."
+                    }
+                },
+                {
+                    "name": "Get Agent Job Result",
+                    "request": {
+                        "method": "GET",
+                        "header": [],
+                        "url": {
+                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{job_id}}/result",
+                            "host": [
+                                "{{base_url}}"
+                            ],
+                            "path": [
+                                "api",
+                                "v1",
+                                "agents",
+                                "autonomous",
+                                "{{job_id}}",
+                                "result"
+                            ]
+                        },
+                        "description": "Get result of a completed autonomous agent job. Returns 425 if still running."
+                    }
+                },
+                {
+                    "name": "Execute Single Playbook",
+                    "request": {
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "value": "application/json"
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "{\n  \"playbook_name\": \"code_analyzer\",\n  \"prompt\": \"Analyze the main entry points and API surface\",\n  \"repo_id\": \"{{repo_id}}\"\n}"
                         },
                         "url": {
                             "raw": "{{base_url}}/api/v1/agents/playbook",
@@ -309,611 +779,82 @@
                                 "playbook"
                             ]
                         },
-                        "description": "Execute a specific playbook directly and synchronously.\n\nplaybook_name: name of the playbook (e.g. code_explorer, catalog_generator, catalog_search) or 'auto' for automatic selection based on prompt.\nprompt: the input for the playbook.\nrepo_id: (optional) scope the analysis to a specific repository."
-                    }
-                },
-                {
-                    "name": "Execute Agent - Architecture Analysis",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
-                                    "pm.test('Agent started', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Generate a detailed high-level architecture diagram with Mermaid\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous"
-                            ]
-                        },
-                        "description": "Start an autonomous agent with a natural language goal.\n\nThe agent uses Think→Act→Observe loops:\n- Selects the best playbook (e.g. code_analyzer)\n- Auto-finishes after sufficient data gathering\n- Runs asynchronously\n\nmax_iterations: caps the planner loop (default: 10)\nallowed_playbooks: restrict to specific playbooks (null = all)"
-                    }
-                },
-                {
-                    "name": "Execute Agent - Documentation",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
-                                    "pm.test('Agent started', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Generate comprehensive documentation including README, API reference, and setup guide\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": [\"code_explorer\"]\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous"
-                            ]
-                        },
-                        "description": "Start an autonomous agent to generate comprehensive documentation.\n\nThe agent will use the code_analyzer playbook to analyze the codebase and produce structured output."
-                    }
-                },
-                {
-                    "name": "Execute Agent - Code Question",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
-                                    "pm.test('Agent started', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"goal\": \"What functions call the authenticate() method and which files import auth.py?\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous"
-                            ]
-                        },
-                        "description": "Start an autonomous agent to answer a code question.\n\nThe agent will use search tools, graph queries, and playbooks to reason through the answer."
-                    }
-                },
-                {
-                    "name": "Execute Agent - Dead Code Finder",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
-                                    "pm.test('Agent started', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Find unused or dead code, orphaned functions, and unreferenced modules\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 10,\n  \"allowed_playbooks\": null\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous"
-                            ]
-                        },
-                        "description": "Start an autonomous agent to analyze the codebase for dead/unused code."
-                    }
-                },
-                {
-                    "name": "Execute Agent - Restricted Playbooks",
-                    "event": [
-                        {
-                            "listen": "test",
-                            "script": {
-                                "exec": [
-                                    "var jsonData = pm.response.json();",
-                                    "pm.collectionVariables.set('agent_job_id', jsonData.job_id);",
-                                    "pm.test('Agent started', function () {",
-                                    "    pm.response.to.have.status(200);",
-                                    "    pm.expect(jsonData.status).to.eql('pending');",
-                                    "});"
-                                ],
-                                "type": "text/javascript"
-                            }
-                        }
-                    ],
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"goal\": \"Search the catalog for microservices patterns\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"max_iterations\": 5,\n  \"allowed_playbooks\": [\"catalog_browser\"]\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous"
-                            ]
-                        },
-                        "description": "Start an agent restricted to specific playbooks.\n\nallowed_playbooks constrains the agent to only use the listed playbooks.\nAvailable: code_analyzer, catalog_generator, catalog_search, catalog_browser"
-                    }
-                },
-                {
-                    "name": "Get Agent Status",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{agent_job_id}}/status",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous",
-                                "{{agent_job_id}}",
-                                "status"
-                            ]
-                        },
-                        "description": "Poll autonomous agent job status.\n\nPossible statuses: pending, running, completed, failed\nIncludes: iterations, steps_taken, goal, created_at, logs (real-time thoughts)"
-                    }
-                },
-                {
-                    "name": "Get Agent Result",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/agents/autonomous/{{agent_job_id}}/result",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "agents",
-                                "autonomous",
-                                "{{agent_job_id}}",
-                                "result"
-                            ]
-                        },
-                        "description": "Get the final result from a completed autonomous agent job.\n\nReturns:\n- answer: The agent's final output (markdown)\n- steps_taken: Total processing steps\n- iterations: Planner loop iterations\n- playbooks_used: List of playbooks invoked\n- error: null if successful\n\nReturns 425 Too Early if the job is still running."
+                        "description": "Execute a single playbook directly. Use playbook_name='auto' for LLM-based selection."
                     }
                 }
             ]
         },
         {
-            "name": "4. Graph Queries",
-            "description": "Query the SQLite code knowledge graph for structural relationships: files, classes, functions, symbols, callers, callees, and dependencies.",
+            "name": "Git Integration",
             "item": [
                 {
-                    "name": "Find Files by Pattern",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"files\",\n  \"pattern\": \"api\",\n  \"file_type\": \".py\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/graph/query",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "graph",
-                                "query"
-                            ]
-                        },
-                        "description": "Find files in the graph matching a pattern and/or file type."
-                    }
-                },
-                {
-                    "name": "Find Classes",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"classes\",\n  \"pattern\": \"Agent\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/graph/query",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "graph",
-                                "query"
-                            ]
-                        },
-                        "description": "Find classes by name pattern in the code graph."
-                    }
-                },
-                {
-                    "name": "Find Functions in Class",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"functions\",\n  \"class_name\": \"PlannerAgent\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/graph/query",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "graph",
-                                "query"
-                            ]
-                        },
-                        "description": "Find all functions/methods in a given class."
-                    }
-                },
-                {
-                    "name": "Find Functions by Pattern",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"functions\",\n  \"pattern\": \"search\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/graph/query",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "graph",
-                                "query"
-                            ]
-                        },
-                        "description": "Find functions by name pattern across the codebase."
-                    }
-                },
-                {
-                    "name": "Search Symbol by Name",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"query_type\": \"symbol\",\n  \"symbol_name\": \"PlaybookExecutor\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/graph/query",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "graph",
-                                "query"
-                            ]
-                        },
-                        "description": "Find any symbol (class, function, method) by exact name."
-                    }
-                }
-            ]
-        },
-        {
-            "name": "5. System",
-            "description": "Health checks and system statistics.",
-            "item": [
-                {
-                    "name": "Health Check",
+                    "name": "Search Git Repositories",
                     "request": {
                         "method": "GET",
+                        "header": [],
                         "url": {
-                            "raw": "{{base_url}}/api/v1/health",
+                            "raw": "{{base_url}}/api/v1/git/search?keywords=fastapi,auth&endpoint=github.com&limit=20",
                             "host": [
                                 "{{base_url}}"
                             ],
                             "path": [
                                 "api",
                                 "v1",
-                                "health"
-                            ]
-                        },
-                        "description": "Returns server health status, version, and embedding configuration.\n\nResponse: { status: 'healthy', version: '0.1.0', embedding_model: '...', embedding_dim: 768 }"
-                    }
-                },
-                {
-                    "name": "System Stats",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/stats",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "stats"
-                            ]
-                        },
-                        "description": "Get system statistics.\n\nReturns: total_jobs, pending_jobs, running_jobs, completed_jobs, failed_jobs"
-                    }
-                }
-            ]
-        },
-        {
-            "name": "6. Catalogs",
-            "description": "Manage repository catalogs — high-level documentation and summaries generated by playbooks.\n\nDual-store: full content in SQLite, chunked embeddings in LanceDB for semantic search.",
-            "item": [
-                {
-                    "name": "Create Catalog Entry",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"repo_id\": \"{{repo_id}}\",\n  \"playbook_name\": \"catalog_generator\",\n  \"prompt\": \"Generate a comprehensive architectural overview\"\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/catalogs",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "catalogs"
-                            ]
-                        },
-                        "description": "Trigger a playbook to generate a catalog entry for a repository.\n\nAvailable playbooks: catalog_generator, code_analyzer"
-                    }
-                },
-                {
-                    "name": "Get Catalog Entries",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/catalogs/{{repo_id}}",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "catalogs",
-                                "{{repo_id}}"
-                            ]
-                        },
-                        "description": "Retrieve full catalog content for a specific repository.\n\nReturns the complete auto-generated summary stored in SQLite (not the chunked vectors)."
-                    }
-                },
-                {
-                    "name": "Search Catalogs (GET)",
-                    "request": {
-                        "method": "GET",
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/catalogs/search?query=authentication&limit=5&min_score=0.8",
-                            "host": [
-                                "{{base_url}}"
-                            ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "catalogs",
+                                "git",
                                 "search"
                             ],
                             "query": [
                                 {
-                                    "key": "query",
-                                    "value": "authentication"
+                                    "key": "keywords",
+                                    "value": "fastapi,auth",
+                                    "description": "Comma-separated search terms"
+                                },
+                                {
+                                    "key": "endpoint",
+                                    "value": "github.com",
+                                    "description": "Git host: github.com, gitlab.com, bitbucket.org, or enterprise hostname"
                                 },
                                 {
                                     "key": "limit",
-                                    "value": "5"
-                                },
-                                {
-                                    "key": "min_score",
-                                    "value": "0.8"
+                                    "value": "20"
                                 }
                             ]
                         },
-                        "description": "Semantic search across catalog entries using GET parameters.\n\nUses the same high-quality retrieval logic as POST search (dedupe + SQLite context enrichment)."
+                        "description": "Search repositories across Git platforms (GitHub, GitLab, Bitbucket, Enterprise)."
                     }
                 },
                 {
-                    "name": "Search Catalogs (POST)",
+                    "name": "List Git Branches",
                     "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"query\": \"authentication system\",\n  \"limit\": 5,\n  \"min_score\": 0.8\n}"
-                        },
+                        "method": "GET",
+                        "header": [],
                         "url": {
-                            "raw": "{{base_url}}/api/v1/catalogs/search",
+                            "raw": "{{base_url}}/api/v1/git/branches?owner=microsoft&name=vscode&endpoint=github.com",
                             "host": [
                                 "{{base_url}}"
                             ],
                             "path": [
                                 "api",
                                 "v1",
-                                "catalogs",
-                                "search"
-                            ]
-                        },
-                        "description": "High-quality semantic search across all catalog entries (cross-repository search).\n\nUses advanced retrieval: processes multiple queries, dedupes by repository (max score), and enriches results with full SQLite context."
-                    }
-                },
-                {
-                    "name": "Search Catalogs (Scoped to Repo)",
-                    "request": {
-                        "method": "POST",
-                        "header": [
-                            {
-                                "key": "Content-Type",
-                                "value": "application/json"
-                            }
-                        ],
-                        "body": {
-                            "mode": "raw",
-                            "raw": "{\n  \"query\": \"API design patterns\",\n  \"repo_id\": \"{{repo_id}}\",\n  \"limit\": 5,\n  \"min_score\": 0.7\n}"
-                        },
-                        "url": {
-                            "raw": "{{base_url}}/api/v1/catalogs/search",
-                            "host": [
-                                "{{base_url}}"
+                                "git",
+                                "branches"
                             ],
-                            "path": [
-                                "api",
-                                "v1",
-                                "catalogs",
-                                "search"
+                            "query": [
+                                {
+                                    "key": "owner",
+                                    "value": "microsoft"
+                                },
+                                {
+                                    "key": "name",
+                                    "value": "vscode"
+                                },
+                                {
+                                    "key": "endpoint",
+                                    "value": "github.com"
+                                }
                             ]
                         },
-                        "description": "High-quality semantic search within a specific repository's catalog entries.\n\nUses advanced retrieval: processes multiple queries, dedupes by repository, and enriches results with full SQLite context."
+                        "description": "List branches for a repository on a Git platform."
                     }
                 }
             ]
