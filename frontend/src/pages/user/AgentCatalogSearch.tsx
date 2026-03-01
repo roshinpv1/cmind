@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
     Search,
     Loader2,
@@ -277,9 +279,9 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                             <h4 className="text-xs font-black uppercase tracking-widest text-gray-400 mb-3">
                                 Detailed Analysis
                             </h4>
-                            <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-line">
-                                {item.summary_detailed}
-                            </p>
+                            <div className="prose prose-sm max-w-none">
+                                <Markdown remarkPlugins={[remarkGfm]}>{item.summary_detailed}</Markdown>
+                            </div>
                         </div>
                     )}
 
@@ -982,11 +984,13 @@ export default function AgentCatalogSearch() {
                                                 <Layers className="h-5 w-5 text-gray-400" />
                                                 <h2 className="text-lg font-black text-gray-900">Architecture Composition</h2>
                                             </div>
-                                            <p className="text-sm text-gray-600 leading-relaxed">
-                                                {typeof discoveryResult.answer.architecture_composition === 'string'
-                                                    ? discoveryResult.answer.architecture_composition
-                                                    : JSON.stringify(discoveryResult.answer.architecture_composition)}
-                                            </p>
+                                            <div className="prose prose-sm max-w-none">
+                                                <Markdown remarkPlugins={[remarkGfm]}>{
+                                                    typeof discoveryResult.answer.architecture_composition === 'string'
+                                                        ? discoveryResult.answer.architecture_composition
+                                                        : JSON.stringify(discoveryResult.answer.architecture_composition, null, 2)
+                                                }</Markdown>
+                                            </div>
                                         </div>
                                     )}
 
@@ -1435,8 +1439,8 @@ export default function AgentCatalogSearch() {
                                         <Bot className="h-5 w-5 text-primary" />
                                         <h3 className="text-lg font-black text-gray-900">Discovery Analysis</h3>
                                     </div>
-                                    <div className="prose prose-sm max-w-none text-gray-700 whitespace-pre-wrap leading-relaxed">
-                                        {discoveryResult.answer}
+                                    <div className="prose prose-sm max-w-none">
+                                        <Markdown remarkPlugins={[remarkGfm]}>{discoveryResult.answer}</Markdown>
                                     </div>
                                     <div className="flex items-center gap-3 pt-3 border-t border-gray-100 text-xs text-gray-400">
                                         <span>Playbooks: {discoveryResult.playbooks_used?.join(", ") || "—"}</span>

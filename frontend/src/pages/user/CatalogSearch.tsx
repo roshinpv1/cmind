@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Search, Loader2 } from "lucide-react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface SearchResult {
     catalog_id: string;
@@ -131,8 +132,8 @@ export default function CatalogSearch() {
                             </span>
                         </div>
                         <div className="px-6 py-4 prose prose-red max-w-none">
-                            <div className="line-clamp-6 text-gray-700 whitespace-pre-wrap">
-                                <Markdown>{item.result}</Markdown>
+                            <div className="text-gray-700">
+                                <Markdown remarkPlugins={[remarkGfm]}>{item.result}</Markdown>
                             </div>
                         </div>
                         <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 text-right">

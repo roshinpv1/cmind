@@ -98,6 +98,21 @@ export default function ProposalCreate() {
         setError("");
         setDuplicateEntry(null);
         try {
+            // If we already have a saved proposal, use the regenerate endpoint
+            if (savedId) {
+                const res = await fetch(`${API}/api/v1/catalogs/${encodeURIComponent(savedId)}/regenerate`, {
+                    method: "POST",
+                });
+                if (!res.ok) {
+                    const err = await res.json().catch(() => ({ detail: "Regeneration failed" }));
+                    throw new Error(err.detail || "Regeneration failed");
+                }
+                const data = await res.json();
+                setRequirements(data.requirements);
+                return;
+            }
+
+            // New proposal — call propose endpoint
             const body: any = {
                 gap_name: name || gapName,
                 gap_description: description || gapDescription,

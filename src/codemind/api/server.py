@@ -925,7 +925,7 @@ async def create_proposal(request: ProposalRequest):
         from langchain_core.messages import HumanMessage as _HumanMessage
         raw_output = await llm._agenerate_impl(
             [_HumanMessage(content=req_prompt)],
-            max_tokens=4096
+            max_tokens=60000
         )
         raw_text = raw_output.generations[0].message.content if raw_output.generations else ""
         
@@ -997,6 +997,102 @@ async def create_proposal(request: ProposalRequest):
         "content": content,
     }
 
+
+@app.post("/api/v1/catalogs/{repo_id}/regenerate")
+async def regenerate_proposal_requirements(repo_id: str):
+    """Re-generate requirements for an existing proposed catalog entry using the LLM."""
+    import time
+    import json
+    from codemind.storage.database import CatalogStore
+
+    manifest: ManifestManager = app.state.manifest
+    db_inst = manifest.db
+
+    # Load existing entry
+    with db_inst.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Catalog entry not found")
+        if entry.status != "proposed":
+            raise HTTPException(status_code=400, detail="Only proposed entries can be regenerated")
+
+        # Extract gap data from the existing entry
+        gap_name = entry.repo_name or entry.source_gap or "Unknown Component"
+        meta = entry.metadata_json or {}
+        gap_description = meta.get("summary_high_level", "")
+        architecture_layer = meta.get("architecture_layer", "")
+
+    # Re-run LLM to generate fresh requirements
+    requirements = {}
+    try:
+        from codemind.llm.factory import get_chat_model
+        llm = get_chat_model()
+
+        req_prompt = (
+            f"Generate detailed software requirements for a component called '{gap_name}'.\n\n"
+            f"Description: {gap_description}\n"
+        )
+        if architecture_layer:
+            req_prompt += f"Architecture Layer: {architecture_layer}\n"
+
+        req_prompt += (
+            "\n\nGenerate a JSON object with these fields:\n"
+            "{\n"
+            '  "functional_requirements": ["list of functional requirements"],\n'
+            '  "non_functional_requirements": ["list of NFRs like performance, security"],\n'
+            '  "api_contracts": ["list of API endpoints/contracts needed"],\n'
+            '  "data_model": "description of data model needed",\n'
+            '  "integration_points": ["list of integration points with other systems"],\n'
+            '  "acceptance_criteria": ["list of acceptance criteria"],\n'
+            '  "tech_stack_suggestion": "suggested technology stack",\n'
+            '  "estimated_effort": "effort estimate"\n'
+            "}\n\n"
+            "Return ONLY the JSON object, no other text."
+        )
+
+        from langchain_core.messages import HumanMessage as _HumanMessage
+        raw_output = await llm._agenerate_impl(
+            [_HumanMessage(content=req_prompt)],
+            max_tokens=4096
+        )
+        raw_text = raw_output.generations[0].message.content if raw_output.generations else ""
+
+        import re
+        json_match = re.search(r'```json\s*({.*?})\s*```', raw_text, re.DOTALL)
+        if not json_match:
+            json_match = re.search(r'({[\s\S]*})', raw_text)
+        if json_match:
+            requirements = json.loads(json_match.group(1))
+        else:
+            requirements = {"raw_response": raw_text}
+
+    except Exception as e:
+        import traceback
+        print(f"[REGENERATE] Failed to regenerate requirements: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"LLM generation failed: {str(e)}")
+
+    # Update the existing entry in-place
+    now = int(time.time())
+    with db_inst.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if entry:
+            entry.requirements = requirements
+            # Also update content JSON
+            content = entry.metadata_json or {}
+            content["requirements"] = requirements
+            content["tech_stack"] = requirements.get("tech_stack_suggestion", content.get("tech_stack", "TBD"))
+            entry.metadata_json = content
+            entry.content = json.dumps(content)
+            entry.updated_at = now
+            session.commit()
+
+    return {
+        "repo_id": repo_id,
+        "status": "regenerated",
+        "gap_name": gap_name,
+        "requirements": requirements,
+    }
 
 @app.get("/api/v1/catalogs/proposed")
 async def list_proposed_entries(org: str | None = None):

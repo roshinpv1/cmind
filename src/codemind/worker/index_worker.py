@@ -202,6 +202,7 @@ class IndexWorker:
         Resolve the repository to a local path and repo_id.
 
         If repo_url is set, clones/updates the repo first.
+        Also checks for a companion '-CD' repository and merges its files.
         """
         repo_url = job.get("repo_url")
         repo_path = job.get("repo_path")
@@ -216,6 +217,12 @@ class IndexWorker:
             local_path, computed_repo_id, _ = git_manager.ensure_repo(
                 repo_url, branch, token=git_token
             )
+
+            # Check for companion -CD repo and merge if found
+            self._try_clone_cd_companion(
+                repo_url, branch, local_path, git_manager, git_token
+            )
+
             return str(local_path), computed_repo_id
 
         # Local path
@@ -224,6 +231,55 @@ class IndexWorker:
 
         # Fallback: compute repo_id from path
         return repo_path, self.manifest._compute_repo_id(repo_path)
+
+    def _try_clone_cd_companion(self, repo_url, branch, main_local_path, git_manager, token):
+        """
+        Detect if a companion '-CD' repository exists and merge its files.
+
+        Convention: for repo 'my-service.git', the CD repo is 'my-service-CD.git'.
+        CD files are placed under main_local_path/_cd/ to avoid collisions.
+        If the CD repo doesn't exist or fails to clone, indexing proceeds normally.
+        """
+        import shutil
+
+        # Build CD repo URL:
+        #   https://host/org/repo.git  →  https://host/org/repo-CD.git
+        #   https://host/org/repo      →  https://host/org/repo-CD
+        base_url = repo_url.rstrip("/")
+        if base_url.endswith(".git"):
+            cd_url = base_url[:-4] + "-CD.git"
+        else:
+            cd_url = base_url + "-CD"
+
+        logger.info("Checking for companion CD repo: %s", cd_url)
+
+        try:
+            # Try same branch first, fall back to 'main' if that fails
+            try:
+                cd_local_path, _, _ = git_manager.ensure_repo(cd_url, branch, token=token)
+            except Exception:
+                if branch != "main":
+                    logger.info("CD repo branch '%s' not found, trying 'main'", branch)
+                    cd_local_path, _, _ = git_manager.ensure_repo(cd_url, "main", token=token)
+                else:
+                    raise
+
+            # Merge CD files into main repo under _cd/ subfolder
+            target_dir = Path(main_local_path) / "_cd"
+            if target_dir.exists():
+                shutil.rmtree(target_dir)  # Clean previous merge
+
+            shutil.copytree(
+                str(cd_local_path), str(target_dir),
+                ignore=shutil.ignore_patterns('.git'),
+                dirs_exist_ok=True,
+            )
+
+            cd_file_count = sum(1 for f in target_dir.rglob("*") if f.is_file())
+            logger.info("✅ Merged %d CD companion files into %s", cd_file_count, target_dir)
+
+        except Exception as e:
+            logger.info("No CD companion found or clone failed: %s (this is OK)", e)
 
 
 # ------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Send, Loader2, Play, Terminal, Book, FileCode } from "lucide-react";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface Repo {
     id: string;
@@ -275,7 +276,7 @@ export default function ChatInterface() {
                     </div>
                     <div className="flex-1 overflow-y-auto p-6 prose prose-red max-w-none">
                         {jobStatus?.result?.answer ? (
-                            <Markdown>{
+                            <Markdown remarkPlugins={[remarkGfm]}>{
                                 typeof jobStatus.result.answer === "string"
                                     ? jobStatus.result.answer
                                     : jobStatus.result.answer.report_markdown

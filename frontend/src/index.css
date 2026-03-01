@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 @theme {
   --color-primary: #CD1409;
@@ -10,4 +11,116 @@
     @apply antialiased text-gray-900 bg-gray-50;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
   }
+}
+
+/* ─── Markdown / Prose Styling ─── */
+.prose h1 {
+  @apply text-xl font-extrabold text-gray-900 mt-6 mb-3 border-b border-gray-200 pb-2;
+}
+
+.prose h2 {
+  @apply text-lg font-bold text-gray-800 mt-5 mb-2;
+}
+
+.prose h3 {
+  @apply text-base font-bold text-gray-800 mt-4 mb-2;
+}
+
+.prose h4 {
+  @apply text-sm font-bold text-gray-700 mt-3 mb-1;
+}
+
+.prose p {
+  @apply text-sm text-gray-700 leading-relaxed mb-3;
+}
+
+.prose ul {
+  @apply list-disc pl-5 space-y-1 mb-3 text-sm text-gray-700;
+}
+
+.prose ol {
+  @apply list-decimal pl-5 space-y-1 mb-3 text-sm text-gray-700;
+}
+
+.prose li {
+  @apply leading-relaxed;
+}
+
+.prose li>ul,
+.prose li>ol {
+  @apply mt-1 mb-0;
+}
+
+.prose strong {
+  @apply font-bold text-gray-900;
+}
+
+.prose em {
+  @apply italic;
+}
+
+.prose a {
+  @apply text-blue-600 underline hover:text-blue-800 transition-colors;
+}
+
+.prose blockquote {
+  @apply border-l-4 border-gray-300 pl-4 py-1 my-3 text-sm text-gray-600 italic bg-gray-50 rounded-r;
+}
+
+.prose code {
+  @apply text-xs bg-gray-100 text-rose-600 px-1.5 py-0.5 rounded font-mono;
+}
+
+.prose pre {
+  @apply bg-gray-900 text-gray-100 rounded-lg p-4 overflow-x-auto my-3 text-xs leading-relaxed;
+}
+
+.prose pre code {
+  @apply bg-transparent text-gray-100 p-0;
+}
+
+.prose table {
+  @apply w-full text-sm border-collapse my-3;
+}
+
+.prose thead th {
+  @apply text-left text-xs font-bold text-gray-500 uppercase tracking-wider py-2 px-3 border-b-2 border-gray-200 bg-gray-50;
+}
+
+.prose tbody td {
+  @apply py-2 px-3 border-b border-gray-100 text-gray-700;
+}
+
+.prose tbody tr:hover {
+  @apply bg-gray-50/50;
+}
+
+.prose hr {
+  @apply border-gray-200 my-4;
+}
+
+.prose img {
+  @apply rounded-lg shadow-sm my-3;
+}
+
+/* Compact prose variant for cards */
+.prose-compact h1 {
+  @apply text-base font-bold mt-3 mb-2;
+}
+
+.prose-compact h2 {
+  @apply text-sm font-bold mt-2 mb-1;
+}
+
+.prose-compact h3 {
+  @apply text-sm font-semibold mt-2 mb-1;
+}
+
+.prose-compact p {
+  @apply text-xs mb-2;
+}
+
+.prose-compact ul,
+.prose-compact ol {
+  @apply text-xs pl-4 mb-2;
 }
