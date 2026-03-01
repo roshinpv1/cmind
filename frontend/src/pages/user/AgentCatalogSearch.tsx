@@ -223,9 +223,9 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                         <Lightbulb className="h-4 w-4 text-primary" />
                         <span className="text-xs font-bold tracking-widest uppercase text-primary">Architectural Reasoning</span>
                     </div>
-                    <p className="text-sm text-gray-700 leading-relaxed italic">
-                        "{item.reasoning}"
-                    </p>
+                    <div className="prose prose-sm prose-compact max-w-none">
+                        <Markdown remarkPlugins={[remarkGfm]}>{item.reasoning}</Markdown>
+                    </div>
                 </div>
             )}
 
@@ -880,11 +880,13 @@ export default function AgentCatalogSearch() {
                                             <h3 className="text-sm font-bold text-gray-700">Synthesizing Architecture...</h3>
                                         </div>
                                     </div>
-                                    <div className="p-4 space-y-2 max-h-60 overflow-y-auto font-mono text-xs">
+                                    <div className="p-4 space-y-2 max-h-60 overflow-y-auto text-xs">
                                         {discoveryLogs.map((log, i) => (
                                             <div key={i} className="text-gray-500 flex gap-2">
-                                                <span className="text-gray-300">[{new Date().toLocaleTimeString()}]</span>
-                                                {log}
+                                                <span className="text-gray-300 shrink-0">[{new Date().toLocaleTimeString()}]</span>
+                                                <div className="prose prose-sm prose-compact max-w-none flex-1">
+                                                    <Markdown remarkPlugins={[remarkGfm]}>{log}</Markdown>
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
@@ -1357,7 +1359,9 @@ export default function AgentCatalogSearch() {
                                                             <div className="text-xs opacity-80">Confidence</div>
                                                         </div>
                                                     </div>
-                                                    <p className="text-sm leading-relaxed opacity-90">{comp.reasoning || ""}</p>
+                                                    <div className="text-sm leading-relaxed opacity-90 prose prose-sm prose-compact max-w-none prose-invert">
+                                                        <Markdown remarkPlugins={[remarkGfm]}>{comp.reasoning || ""}</Markdown>
+                                                    </div>
                                                     {(comp.savings_pct > 0 || comp.time_saved_weeks > 0) && (
                                                         <div className="flex gap-4 mt-4 pt-4 border-t border-white/20">
                                                             {comp.savings_pct > 0 && <div><div className="text-2xl font-black">{comp.savings_pct}%</div><div className="text-xs opacity-80">Cost Saved</div></div>}
@@ -1383,7 +1387,9 @@ export default function AgentCatalogSearch() {
                                                                         </div>
                                                                         <div className="text-xs text-gray-400">{c.architecture_layer || ""}</div>
                                                                     </div>
-                                                                    <p className="text-xs text-gray-500 mb-2">{c.reasoning || ""}</p>
+                                                                    <div className="text-xs text-gray-500 mb-2 prose prose-sm prose-compact max-w-none">
+                                                                        <Markdown remarkPlugins={[remarkGfm]}>{c.reasoning || ""}</Markdown>
+                                                                    </div>
                                                                     <div className="flex gap-4 text-xs">
                                                                         <span className="text-gray-400">Integration: <strong className="text-gray-600">{c.integration_effort_days || 0}d</strong></span>
                                                                         <span className="text-gray-400">Customization: <strong className="text-gray-600">{c.customization_effort_days || 0}d</strong></span>

@@ -225,8 +225,8 @@ export default function ChatInterface() {
                                                     {isAction ? "Executing Tool" : "Reasoning"}
                                                 </span>
                                             </div>
-                                            <div className="font-mono text-sm md:text-base leading-relaxed whitespace-pre-wrap text-left bg-white/50 p-3 rounded border border-black/5">
-                                                {cleanText}
+                                            <div className="prose prose-sm max-w-none text-left bg-white/50 p-3 rounded border border-black/5">
+                                                <Markdown remarkPlugins={[remarkGfm]}>{cleanText}</Markdown>
                                             </div>
                                         </div>
                                     );
