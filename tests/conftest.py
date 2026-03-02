@@ -98,6 +98,8 @@ class MockLLMDriver:
         self._call_count = 0
         self.prompts: list[str] = []  # Record all prompts for assertions
         self.config = self._Config()
+        self.driver = self  # Self-referencing: acts as both chat_model and driver
+        self.model = "mock-model"
 
     async def generate(self, prompt: str, **kwargs) -> str:
         self.prompts.append(prompt)
@@ -163,6 +165,8 @@ class MockEmbedder:
     """Mock embedding generator that returns fixed-dimension vectors."""
 
     EMBEDDING_DIM = 768
+    model_name = "mock-embedder"
+    embedding_dim = 768
 
     def encode_query(self, query: str) -> list[float]:
         """Return a deterministic embedding based on query hash."""
@@ -272,10 +276,10 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     """
     Provides a FastAPI TestClient with all services initialized using mocks.
 
+    Uses the REAL server app and routes, but with temporary storage and mock LLM/embedder.
     This doesn't require a running server, LLM, or GPU.
     """
     from fastapi.testclient import TestClient
-    from codemind.storage.database import Database
     from codemind.storage.lancedb_storage import LanceDBStorage
     from codemind.storage import ManifestManager
     from codemind.jobs import JobManager
@@ -287,11 +291,8 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     lance_dir = str(tmp_path / "lancedb_api_test")
     os.makedirs(lance_dir, exist_ok=True)
 
-    # We need to create the app from scratch with mocked dependencies
-    # to avoid needing a real LLM server
-    from fastapi import FastAPI
-
-    app = FastAPI()
+    # Use the REAL server app
+    from codemind.api.server import app
 
     # Initialize real-but-temporary storage
     manifest = ManifestManager(db_path=db_path)
@@ -300,6 +301,7 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     graph_db = SQLiteGraphAdapter(job_manager.db)
     graph_query = GraphQueryService(graph_db)
 
+    # Wire up app state with mocked/temp infrastructure
     app.state.manifest = manifest
     app.state.lance_storage = lance
     app.state.job_manager = job_manager
@@ -307,73 +309,18 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     app.state.graph_query = graph_query
     app.state.embedder = mock_embedder
 
-    # Import and register routes manually
-    # Health endpoint
-    @app.get("/api/v1/health")
-    async def health():
-        return {
-            "status": "healthy",
-            "version": "0.1.0-test",
-            "embedding_model": "mock",
-            "embedding_dim": 768,
-        }
-
-    # Import the real server routes we want to test
-    from codemind.api.server import IndexRequest, IndexResponse, SearchRequest
-
-    @app.post("/api/v1/index", response_model=IndexResponse)
-    async def index_repo(request: IndexRequest):
-        repo_path = request.repo_path or "/tmp/mock_repo"
-        repo_id = "test_repo_id_123"
-        job_id = job_manager.create_job(
-            repo_path=repo_path,
-            repo_url=request.repo_url,
-            branch=request.branch,
-            repo_id=repo_id,
-        )
-        return IndexResponse(job_id=job_id, status="pending", repo_id=repo_id)
-
-    @app.get("/api/v1/jobs/{job_id}")
-    async def get_job(job_id: str):
-        job = job_manager.get_job(job_id)
-        if not job:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Job not found")
-        return {
-            "job_id": job.id,
-            "repo_path": job.repo_path,
-            "status": job.status.value,
-            "stage": job.stage,
-            "progress": job.progress,
-            "error": job.error,
-            "repo_id": job.repo_id,
-        }
-
-    @app.post("/api/v1/search")
-    async def search(request: SearchRequest):
-        query_emb = mock_embedder.encode_query(request.query)
-        results = lance.search(query_emb, repo_id=request.repo_id, limit=request.limit)
-        return {"results": results, "count": len(results)}
-
-    @app.get("/api/v1/repos")
-    async def list_repos():
-        repos = manifest.list_repositories()
-        return [
-            {
-                "repo_id": r.repo_id,
-                "repo_path": r.repo_path,
-                "branch": r.branch,
-            }
-            for r in repos
-        ]
-
     # Initialize autonomous agents with mock LLM
     from codemind.api.autonomous_agents import init_autonomous_agents, router as autonomous_router
     init_autonomous_agents(lance, graph_query, mock_llm, mock_embedder, manifest, job_manager.db)
-    app.include_router(autonomous_router)
+
+    # Check if the autonomous router is already included
+    existing_paths = {route.path for route in app.routes}
+    if "/api/v1/agents/autonomous" not in existing_paths:
+        app.include_router(autonomous_router)
 
     client = TestClient(app)
     yield client
 
     # Cleanup
     graph_db.close()
+

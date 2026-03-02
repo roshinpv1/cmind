@@ -63,8 +63,13 @@ export default function ProposalCreate() {
     // Auto-generate requirements on mount if we have gap data
     useEffect(() => {
         if (isContribute && existingRepoId) {
+            // Contribute mode: load existing proposal
+            loadExistingProposal();
+        } else if (existingRepoId && !isContribute) {
+            // Editing existing proposal: load it instead of regenerating
             loadExistingProposal();
         } else if (gapName && !requirements) {
+            // New proposal: auto-generate requirements
             generateRequirements();
         }
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -73,15 +78,36 @@ export default function ProposalCreate() {
         setIsGenerating(true);
         setError("");
         try {
+            // GET /catalogs/{repo_id} returns a list of content entries
             const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(existingRepoId)}`);
             if (!res.ok) throw new Error("Failed to load proposal");
-            const data = await res.json();
-            setName(data.repo_name || gapName);
-            setDescription(data.description || gapDescription);
+            const entries = await res.json();
+
+            if (!Array.isArray(entries) || entries.length === 0) {
+                throw new Error("Proposal not found");
+            }
+
+            const data = entries[0]; // First entry contains the content JSON
+            setName(data.product_name || data.repo_name || gapName);
+            setDescription(data.summary_high_level || data.description || gapDescription);
+            setLayer(data.architecture_layer || architectureLayer);
+            setOrg(data.org || "");
+
+            // Requirements are stored on the CatalogStore row, fetch from list endpoint
+            const listRes = await fetch(`/api/v1/catalogs/list`);
+            if (listRes.ok) {
+                const allEntries = await listRes.json();
+                const match = allEntries.find((e: any) => e.repo_id === existingRepoId);
+                if (match) {
+                    setName(match.repo_name || data.product_name || gapName);
+                }
+            }
+
+            // Try to get requirements from the content data
             if (data.requirements) {
                 setRequirements(typeof data.requirements === "string" ? JSON.parse(data.requirements) : data.requirements);
             }
-            setOrg(data.org || "");
+
             setSavedId(existingRepoId);
             setSaved(true);
         } catch (err: any) {
@@ -99,7 +125,7 @@ export default function ProposalCreate() {
         setDuplicateEntry(null);
         try {
             // If we already have a saved proposal, use the regenerate endpoint
-            if (savedId) {
+            if (savedId && saved) {
                 const res = await fetch(`${API}/api/v1/catalogs/${encodeURIComponent(savedId)}/regenerate`, {
                     method: "POST",
                 });
