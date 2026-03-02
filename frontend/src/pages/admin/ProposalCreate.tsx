@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import {
     Sparkles,
@@ -61,12 +61,14 @@ export default function ProposalCreate() {
     const [gitBranch, setGitBranch] = useState("");
 
     // Auto-generate requirements on mount if we have gap data
+    // useRef guard prevents double-fire under React 18 StrictMode (dev only)
+    const hasRun = useRef(false);
     useEffect(() => {
-        if (isContribute && existingRepoId) {
-            // Contribute mode: load existing proposal
-            loadExistingProposal();
-        } else if (existingRepoId && !isContribute) {
-            // Editing existing proposal: load it instead of regenerating
+        if (hasRun.current) return;
+        hasRun.current = true;
+
+        if (existingRepoId) {
+            // Existing proposal (contribute or edit): load it
             loadExistingProposal();
         } else if (gapName && !requirements) {
             // New proposal: auto-generate requirements
