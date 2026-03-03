@@ -257,6 +257,9 @@ class PlannerAgent:
             "overall_health_score", "findings",
             "build_estimate", "reuse_estimate",
             "requirement_summary",
+            # Catalog search & design_solution results
+            "catalog_matches", "overall_confidence_score",
+            "architecture_composition", "decomposition", "capabilities",
         ]
         if tool_messages:
             last_tool_content = tool_messages[-1].content or ""
@@ -448,7 +451,7 @@ class PlannerAgent:
                     # Prefer structured "data" dict (Pydantic-validated) over raw "result" string
                     structured_data = outputs.get("data")
                     if isinstance(structured_data, dict) and any(
-                        k in structured_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")
+                        k in structured_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")
                     ):
                         playbook_output = structured_data
                     elif "result" in outputs:
@@ -465,7 +468,7 @@ class PlannerAgent:
                                 playbook_output = result_val
                         else:
                             playbook_output = result_val
-                    elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
+                    elif any(k in outputs for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")):
                         playbook_output = outputs
                     
                     for key, val in outputs.items():
@@ -486,7 +489,7 @@ class PlannerAgent:
                             # Prefer structured "data" dict if present
                             struct_data = parsed.get("data")
                             if isinstance(struct_data, dict) and any(
-                                k in struct_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")
+                                k in struct_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")
                             ):
                                 playbook_output = struct_data
                             elif "result" in parsed:
@@ -502,7 +505,7 @@ class PlannerAgent:
                                         playbook_output = result_val
                                 else:
                                     playbook_output = result_val
-                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name")):
+                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")):
                                 playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
                         pass
