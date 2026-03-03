@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useSearchParams, useNavigate } from "react-router-dom";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
     Sparkles,
     Loader2,
@@ -15,9 +17,34 @@ import {
     ListChecks,
     Cpu,
     GitBranch,
+    Eye,
+    Pencil,
 } from "lucide-react";
 
 const API = "";
+
+/** Reusable Markdown preview with prose styling */
+function MarkdownPreview({ content, className = "" }: { content: string; className?: string }) {
+    return (
+        <div className={`prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-700 prose-li:text-gray-700 prose-strong:text-gray-800 prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-violet-700 prose-code:text-xs prose-pre:bg-gray-900 prose-pre:text-gray-100 prose-a:text-violet-600 ${className}`}>
+            <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+        </div>
+    );
+}
+
+/** Toggle button for edit/preview mode */
+function FieldToggle({ editing, onToggle }: { editing: boolean; onToggle: () => void }) {
+    return (
+        <button
+            onClick={onToggle}
+            className="flex items-center gap-1 text-xs font-medium text-gray-400 hover:text-violet-600 transition-colors px-2 py-1 rounded-md hover:bg-violet-50"
+            title={editing ? "Preview" : "Edit"}
+        >
+            {editing ? <Eye className="w-3.5 h-3.5" /> : <Pencil className="w-3.5 h-3.5" />}
+            {editing ? "Preview" : "Edit"}
+        </button>
+    );
+}
 
 interface Requirements {
     functional_requirements: string[];
@@ -57,6 +84,7 @@ export default function ProposalCreate() {
     const [savedId, setSavedId] = useState(existingRepoId);
     const [error, setError] = useState("");
     const [editingField, setEditingField] = useState<string | null>(null);
+    const [editingTextFields, setEditingTextFields] = useState<Record<string, boolean>>({});
     const [gitUrl, setGitUrl] = useState("");
     const [gitBranch, setGitBranch] = useState("");
 
@@ -488,40 +516,67 @@ export default function ProposalCreate() {
             {/* Requirements Display */}
             {requirements && !isGenerating && (
                 <div className="space-y-4">
-                    {/* Data Model (string field) */}
+                    {/* Data Model (string field with markdown preview) */}
                     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-                        <div className="px-5 py-3 border-b border-gray-50 flex items-center gap-2">
-                            <Database className="h-4 w-4 text-indigo-600" />
-                            <h3 className="text-sm font-bold text-gray-800">Data Model</h3>
+                        <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <Database className="h-4 w-4 text-indigo-600" />
+                                <h3 className="text-sm font-bold text-gray-800">Data Model</h3>
+                            </div>
+                            <FieldToggle
+                                editing={editingTextFields.data_model ?? true}
+                                onToggle={() => setEditingTextFields(s => ({ ...s, data_model: !(s.data_model ?? true) }))}
+                            />
                         </div>
                         <div className="p-5">
-                            <textarea
-                                value={(() => { const v = requirements.data_model as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join('\n'); return v ? JSON.stringify(v) : ''; })()}
-                                onChange={(e) => {
-                                    setRequirements({ ...requirements, data_model: e.target.value });
-                                    setSaved(false);
-                                }}
-                                rows={3}
-                                className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-200"
-                            />
+                            {(editingTextFields.data_model ?? true) ? (
+                                <textarea
+                                    value={(() => { const v = requirements.data_model as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join('\n'); return v ? JSON.stringify(v) : ''; })()}
+                                    onChange={(e) => {
+                                        setRequirements({ ...requirements, data_model: e.target.value });
+                                        setSaved(false);
+                                    }}
+                                    rows={5}
+                                    className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-indigo-200 font-mono"
+                                />
+                            ) : (
+                                <MarkdownPreview
+                                    content={(() => { const v = requirements.data_model as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join('\n'); return v ? JSON.stringify(v) : '*No data model defined yet.*'; })()}
+                                    className="min-h-[60px]"
+                                />
+                            )}
                         </div>
                     </div>
 
-                    {/* Tech Stack (string field) */}
+                    {/* Tech Stack (string field with markdown preview) */}
                     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-                        <div className="px-5 py-3 border-b border-gray-50 flex items-center gap-2">
-                            <Layers className="h-4 w-4 text-cyan-600" />
-                            <h3 className="text-sm font-bold text-gray-800">Suggested Tech Stack</h3>
+                        <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <Layers className="h-4 w-4 text-cyan-600" />
+                                <h3 className="text-sm font-bold text-gray-800">Suggested Tech Stack</h3>
+                            </div>
+                            <FieldToggle
+                                editing={editingTextFields.tech_stack ?? true}
+                                onToggle={() => setEditingTextFields(s => ({ ...s, tech_stack: !(s.tech_stack ?? true) }))}
+                            />
                         </div>
                         <div className="p-5">
-                            <input
-                                value={(() => { const v = requirements.tech_stack_suggestion as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join(', '); return v ? JSON.stringify(v) : ''; })()}
-                                onChange={(e) => {
-                                    setRequirements({ ...requirements, tech_stack_suggestion: e.target.value });
-                                    setSaved(false);
-                                }}
-                                className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-cyan-200"
-                            />
+                            {(editingTextFields.tech_stack ?? true) ? (
+                                <textarea
+                                    value={(() => { const v = requirements.tech_stack_suggestion as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join(', '); return v ? JSON.stringify(v) : ''; })()}
+                                    onChange={(e) => {
+                                        setRequirements({ ...requirements, tech_stack_suggestion: e.target.value });
+                                        setSaved(false);
+                                    }}
+                                    rows={3}
+                                    className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-cyan-200 font-mono"
+                                />
+                            ) : (
+                                <MarkdownPreview
+                                    content={(() => { const v = requirements.tech_stack_suggestion as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join(', '); return v ? JSON.stringify(v) : '*No tech stack defined yet.*'; })()}
+                                    className="min-h-[40px]"
+                                />
+                            )}
                         </div>
                     </div>
 
@@ -567,12 +622,16 @@ export default function ProposalCreate() {
                                                     className="flex-1 text-sm text-gray-700 bg-violet-50 rounded px-2 py-1 border border-violet-200 focus:outline-none focus:ring-2 focus:ring-violet-300"
                                                 />
                                             ) : (
-                                                <span
+                                                <div
                                                     className="flex-1 text-sm text-gray-700 cursor-text hover:bg-gray-50 rounded px-2 py-1 -mx-2"
                                                     onClick={() => setEditingField(`${key}-${i}`)}
                                                 >
-                                                    {item || <span className="text-gray-300 italic">Click to edit</span>}
-                                                </span>
+                                                    {item ? (
+                                                        <MarkdownPreview content={item} className="[&>*:first-child]:mt-0 [&>*:last-child]:mb-0" />
+                                                    ) : (
+                                                        <span className="text-gray-300 italic">Click to edit</span>
+                                                    )}
+                                                </div>
                                             )}
                                             <button
                                                 onClick={() => removeRequirementItem(key, i)}
@@ -594,19 +653,33 @@ export default function ProposalCreate() {
 
                     {/* Estimated Effort */}
                     <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
-                        <div className="px-5 py-3 border-b border-gray-50 flex items-center gap-2">
-                            <FileText className="h-4 w-4 text-gray-600" />
-                            <h3 className="text-sm font-bold text-gray-800">Estimated Effort</h3>
+                        <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                                <FileText className="h-4 w-4 text-gray-600" />
+                                <h3 className="text-sm font-bold text-gray-800">Estimated Effort</h3>
+                            </div>
+                            <FieldToggle
+                                editing={editingTextFields.effort ?? true}
+                                onToggle={() => setEditingTextFields(s => ({ ...s, effort: !(s.effort ?? true) }))}
+                            />
                         </div>
                         <div className="p-5">
-                            <input
-                                value={requirements.estimated_effort || ""}
-                                onChange={(e) => {
-                                    setRequirements({ ...requirements, estimated_effort: e.target.value });
-                                    setSaved(false);
-                                }}
-                                className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-200"
-                            />
+                            {(editingTextFields.effort ?? true) ? (
+                                <textarea
+                                    value={requirements.estimated_effort || ""}
+                                    onChange={(e) => {
+                                        setRequirements({ ...requirements, estimated_effort: e.target.value });
+                                        setSaved(false);
+                                    }}
+                                    rows={3}
+                                    className="w-full text-sm text-gray-700 bg-gray-50 rounded-lg p-3 border border-gray-200 focus:outline-none focus:ring-2 focus:ring-gray-200 font-mono"
+                                />
+                            ) : (
+                                <MarkdownPreview
+                                    content={requirements.estimated_effort || "*No estimate provided.*"}
+                                    className="min-h-[40px]"
+                                />
+                            )}
                         </div>
                     </div>
 
