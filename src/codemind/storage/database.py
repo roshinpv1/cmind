@@ -123,10 +123,48 @@ class Database:
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
     def init_db(self):
-        """Create all tables if they don't exist."""
-        # Import models here to ensure they are registered with Base metadata if defined elsewhere
-        # (Though currently defined above)
+        """Create all tables if they don't exist, then migrate any missing columns."""
         Base.metadata.create_all(bind=self.engine)
+        self._migrate_schema()
+
+    def _migrate_schema(self):
+        """
+        Add any columns that exist in the ORM models but are missing from the
+        on-disk SQLite tables (i.e. databases created before a column was added).
+
+        SQLite supports ALTER TABLE … ADD COLUMN but not DROP/RENAME, so this
+        is safe to run on every startup — it is a no-op when the schema is current.
+        """
+        with self.engine.connect() as conn:
+            for table in Base.metadata.sorted_tables:
+                # Fetch current columns from the live table
+                result = conn.execute(text(f"PRAGMA table_info({table.name})"))
+                existing_columns = {row[1] for row in result}  # row[1] = column name
+
+                for column in table.columns:
+                    if column.name not in existing_columns:
+                        # Build a minimal column definition for ALTER TABLE
+                        col_type = column.type.compile(dialect=self.engine.dialect)
+                        nullable = "" if not column.nullable else ""
+                        default_clause = ""
+                        if column.default is not None and column.default.is_scalar:
+                            val = column.default.arg
+                            if isinstance(val, str):
+                                default_clause = f" DEFAULT '{val}'"
+                            elif val is None:
+                                default_clause = " DEFAULT NULL"
+                            else:
+                                default_clause = f" DEFAULT {val}"
+                        elif column.nullable:
+                            default_clause = " DEFAULT NULL"
+
+                        ddl = (
+                            f"ALTER TABLE {table.name} "
+                            f"ADD COLUMN {column.name} {col_type}{default_clause}"
+                        )
+                        print(f"[DB MIGRATE] Adding missing column: {table.name}.{column.name}")
+                        conn.execute(text(ddl))
+            conn.commit()
 
     def get_session(self):
         """
