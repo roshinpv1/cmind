@@ -798,13 +798,19 @@ async def list_catalog_entries(status: str | None = None):
             if entry.metadata_json:
                 meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else _json.loads(entry.metadata_json)
             
+            # Ensure tech_stack and category are always strings
+            raw_ts = meta.get("tech_stack", "")
+            tech_stack = ", ".join(raw_ts) if isinstance(raw_ts, list) else str(raw_ts) if raw_ts else ""
+            raw_cat = meta.get("category", "")
+            category = ", ".join(raw_cat) if isinstance(raw_cat, list) else str(raw_cat) if raw_cat else ""
+            
             results.append({
                 "repo_id": entry.repo_id,
                 "repo_name": entry.repo_name or entry.repo_id,
                 "org": entry.org or "",
                 "description": meta.get("summary_high_level", "")[:200],
-                "tech_stack": meta.get("tech_stack", ""),
-                "category": meta.get("category", ""),
+                "tech_stack": tech_stack,
+                "category": category,
                 "quality_score": entry.quality_score or meta.get("quality_score", 0),
                 "topics": meta.get("topics", []),
                 "repo_url": entry.git_url or meta.get("repo_url", ""),

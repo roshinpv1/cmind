@@ -21,8 +21,8 @@ interface CatalogEntry {
     repo_name: string;
     org: string;
     description: string;
-    tech_stack: string;
-    category: string;
+    tech_stack: any;  // May come as string or array from API
+    category: any;    // May come as string or array from API
     quality_score: number;
     topics: string[];
     repo_url: string;
@@ -33,6 +33,15 @@ interface CatalogEntry {
     created_at: number;
     updated_at: number;
     contributors?: { uid: string; org: string; contributed_at?: number }[];
+}
+
+/** Safely convert a value to a display string. */
+function safeStr(val: any): string {
+    if (val == null) return "";
+    if (typeof val === "string") return val;
+    if (Array.isArray(val)) return val.join(", ");
+    if (typeof val === "object") return JSON.stringify(val);
+    return String(val);
 }
 
 const STATUS_TABS = [
@@ -252,7 +261,7 @@ export default function CatalogList() {
                                                                 {entry.repo_id}
                                                             </div>
                                                         )}
-                                                        {entry.contributors && entry.contributors.length > 0 && (
+                                                        {Array.isArray(entry.contributors) && entry.contributors.length > 0 && (
                                                             <div className="flex flex-wrap gap-1 mt-1">
                                                                 <Users className="w-3 h-3 text-teal-500 mt-0.5" />
                                                                 {entry.contributors.map((c: any, ci: number) => (
@@ -289,9 +298,9 @@ export default function CatalogList() {
 
                                             {/* Category */}
                                             <td className="px-4 py-3">
-                                                {entry.category ? (
+                                                {safeStr(entry.category) ? (
                                                     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                                                        {entry.category}
+                                                        {safeStr(entry.category)}
                                                     </span>
                                                 ) : (
                                                     <span className="text-sm text-gray-400">—</span>
@@ -300,14 +309,14 @@ export default function CatalogList() {
 
                                             {/* Tech Stack */}
                                             <td className="px-4 py-3">
-                                                <div className="text-sm text-gray-700 truncate max-w-[180px]" title={entry.tech_stack}>
-                                                    {entry.tech_stack || "—"}
+                                                <div className="text-sm text-gray-700 truncate max-w-[180px]" title={safeStr(entry.tech_stack)}>
+                                                    {safeStr(entry.tech_stack) || "—"}
                                                 </div>
                                             </td>
 
                                             {/* Quality */}
                                             <td className="px-4 py-3">
-                                                <QualityBadge score={entry.quality_score} />
+                                                <QualityBadge score={typeof entry.quality_score === 'number' ? entry.quality_score : 0} />
                                             </td>
 
                                             {/* Updated */}
