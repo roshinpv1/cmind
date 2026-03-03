@@ -1,17 +1,18 @@
 import { useState, useEffect, useRef } from "react";
-import { Send, Loader2, Play, Terminal, Book, FileCode } from "lucide-react";
+import {
+    Send, Loader2, Terminal, FileCode, Search, Compass,
+    Package, BarChart3, Wrench, Scale, Sparkles, ChevronRight,
+    CheckCircle2, AlertTriangle, Star, Layers, Code2,
+    Brain
+} from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 interface Repo {
     id: string;
-    path: string;
-}
-
-interface LogEntry {
-    message: string;
-    type: "thought" | "action";
-    timestamp: string;
+    name: string;
+    branch: string;
+    status: string;
 }
 
 interface AgentJob {
@@ -21,36 +22,363 @@ interface AgentJob {
         answer: any;
         iterations: number;
         steps_taken: number;
+        playbooks_used?: string[];
     };
     logs: string[];
 }
 
+/* ─── Playbook Definitions ─────────────────────────────────────── */
+
+interface PlaybookDef {
+    id: string;
+    label: string;
+    icon: React.ReactNode;
+    color: string;
+    bgColor: string;
+    description: string;
+    requiresRepo: boolean;
+    templates: { label: string; prompt: string }[];
+}
+
+const PLAYBOOKS: PlaybookDef[] = [
+    {
+        id: "auto", label: "Auto-Pilot", icon: <Brain className="w-4 h-4" />,
+        color: "text-violet-600", bgColor: "bg-violet-50",
+        description: "Let the agent autonomously decide the best strategy",
+        requiresRepo: true,
+        templates: [
+            { label: "Analyze this codebase", prompt: "Analyze the overall architecture and key patterns of this codebase" },
+            { label: "Find similar components", prompt: "Search for similar components in the catalog that match this codebase's capabilities" },
+        ]
+    },
+    {
+        id: "code_analyzer", label: "Deep Code Analysis", icon: <Code2 className="w-4 h-4" />,
+        color: "text-blue-600", bgColor: "bg-blue-50",
+        description: "Deep-dive into code structure, patterns, and dependencies",
+        requiresRepo: true,
+        templates: [
+            { label: "Architecture overview", prompt: "What is the high-level architecture of this codebase?" },
+            { label: "API endpoints", prompt: "List all API endpoints with their request/response schemas" },
+            { label: "Key design patterns", prompt: "What design patterns are used in this codebase?" },
+        ]
+    },
+    {
+        id: "explore_codebase", label: "Explore Codebase", icon: <Compass className="w-4 h-4" />,
+        color: "text-teal-600", bgColor: "bg-teal-50",
+        description: "Navigate and explore files, symbols, and dependencies",
+        requiresRepo: true,
+        templates: [
+            { label: "Project structure", prompt: "Show me the project structure and main entry points" },
+            { label: "Find authentication logic", prompt: "Where is the authentication and authorization logic?" },
+            { label: "Database schema", prompt: "What is the database schema and data model?" },
+        ]
+    },
+    {
+        id: "search_catalogs", label: "Catalog Search", icon: <Search className="w-4 h-4" />,
+        color: "text-amber-600", bgColor: "bg-amber-50",
+        description: "Find existing components in the enterprise catalog",
+        requiresRepo: false,
+        templates: [
+            { label: "Agent framework", prompt: "Find components for building an AI agent framework" },
+            { label: "REST API gateway", prompt: "Find a REST API gateway or proxy service" },
+            { label: "Vector search", prompt: "Find components with vector search or embedding capabilities" },
+        ]
+    },
+    {
+        id: "design_solution", label: "Solution Architect", icon: <Layers className="w-4 h-4" />,
+        color: "text-indigo-600", bgColor: "bg-indigo-50",
+        description: "Design a multi-component architecture from existing catalog",
+        requiresRepo: false,
+        templates: [
+            { label: "E-commerce platform", prompt: "Design an e-commerce platform with catalog, cart, payments" },
+            { label: "ML pipeline", prompt: "Design an ML pipeline with data ingestion, training, and serving" },
+            { label: "Chat application", prompt: "Design a real-time chat application with message history" },
+        ]
+    },
+    {
+        id: "evaluate_build_vs_reuse", label: "Build vs Reuse", icon: <Scale className="w-4 h-4" />,
+        color: "text-emerald-600", bgColor: "bg-emerald-50",
+        description: "Compare building from scratch vs reusing existing components",
+        requiresRepo: false,
+        templates: [
+            { label: "Auth service", prompt: "Should I build or reuse an authentication service?" },
+            { label: "Notification system", prompt: "Evaluate build vs reuse for a notification/alerting system" },
+        ]
+    },
+    {
+        id: "generate_catalog", label: "Generate Catalog", icon: <Package className="w-4 h-4" />,
+        color: "text-orange-600", bgColor: "bg-orange-50",
+        description: "Analyze a repository and generate a catalog entry",
+        requiresRepo: true,
+        templates: [
+            { label: "Full catalog entry", prompt: "Generate a comprehensive catalog entry for this repository" },
+        ]
+    },
+    {
+        id: "analyze_svp", label: "SVP Analyzer", icon: <BarChart3 className="w-4 h-4" />,
+        color: "text-rose-600", bgColor: "bg-rose-50",
+        description: "Analyze software product viability and quality",
+        requiresRepo: true,
+        templates: [
+            { label: "Full SVP analysis", prompt: "Run a complete SVP (Software Viability & Performance) analysis" },
+        ]
+    },
+    {
+        id: "analyze_tech_debt", label: "Tech Debt Analysis", icon: <Wrench className="w-4 h-4" />,
+        color: "text-gray-600", bgColor: "bg-gray-100",
+        description: "Identify and quantify technical debt in the codebase",
+        requiresRepo: true,
+        templates: [
+            { label: "Full tech debt report", prompt: "Analyze technical debt — code duplication, outdated dependencies, complexity hotspots" },
+        ]
+    },
+];
+
+/* ─── Structured Result Renderers ──────────────────────────────── */
+
+function CatalogMatchCard({ match }: { match: any }) {
+    const conf = match.confidence_score ?? match.score ?? 0;
+    const confColor = conf >= 80 ? "text-green-600 bg-green-50" : conf >= 50 ? "text-amber-600 bg-amber-50" : "text-red-500 bg-red-50";
+    const entry = match.catalog_entry || {};
+    return (
+        <div className="border border-gray-100 rounded-xl p-4 bg-white shadow-sm hover:shadow-md transition-shadow">
+            <div className="flex items-start justify-between mb-2">
+                <div>
+                    <h4 className="font-bold text-gray-800 text-sm">{match.component_name || entry.repo_name || "Unknown"}</h4>
+                    <p className="text-xs text-gray-500">{match.capability || ""}</p>
+                </div>
+                <div className={`px-2.5 py-1 rounded-full text-xs font-bold ${confColor}`}>
+                    {conf}%
+                </div>
+            </div>
+            <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium mb-2 ${match.match_type === "Full Match" ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"
+                }`}>
+                {match.match_type || "Match"}
+            </span>
+            {match.reasoning && (
+                <p className="text-xs text-gray-600 mt-1 leading-relaxed">{match.reasoning}</p>
+            )}
+            {entry.tech_stack && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                    {String(entry.tech_stack).split(",").slice(0, 5).map((t: string, i: number) => (
+                        <span key={i} className="px-1.5 py-0.5 bg-gray-100 text-gray-600 text-[10px] rounded">{t.trim()}</span>
+                    ))}
+                </div>
+            )}
+            {entry.org && <p className="text-[10px] text-gray-400 mt-1">Org: {entry.org}</p>}
+        </div>
+    );
+}
+
+function GapCard({ gap }: { gap: any }) {
+    const name = typeof gap === "string" ? gap : gap.name || gap.description || JSON.stringify(gap);
+    const desc = typeof gap === "object" ? gap.description || "" : "";
+    const layer = typeof gap === "object" ? gap.architecture_layer || "" : "";
+    return (
+        <div className="border border-red-100 rounded-lg p-3 bg-red-50/50">
+            <div className="flex items-start gap-2">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 mt-0.5 shrink-0" />
+                <div>
+                    <p className="text-sm font-medium text-red-800">{name}</p>
+                    {desc && <p className="text-xs text-red-600 mt-0.5">{desc}</p>}
+                    {layer && <span className="inline-block mt-1 px-1.5 py-0.5 bg-red-100 text-red-600 text-[10px] rounded">{layer}</span>}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function StructuredResult({ data }: { data: any }) {
+    if (!data || typeof data === "string") {
+        return (
+            <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-code:bg-gray-100 prose-code:px-1 prose-code:rounded prose-code:text-violet-700 prose-pre:bg-gray-900 prose-pre:text-gray-100">
+                <Markdown remarkPlugins={[remarkGfm]}>{data || ""}</Markdown>
+            </div>
+        );
+    }
+
+    // Has report_markdown — render it directly
+    if (data.report_markdown) {
+        return (
+            <div className="prose prose-sm max-w-none prose-headings:text-gray-800 prose-code:bg-gray-100 prose-code:px-1 prose-code:rounded prose-code:text-violet-700 prose-pre:bg-gray-900 prose-pre:text-gray-100">
+                <Markdown remarkPlugins={[remarkGfm]}>{data.report_markdown}</Markdown>
+            </div>
+        );
+    }
+
+    const hasCatalogMatches = Array.isArray(data.catalog_matches) && data.catalog_matches.length > 0;
+    const hasGaps = Array.isArray(data.gaps) && data.gaps.length > 0;
+    const hasBuildEstimate = data.build_estimate || data.reuse_estimate;
+
+    return (
+        <div className="space-y-6">
+            {/* Requirement Summary */}
+            {data.requirement_summary && (
+                <div className="bg-gradient-to-r from-violet-50 to-indigo-50 rounded-xl p-4 border border-violet-100">
+                    <h3 className="text-xs font-bold text-violet-600 uppercase tracking-wider mb-1">Requirement</h3>
+                    <p className="text-sm text-gray-800">{data.requirement_summary}</p>
+                </div>
+            )}
+
+            {/* Overall Confidence */}
+            {data.overall_confidence_score !== undefined && (
+                <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                        <Star className="w-4 h-4 text-amber-500" />
+                        <span className="text-sm font-bold text-gray-700">Overall Confidence:</span>
+                    </div>
+                    <div className="flex-1 bg-gray-100 rounded-full h-2.5">
+                        <div
+                            className={`h-2.5 rounded-full transition-all ${data.overall_confidence_score >= 70 ? "bg-green-500" :
+                                data.overall_confidence_score >= 40 ? "bg-amber-500" : "bg-red-400"
+                                }`}
+                            style={{ width: `${Math.min(100, data.overall_confidence_score)}%` }}
+                        />
+                    </div>
+                    <span className="text-sm font-bold text-gray-800">{data.overall_confidence_score}%</span>
+                </div>
+            )}
+
+            {/* Catalog Matches */}
+            {hasCatalogMatches && (
+                <div>
+                    <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+                        Catalog Matches ({data.catalog_matches.length})
+                    </h3>
+                    <div className="grid grid-cols-1 gap-3">
+                        {data.catalog_matches.map((m: any, i: number) => (
+                            <CatalogMatchCard key={i} match={m} />
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* Architecture Composition */}
+            {data.architecture_composition && (
+                <div className="bg-indigo-50/50 rounded-xl p-4 border border-indigo-100">
+                    <h3 className="text-xs font-bold text-indigo-600 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                        <Layers className="w-3.5 h-3.5" />
+                        Architecture Composition
+                    </h3>
+                    <div className="prose prose-sm max-w-none text-gray-700">
+                        <Markdown remarkPlugins={[remarkGfm]}>{data.architecture_composition}</Markdown>
+                    </div>
+                </div>
+            )}
+
+            {/* Build vs Reuse */}
+            {hasBuildEstimate && (
+                <div className="grid grid-cols-2 gap-3">
+                    {data.build_estimate && (
+                        <div className="bg-orange-50 p-4 rounded-xl border border-orange-100">
+                            <h4 className="text-xs font-bold text-orange-600 uppercase mb-2">🔨 Build From Scratch</h4>
+                            <div className="prose prose-sm max-w-none text-gray-700">
+                                <Markdown remarkPlugins={[remarkGfm]}>
+                                    {typeof data.build_estimate === "string" ? data.build_estimate : JSON.stringify(data.build_estimate, null, 2)}
+                                </Markdown>
+                            </div>
+                        </div>
+                    )}
+                    {data.reuse_estimate && (
+                        <div className="bg-green-50 p-4 rounded-xl border border-green-100">
+                            <h4 className="text-xs font-bold text-green-600 uppercase mb-2">♻️ Reuse Existing</h4>
+                            <div className="prose prose-sm max-w-none text-gray-700">
+                                <Markdown remarkPlugins={[remarkGfm]}>
+                                    {typeof data.reuse_estimate === "string" ? data.reuse_estimate : JSON.stringify(data.reuse_estimate, null, 2)}
+                                </Markdown>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* Gaps */}
+            {hasGaps && (
+                <div>
+                    <h3 className="text-xs font-bold text-red-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        Gaps — Custom Development Needed ({data.gaps.length})
+                    </h3>
+                    <div className="space-y-2">
+                        {data.gaps.map((g: any, i: number) => <GapCard key={i} gap={g} />)}
+                    </div>
+                </div>
+            )}
+
+            {/* Risks */}
+            {Array.isArray(data.risks) && data.risks.length > 0 && (
+                <div className="bg-amber-50/50 rounded-xl p-4 border border-amber-100">
+                    <h3 className="text-xs font-bold text-amber-600 uppercase tracking-wider mb-2">⚠️ Risks</h3>
+                    <ul className="space-y-1">
+                        {data.risks.map((r: any, i: number) => (
+                            <li key={i} className="text-xs text-gray-700 flex items-start gap-1.5">
+                                <span className="text-amber-400 mt-0.5">•</span>
+                                {typeof r === "string" ? r : JSON.stringify(r)}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {/* Capabilities / Decomposition (compact) */}
+            {data.capabilities && (
+                <details className="group">
+                    <summary className="text-xs font-bold text-gray-500 uppercase tracking-wider cursor-pointer hover:text-gray-700">
+                        Capabilities & Decomposition
+                    </summary>
+                    <div className="mt-2 prose prose-sm max-w-none text-gray-600">
+                        <Markdown remarkPlugins={[remarkGfm]}>
+                            {JSON.stringify(data.capabilities, null, 2) + "\n\n" + (data.decomposition ? JSON.stringify(data.decomposition, null, 2) : "")}
+                        </Markdown>
+                    </div>
+                </details>
+            )}
+
+            {/* Fallback for other structured data */}
+            {!hasCatalogMatches && !hasGaps && !hasBuildEstimate && !data.architecture_composition && !data.requirement_summary && !data.report_markdown && (
+                <div className="prose prose-sm max-w-none">
+                    <Markdown remarkPlugins={[remarkGfm]}>
+                        {"```json\n" + JSON.stringify(data, null, 2) + "\n```"}
+                    </Markdown>
+                </div>
+            )}
+        </div>
+    );
+}
+
+/* ─── Main Component ───────────────────────────────────────────── */
+
 export default function ChatInterface() {
-    // State
     const [repos, setRepos] = useState<Repo[]>([]);
     const [selectedRepo, setSelectedRepo] = useState("");
-
     const [goal, setGoal] = useState("");
-    const [selectedPlaybook, setSelectedPlaybook] = useState("auto"); // auto, code_analyzer, catalog_browser
-
+    const [selectedPlaybook, setSelectedPlaybook] = useState("auto");
     const [currentJobId, setCurrentJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<AgentJob | null>(null);
     const [isPolling, setIsPolling] = useState(false);
-
     const logsEndRef = useRef<HTMLDivElement>(null);
 
-    // Load repositories on mount
+    const activePlaybook = PLAYBOOKS.find(p => p.id === selectedPlaybook) || PLAYBOOKS[0];
+
+    // Load repositories
     useEffect(() => {
-        fetch("/api/v1/repos") // We'll need to ensure this endpoint returns IDs
+        fetch("/api/v1/repos")
             .then(res => res.json())
-            .then(data => {
-                // Assuming data is list of strings or objects. 
-                // Adjust based on actual API response structure for /repos
-                // If /repos returns paths, we might need a way to get IDs. 
-                // For now, let's assume the API returns objects with id/path or just map path to id if they are same.
-                // Actually server.py list_repos returns list of objects with repo_id and path.
-                setRepos(data);
-                if (data.length > 0) setSelectedRepo(data[0].repo_id);
+            .then((data: any[]) => {
+                const mapped: Repo[] = data
+                    .filter(r => r.status === "indexed" || r.status === "catalog-only")
+                    .map(r => ({
+                        id: r.repo_id || r.id,
+                        name: r.name || r.path?.split('/').pop() || r.repo_id || "Unknown",
+                        branch: r.branch || "main",
+                        status: r.status || "unknown",
+                    }));
+                setRepos(mapped);
+                // Default to the first indexed repo
+                const indexed = mapped.find(r => r.status === "indexed");
+                if (indexed) setSelectedRepo(indexed.id);
+                else if (mapped.length > 0) setSelectedRepo(mapped[0].id);
             })
             .catch(err => console.error("Failed to load repos", err));
     }, []);
@@ -58,17 +386,14 @@ export default function ChatInterface() {
     // Poll status
     useEffect(() => {
         if (!currentJobId || !isPolling) return;
-
         const interval = setInterval(async () => {
             try {
                 const res = await fetch(`/api/v1/agents/autonomous/${currentJobId}/status`);
                 if (res.ok) {
                     const data = await res.json();
                     setJobStatus(data);
-
                     if (data.status === "completed" || data.status === "failed") {
                         setIsPolling(false);
-                        // Fetch final result details if completed
                         if (data.status === "completed") {
                             const resultRes = await fetch(`/api/v1/agents/autonomous/${currentJobId}/result`);
                             const resultData = await resultRes.json();
@@ -76,216 +401,222 @@ export default function ChatInterface() {
                         }
                     }
                 }
-            } catch (err) {
-                console.error("Polling error", err);
-            }
-        }, 1000); // Poll every second for real-time feel
-
+            } catch (err) { console.error("Polling error", err); }
+        }, 1000);
         return () => clearInterval(interval);
     }, [currentJobId, isPolling]);
 
-    // Scroll logs to bottom
+    // Scroll logs
     useEffect(() => {
         logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [jobStatus?.logs]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!goal.trim() || !selectedRepo) return;
+        if (!goal.trim()) return;
+        if (activePlaybook.requiresRepo && !selectedRepo) return;
 
-        // Reset state
         setJobStatus(null);
         setIsPolling(true);
 
         try {
-            // If specific playbook selected, wrap goal? 
-            // Actually, the autonomous agent picks the playbook.
-            // But if we want to FORCE a playbook, we might need to change the API or prompt.
-            // "User selected Catalog Browser". 
-            // We can prepend instruction: "Use the catalog_browser playbook to..."
-
-            let finalGoal = goal;
-            let allowedPlaybooks = null;
-
-            if (selectedPlaybook !== "auto") {
-                finalGoal = `Use the ${selectedPlaybook} playbook to: ${goal}`;
-                allowedPlaybooks = [selectedPlaybook];
-            }
+            const allowedPlaybooks = selectedPlaybook !== "auto" ? [selectedPlaybook] : null;
 
             const res = await fetch("/api/v1/agents/autonomous", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    goal: finalGoal,
-                    repo_id: selectedRepo,
-                    max_iterations: 15,
+                    goal: goal,
+                    repo_id: activePlaybook.requiresRepo ? selectedRepo : undefined,
+                    max_iterations: 10,
                     allowed_playbooks: allowedPlaybooks
                 })
             });
 
             const data = await res.json();
             setCurrentJobId(data.job_id);
-            setJobStatus({
-                job_id: data.job_id,
-                status: "pending",
-                logs: ["Initializing..."]
-            });
+            setJobStatus({ job_id: data.job_id, status: "pending", logs: ["Initializing..."] });
         } catch (err) {
             console.error("Failed to start job", err);
             setIsPolling(false);
         }
     };
 
-    const renderLogLine = (log: string, index: number) => {
-        const isThought = log.startsWith("Thinking:");
-        const isAction = log.startsWith("Action");
-
-        return (
-            <div key={index} className={`mb-2 font-mono text-xs md:text-sm p-2 rounded ${isAction ? "bg-blue-50 text-blue-800 border-l-4 border-blue-400" :
-                isThought ? "bg-gray-50 text-gray-600 italic" :
-                    "text-gray-700"
-                }`}>
-                {log}
-            </div>
-        );
+    const handleTemplateClick = (template: { label: string; prompt: string }) => {
+        setGoal(template.prompt);
     };
 
-    return (
-        <div className="max-w-6xl mx-auto h-[calc(100vh-6rem)] flex flex-col space-y-4">
-            {/* Header / Config */}
-            <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 flex flex-wrap gap-4 items-center justify-between">
-                <div className="flex items-center gap-4 flex-1">
-                    <div className="w-64">
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-1">Target Repository</label>
-                        <select
-                            value={selectedRepo}
-                            onChange={(e) => setSelectedRepo(e.target.value)}
-                            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-primary focus:ring-primary"
-                        >
-                            {repos.map(r => (
-                                <option key={r.id} value={r.id}>{r.path.split('/').pop()}</option>
-                            ))}
-                        </select>
-                    </div>
+    const answerData = jobStatus?.result?.answer;
 
-                    <div className="w-64">
-                        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-1">Agent Strategy</label>
-                        <select
-                            value={selectedPlaybook}
-                            onChange={(e) => setSelectedPlaybook(e.target.value)}
-                            className="w-full text-sm border-gray-300 rounded-md shadow-sm focus:border-primary focus:ring-primary"
+    return (
+        <div className="max-w-7xl mx-auto h-[calc(100vh-5rem)] flex flex-col gap-4 p-4">
+
+            {/* ─── Top Bar: Strategy + Repo ─── */}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                {/* Strategy Tabs */}
+                <div className="flex items-center gap-1 px-4 py-2.5 overflow-x-auto border-b border-gray-50 bg-gray-50/50">
+                    {PLAYBOOKS.map(pb => (
+                        <button
+                            key={pb.id}
+                            onClick={() => setSelectedPlaybook(pb.id)}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${selectedPlaybook === pb.id
+                                ? `${pb.bgColor} ${pb.color} shadow-sm ring-1 ring-black/5`
+                                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+                                }`}
                         >
-                            <option value="auto">🤖 Auto-Pilot (Let Agent Decide)</option>
-                            <option value="code_analyzer">💻 Deep Code Analysis</option>
-                            <option value="catalog_browser">📚 Catalog Search</option>
-                            <option value="generate_catalog">🏗️ Catalog Generator</option>
-                            <option value="analyze_svp">📊 SVP Product Analyzer</option>
-                        </select>
+                            {pb.icon}
+                            {pb.label}
+                        </button>
+                    ))}
+                </div>
+
+                {/* Strategy Description + Repo Selector */}
+                <div className="px-5 py-3 flex items-center justify-between gap-4">
+                    <div className="flex-1">
+                        <p className="text-xs text-gray-500">{activePlaybook.description}</p>
                     </div>
+                    {activePlaybook.requiresRepo && (
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Repository</label>
+                            <select
+                                value={selectedRepo}
+                                onChange={e => setSelectedRepo(e.target.value)}
+                                className="text-xs border-gray-200 rounded-lg shadow-sm focus:border-violet-300 focus:ring-violet-300 py-1.5 pr-8"
+                            >
+                                {repos.map(r => (
+                                    <option key={r.id} value={r.id}>
+                                        {r.name}{r.branch ? ` (${r.branch})` : ""}
+                                        {r.status === "catalog-only" ? " [catalog]" : ""}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                    {!activePlaybook.requiresRepo && (
+                        <span className="text-[10px] font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
+                            No repository needed
+                        </span>
+                    )}
                 </div>
             </div>
 
-            {/* Main Content Area: Split View */}
+            {/* ─── Main Split View ─── */}
             <div className="flex-1 flex gap-4 min-h-0">
-                {/* Left: Chat / Input / Logs */}
-                <div className="flex-1 flex flex-col bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
 
-                    {/* Log Stream -> Current Activity Display */}
-                    <div className="flex-1 overflow-y-auto p-8 bg-gray-50 flex flex-col items-center justify-center text-center">
-                        {!currentJobId && !jobStatus && (
-                            <div className="text-gray-400 flex flex-col items-center">
-                                <Terminal className="h-16 w-16 opacity-10 mb-4" />
-                                <p className="text-lg font-medium">Ready to assist.</p>
+                {/* ─── Left: Input + Activity ─── */}
+                <div className="w-[420px] shrink-0 flex flex-col gap-3">
+
+                    {/* Quick Templates */}
+                    {!isPolling && !jobStatus?.result && (
+                        <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-3">
+                            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Quick Start Templates</p>
+                            <div className="space-y-1.5">
+                                {activePlaybook.templates.map((t, i) => (
+                                    <button
+                                        key={i}
+                                        onClick={() => handleTemplateClick(t)}
+                                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs text-gray-600 hover:bg-violet-50 hover:text-violet-700 transition-colors group"
+                                    >
+                                        <ChevronRight className="w-3 h-3 text-gray-300 group-hover:text-violet-500 transition-colors" />
+                                        {t.label}
+                                    </button>
+                                ))}
                             </div>
-                        )}
-
-                        {jobStatus?.logs && jobStatus.logs.length > 0 && (
-                            <div className="max-w-xl w-full animate-in fade-in slide-in-from-bottom-4 duration-500">
-                                <div className="mb-4 text-xs font-semibold text-gray-400 uppercase tracking-widest">
-                                    Current Activity
-                                </div>
-                                {(() => {
-                                    const latestLog = jobStatus.logs[jobStatus.logs.length - 1];
-                                    const isThought = latestLog.startsWith("Thinking:");
-                                    const isAction = latestLog.startsWith("Action");
-                                    const cleanText = latestLog.replace(/^(Thinking:|Action \d+:)/, '').trim();
-
-                                    return (
-                                        <div className={`p-6 rounded-xl shadow-sm border transition-all duration-300 ${isAction ? "bg-blue-50 border-blue-100 text-blue-900" :
-                                            isThought ? "bg-white border-gray-200 text-gray-700" :
-                                                "bg-gray-100 text-gray-800"
-                                            }`}>
-                                            <div className="flex items-center justify-center gap-3 mb-3">
-                                                {isAction ? (
-                                                    <Play className="h-5 w-5 text-blue-500" />
-                                                ) : (
-                                                    <Loader2 className="h-5 w-5 text-indigo-500 animate-spin" />
-                                                )}
-                                                <span className={`font-bold text-sm uppercase ${isAction ? "text-blue-600" : "text-indigo-600"}`}>
-                                                    {isAction ? "Executing Tool" : "Reasoning"}
-                                                </span>
-                                            </div>
-                                            <div className="prose prose-sm max-w-none text-left bg-white/50 p-3 rounded border border-black/5">
-                                                <Markdown remarkPlugins={[remarkGfm]}>{cleanText}</Markdown>
-                                            </div>
-                                        </div>
-                                    );
-                                })()}
-                            </div>
-                        )}
-
-                        {jobStatus?.status === "completed" && (
-                            <div className="mt-8 text-green-600 font-medium flex items-center gap-2 animate-in fade-in">
-                                <span className="h-2 w-2 rounded-full bg-green-500" />
-                                Task Completed
-                            </div>
-                        )}
-                    </div>
+                        </div>
+                    )}
 
                     {/* Input Area */}
-                    <div className="p-4 bg-white border-t border-gray-200">
-                        <form onSubmit={handleSubmit} className="flex gap-2">
-                            <input
-                                type="text"
-                                className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent font-sans"
-                                placeholder={
-                                    selectedPlaybook === 'catalog_browser' ? "Search for architectural patterns or repo features..." :
-                                        selectedPlaybook === 'generate_catalog' ? "Analyze repo and generate catalog entry..." :
-                                            "Describe your coding task or question..."
+                    <form onSubmit={handleSubmit} className="bg-white rounded-xl border border-gray-100 shadow-sm p-3">
+                        <textarea
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-200 focus:border-violet-300 resize-none"
+                            placeholder={activePlaybook.templates[0]?.prompt || "Describe your goal..."}
+                            rows={3}
+                            value={goal}
+                            onChange={e => setGoal(e.target.value)}
+                            disabled={isPolling}
+                            onKeyDown={e => {
+                                if (e.key === "Enter" && !e.shiftKey) {
+                                    e.preventDefault();
+                                    handleSubmit(e);
                                 }
-                                value={goal}
-                                onChange={(e) => setGoal(e.target.value)}
-                                disabled={isPolling}
-                            />
+                            }}
+                        />
+                        <div className="flex items-center justify-between mt-2">
+                            <span className="text-[10px] text-gray-400">Shift+Enter for new line</span>
                             <button
                                 type="submit"
-                                disabled={isPolling || !goal.trim() || !selectedRepo}
-                                className="bg-primary text-white px-6 py-2 rounded-lg font-medium hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
+                                disabled={isPolling || !goal.trim() || (activePlaybook.requiresRepo && !selectedRepo)}
+                                className="bg-gradient-to-r from-violet-600 to-indigo-600 text-white px-5 py-2 rounded-lg text-xs font-bold hover:from-violet-700 hover:to-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 transition-all shadow-sm"
                             >
-                                {isPolling ? <Loader2 className="h-5 w-5 animate-spin" /> : <Send className="h-5 w-5" />}
-                                Start
+                                {isPolling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+                                {isPolling ? "Running..." : "Execute"}
                             </button>
-                        </form>
-                    </div>
+                        </div>
+                    </form>
+
+                    {/* Activity Feed */}
+                    {jobStatus && (
+                        <div className="flex-1 bg-white rounded-xl border border-gray-100 shadow-sm overflow-y-auto min-h-0">
+                            <div className="px-3 py-2 border-b border-gray-50 flex items-center gap-2">
+                                <Terminal className="w-3.5 h-3.5 text-gray-400" />
+                                <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Activity Log</span>
+                                {jobStatus.status === "running" && (
+                                    <Loader2 className="w-3 h-3 text-violet-500 animate-spin ml-auto" />
+                                )}
+                                {jobStatus.status === "completed" && (
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-green-500 ml-auto" />
+                                )}
+                                {jobStatus.status === "failed" && (
+                                    <AlertTriangle className="w-3.5 h-3.5 text-red-500 ml-auto" />
+                                )}
+                            </div>
+                            <div className="p-3 space-y-1.5">
+                                {jobStatus.logs?.map((log, i) => {
+                                    const isAction = log.startsWith("Action");
+                                    const isThinking = log.startsWith("Thinking");
+                                    return (
+                                        <div key={i} className={`text-[11px] px-2.5 py-1.5 rounded-md leading-relaxed ${isAction ? "bg-blue-50 text-blue-700 font-medium"
+                                            : isThinking ? "bg-gray-50 text-gray-500 italic"
+                                                : "text-gray-600"
+                                            }`}>
+                                            {log}
+                                        </div>
+                                    );
+                                })}
+                                {jobStatus.result && (
+                                    <div className="text-[10px] text-gray-400 pt-2 border-t border-gray-100 flex items-center gap-4">
+                                        <span>Steps: {jobStatus.result.steps_taken ?? 0}</span>
+                                        <span>Iterations: {jobStatus.result.iterations ?? 0}</span>
+                                        {jobStatus.result.playbooks_used && (
+                                            <span>Playbooks: {jobStatus.result.playbooks_used.join(", ")}</span>
+                                        )}
+                                    </div>
+                                )}
+                                <div ref={logsEndRef} />
+                            </div>
+                        </div>
+                    )}
                 </div>
 
-                {/* Right: Final Result Display */}
-                <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col">
-                    <div className="bg-gray-100 px-4 py-2 border-b border-gray-200 font-semibold text-gray-700 flex items-center gap-2">
-                        <FileCode className="h-4 w-4" /> Final Answer
+                {/* ─── Right: Result Panel ─── */}
+                <div className="flex-1 bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden flex flex-col min-h-0">
+                    <div className="px-4 py-2.5 border-b border-gray-100 flex items-center gap-2 bg-gray-50/50">
+                        <FileCode className="h-4 w-4 text-violet-500" />
+                        <span className="text-xs font-bold text-gray-600">Result</span>
+                        {answerData && (
+                            <span className="ml-auto text-[10px] text-gray-400">
+                                {typeof answerData === "string" ? `${answerData.length} chars` : `${Object.keys(answerData).length} fields`}
+                            </span>
+                        )}
                     </div>
-                    <div className="flex-1 overflow-y-auto p-6 prose prose-red max-w-none">
-                        {jobStatus?.result?.answer ? (
-                            <Markdown remarkPlugins={[remarkGfm]}>{
-                                typeof jobStatus.result.answer === "string"
-                                    ? jobStatus.result.answer
-                                    : jobStatus.result.answer.report_markdown
-                                        ? jobStatus.result.answer.report_markdown
-                                        : JSON.stringify(jobStatus.result.answer, null, 2)
-                            }</Markdown>
+                    <div className="flex-1 overflow-y-auto p-5">
+                        {answerData ? (
+                            <StructuredResult data={answerData} />
                         ) : (
-                            <div className="text-center text-gray-400 mt-20 italic">
-                                Final answer will appear here when analysis is complete.
+                            <div className="h-full flex flex-col items-center justify-center text-gray-300">
+                                <Sparkles className="h-12 w-12 opacity-20 mb-3" />
+                                <p className="text-sm font-medium">Results will appear here</p>
+                                <p className="text-xs mt-1">Select a template or type your goal to begin</p>
                             </div>
                         )}
                     </div>

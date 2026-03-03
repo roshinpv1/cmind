@@ -84,7 +84,11 @@ export default function ProposalCreate() {
     const [savedId, setSavedId] = useState(existingRepoId);
     const [error, setError] = useState("");
     const [editingField, setEditingField] = useState<string | null>(null);
-    const [editingTextFields, setEditingTextFields] = useState<Record<string, boolean>>({});
+    const [editingTextFields, setEditingTextFields] = useState<Record<string, boolean>>({
+        data_model: false,
+        tech_stack: false,
+        effort: false,
+    });
     const [gitUrl, setGitUrl] = useState("");
     const [gitBranch, setGitBranch] = useState("");
 
