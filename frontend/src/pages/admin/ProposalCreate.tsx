@@ -496,7 +496,7 @@ export default function ProposalCreate() {
                         </div>
                         <div className="p-5">
                             <textarea
-                                value={requirements.data_model || ""}
+                                value={(() => { const v = requirements.data_model as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join('\n'); return v ? JSON.stringify(v) : ''; })()}
                                 onChange={(e) => {
                                     setRequirements({ ...requirements, data_model: e.target.value });
                                     setSaved(false);
@@ -515,7 +515,7 @@ export default function ProposalCreate() {
                         </div>
                         <div className="p-5">
                             <input
-                                value={requirements.tech_stack_suggestion || ""}
+                                value={(() => { const v = requirements.tech_stack_suggestion as any; if (typeof v === 'string') return v; if (Array.isArray(v)) return v.join(', '); return v ? JSON.stringify(v) : ''; })()}
                                 onChange={(e) => {
                                     setRequirements({ ...requirements, tech_stack_suggestion: e.target.value });
                                     setSaved(false);
@@ -527,7 +527,11 @@ export default function ProposalCreate() {
 
                     {/* List-based sections */}
                     {sectionConfig.map(({ key, label, icon, color }) => {
-                        const items = (requirements[key] as string[]) || [];
+                        const rawItems = requirements[key];
+                        // Safely coerce to string array — API may return objects
+                        const items: string[] = Array.isArray(rawItems)
+                            ? rawItems.map((v: any) => typeof v === 'string' ? v : (v?.text || v?.name || JSON.stringify(v)))
+                            : [];
                         return (
                             <div key={key} className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
                                 <div className="px-5 py-3 border-b border-gray-50 flex items-center justify-between">
