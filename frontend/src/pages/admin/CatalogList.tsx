@@ -92,7 +92,15 @@ export default function CatalogList() {
                 return res.json();
             })
             .then((data) => {
-                setEntries(data);
+                // Deduplicate by repo_id (keep most recently updated)
+                const seen = new Map<string, CatalogEntry>();
+                for (const entry of data) {
+                    const existing = seen.get(entry.repo_id);
+                    if (!existing || (entry.updated_at > (existing.updated_at || 0))) {
+                        seen.set(entry.repo_id, entry);
+                    }
+                }
+                setEntries(Array.from(seen.values()));
                 setLoading(false);
             })
             .catch((err) => {
@@ -216,8 +224,8 @@ export default function CatalogList() {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-200">
-                                    {entries.map((entry) => (
-                                        <tr key={entry.repo_id} className="hover:bg-gray-50 transition-colors">
+                                    {entries.map((entry, idx) => (
+                                        <tr key={`${entry.repo_id}-${idx}`} className="hover:bg-gray-50 transition-colors">
                                             {/* Repository */}
                                             <td className="px-4 py-3">
                                                 <div className="flex items-center gap-2">

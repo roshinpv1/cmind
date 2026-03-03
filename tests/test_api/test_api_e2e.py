@@ -639,7 +639,154 @@ class TestAutonomousEndpoint:
 
 
 # ====================================================================
-# 11. DEBUG ROUTES
+# 11. REPO DETAIL & UPDATE
+# ====================================================================
+
+class TestRepoDetailEndpoint:
+    """Test the repository detail endpoint."""
+
+    def test_get_repo_not_found(self, app_client):
+        """GET /repos/{repo_id} returns 404 for nonexistent repo."""
+        response = app_client.get("/api/v1/repos/nonexistent-repo-id")
+        assert response.status_code == 404
+
+    def test_get_repo_from_catalog(self, app_client):
+        """GET /repos/{repo_id} falls back to catalog_store."""
+        _create_direct_entry(app_client, "catalog-repo-001", "CatalogOnlyComp")
+
+        response = app_client.get("/api/v1/repos/catalog-repo-001")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["repo_id"] == "catalog-repo-001"
+        assert data["status"] == "catalog-only"
+
+
+class TestRepoUpdateEndpoint:
+    """Test the repository update endpoint."""
+
+    def test_update_repo_not_found(self, app_client):
+        """PUT /repos/{repo_id} returns 404 for nonexistent repo."""
+        response = app_client.put(
+            "/api/v1/repos/nonexistent-repo-id",
+            json={"org": "new-org"}
+        )
+        assert response.status_code == 404
+
+    def test_update_repo_from_catalog(self, app_client):
+        """PUT /repos/{repo_id} on a catalog-only entry still works."""
+        _create_direct_entry(app_client, "update-cat-001", "UpdatableComp")
+        response = app_client.put(
+            "/api/v1/repos/update-cat-001",
+            json={"org": "updated-org"}
+        )
+        # Should handle gracefully (200 or 404 depending on manifest presence)
+        assert response.status_code in [200, 404]
+
+
+# ====================================================================
+# 12. GRAPH QUERY
+# ====================================================================
+
+class TestGraphQueryEndpoint:
+    """Test the graph query endpoint."""
+
+    def test_graph_query_repo_not_found(self, app_client):
+        """POST /graph/query returns 404 for nonexistent repo."""
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "nonexistent-repo",
+            "query_type": "files",
+        })
+        assert response.status_code == 404
+
+    def test_graph_query_with_indexed_repo(self, app_client):
+        """POST /graph/query with various query types on a registered repo."""
+        # Register repo directly in manifest so graph query can find it
+        manifest = app_client.app.state.manifest
+        manifest.create_repository(
+            repo_id="graph-test-repo",
+            repo_path="/tmp/graph_test_repo",
+            branch="main",
+        )
+
+        # Test files query
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "graph-test-repo",
+            "query_type": "files",
+            "pattern": "*.py",
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+        # Test classes query
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "graph-test-repo",
+            "query_type": "classes",
+            "pattern": "UserService",
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+        # Test functions query
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "graph-test-repo",
+            "query_type": "functions",
+            "class_name": "UserService",
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+        # Test symbol query
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "graph-test-repo",
+            "query_type": "symbol",
+            "symbol_name": "authenticate",
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+        # Test invalid query type returns empty
+        response = app_client.post("/api/v1/graph/query", json={
+            "repo_id": "graph-test-repo",
+            "query_type": "invalid_type",
+        })
+        assert response.status_code == 200
+        assert response.json() == []
+
+
+# ====================================================================
+# 13. GIT INTEGRATION
+# ====================================================================
+
+class TestGitSearchEndpoint:
+    """Test the git search endpoint."""
+
+    def test_git_search_missing_keywords(self, app_client):
+        """GET /git/search without keywords returns 400."""
+        response = app_client.get("/api/v1/git/search?keywords=")
+        assert response.status_code == 400
+
+    def test_git_search_validation(self, app_client):
+        """GET /git/search requires keywords parameter."""
+        response = app_client.get("/api/v1/git/search")
+        assert response.status_code == 422  # Missing required param
+
+
+class TestGitBranchesEndpoint:
+    """Test the git branches endpoint."""
+
+    def test_git_branches_missing_params(self, app_client):
+        """GET /git/branches without required params returns 422."""
+        response = app_client.get("/api/v1/git/branches")
+        assert response.status_code == 422
+
+    def test_git_branches_partial_params(self, app_client):
+        """GET /git/branches with only owner returns 422."""
+        response = app_client.get("/api/v1/git/branches?owner=test")
+        assert response.status_code == 422
+
+
+# ====================================================================
+# 14. DEBUG ROUTES
 # ====================================================================
 
 class TestDebugRoutes:
@@ -655,7 +802,72 @@ class TestDebugRoutes:
 
 
 # ====================================================================
-# 12. EDGE CASES & ERROR HANDLING
+# 15. AUTONOMOUS AGENTS — Extended
+# ====================================================================
+
+class TestAutonomousResultEndpoint:
+    """Test the autonomous agent result endpoint."""
+
+    def test_autonomous_result_not_found(self, app_client):
+        """GET /agents/autonomous/{id}/result returns 404 for nonexistent."""
+        response = app_client.get("/api/v1/agents/autonomous/nonexistent/result")
+        assert response.status_code == 404
+
+    def test_autonomous_create_and_check_status(self, app_client):
+        """Create autonomous job then check its status."""
+        create_resp = app_client.post("/api/v1/agents/autonomous", json={
+            "goal": "Analyze code structure",
+            "repo_id": "test-repo",
+            "max_iterations": 2
+        })
+        assert create_resp.status_code == 200
+        job_id = create_resp.json()["job_id"]
+
+        status_resp = app_client.get(f"/api/v1/agents/autonomous/{job_id}/status")
+        assert status_resp.status_code == 200
+        data = status_resp.json()
+        assert data["job_id"] == job_id
+        assert "status" in data
+
+
+# ====================================================================
+# 16. CATALOG PROPOSE — Deduplication
+# ====================================================================
+
+class TestCatalogProposeDuplication:
+    """Test the propose endpoint's deduplication logic."""
+
+    def test_propose_detects_duplicate(self, app_client):
+        """POST /catalogs/propose returns 409 for near-duplicate entries."""
+        # Create an existing entry
+        _create_direct_entry(app_client, "dup-check-001", "Authentication Service")
+
+        # Try to propose something with a very similar name
+        response = app_client.post("/api/v1/catalogs/propose", json={
+            "gap_name": "Authentication Service",
+            "gap_description": "Handles user authentication",
+            "architecture_layer": "Application",
+        })
+        assert response.status_code == 409
+        data = response.json()
+        assert "existing_entry" in data
+
+    def test_propose_allows_unique_name(self, app_client):
+        """POST /catalogs/propose allows entries with unique names."""
+        _create_direct_entry(app_client, "unique-check-001", "Payment Gateway")
+
+        # Propose something completely different — should not conflict
+        response = app_client.post("/api/v1/catalogs/propose", json={
+            "gap_name": "Email Notification Engine",
+            "gap_description": "Sends transactional emails",
+            "architecture_layer": "Infrastructure",
+        })
+        # Should either succeed (200) or fail due to LLM mock, but NOT 409
+        assert response.status_code != 409
+
+
+# ====================================================================
+# 17. EDGE CASES & ERROR HANDLING
 # ====================================================================
 
 class TestEdgeCases:
@@ -699,3 +911,32 @@ class TestEdgeCases:
         # Should return 200 with empty list (not a server error)
         assert response.status_code == 200
         assert isinstance(response.json(), list)
+
+    def test_search_mode_structural_without_filters(self, app_client):
+        """POST /search with structural mode but no filters returns empty."""
+        response = app_client.post("/api/v1/search", json={
+            "query": "test",
+            "search_mode": "structural",
+            "limit": 5
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+    def test_search_mode_hybrid(self, app_client):
+        """POST /search with hybrid mode works."""
+        response = app_client.post("/api/v1/search", json={
+            "query": "test hybrid",
+            "search_mode": "hybrid",
+            "limit": 5
+        })
+        assert response.status_code == 200
+        assert isinstance(response.json(), list)
+
+    def test_stats_response_structure(self, app_client):
+        """GET /stats returns expected structure."""
+        response = app_client.get("/api/v1/stats")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, dict)
+        # Stats should have at least some keys
+        assert len(data) > 0

@@ -782,12 +782,18 @@ async def list_catalog_entries(status: str | None = None):
     db_inst = manifest.db
     
     results = []
+    seen_ids = set()
     with db_inst.get_session() as session:
         query = session.query(CatalogStore)
         if status:
             query = query.filter(CatalogStore.status == status)
         entries = query.order_by(CatalogStore.updated_at.desc()).all()
         for entry in entries:
+            # Deduplicate by repo_id (keep most recent, which comes first)
+            if entry.repo_id in seen_ids:
+                continue
+            seen_ids.add(entry.repo_id)
+            
             meta = {}
             if entry.metadata_json:
                 meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else _json.loads(entry.metadata_json)
