@@ -92,6 +92,50 @@ def _parse_openai_response(data: dict) -> List[np.ndarray]:
     return [np.array(item["embedding"]) for item in results]
 
 
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds, doubles each retry
+
+
+async def _post_with_retry(
+    post_fn,
+    texts: List[str],
+    retries: int = _MAX_RETRIES,
+) -> List[np.ndarray]:
+    """Call post_fn(texts) with retry logic.
+
+    - 400 Bad Request → split batch in half and retry each half (payload too large)
+    - 429 / 5xx       → exponential backoff then retry
+    - Other errors     → raise immediately
+    """
+    try:
+        return await post_fn(texts)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code
+
+        # --- 400: batch too large → halve and retry ---
+        if status == 400 and len(texts) > 1:
+            mid = len(texts) // 2
+            logger.warning(
+                f"[EMBEDDING] 400 Bad Request on batch of {len(texts)} — "
+                f"splitting into {mid} + {len(texts) - mid} and retrying"
+            )
+            left = await _post_with_retry(post_fn, texts[:mid], retries)
+            right = await _post_with_retry(post_fn, texts[mid:], retries)
+            return left + right
+
+        # --- 429 / 5xx: transient → backoff ---
+        if (status == 429 or status >= 500) and retries > 0:
+            wait = _RETRY_BACKOFF * (_MAX_RETRIES - retries + 1)
+            logger.warning(
+                f"[EMBEDDING] {status} error — retrying in {wait:.0f}s "
+                f"({retries} retries left)"
+            )
+            await asyncio.sleep(wait)
+            return await _post_with_retry(post_fn, texts, retries - 1)
+
+        raise  # unrecoverable
+
+
 # ---------------------------------------------------------------------------
 # Base class
 # ---------------------------------------------------------------------------
@@ -210,27 +254,35 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
-    def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                f"{self.base_url}/embeddings",
-                headers=self._headers(),
-                json={"model": self.model_name, "input": cleaned},
-            )
-            resp.raise_for_status()
-            return _parse_openai_response(resp.json())
-
-    async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
+    async def _async_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{self.base_url}/embeddings",
                 headers=self._headers(),
-                json={"model": self.model_name, "input": cleaned},
+                json={"model": self.model_name, "input": cleaned_texts},
             )
             resp.raise_for_status()
             return _parse_openai_response(resp.json())
+
+    def _sync_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                f"{self.base_url}/embeddings",
+                headers=self._headers(),
+                json={"model": self.model_name, "input": cleaned_texts},
+            )
+            response.raise_for_status()
+            data = response.json()
+            results = sorted(data["data"], key=lambda x: x["index"])
+            return [np.array(item["embedding"]) for item in results]
+
+    def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        cleaned = _clean_texts(texts, self.max_tokens)
+        return _run_async(_post_with_retry(self._async_post, cleaned))
+
+    async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
+        cleaned = _clean_texts(texts, self.max_tokens)
+        return await _post_with_retry(self._async_post, cleaned)
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +345,11 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
 
     async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
         cleaned = _clean_texts(texts, self.max_tokens)
-        return await self._post_async(cleaned)
+        return await _post_with_retry(self._post_async, cleaned)
 
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
         cleaned = _clean_texts(texts, self.max_tokens)
-        return _run_async(self._post_async(cleaned))
+        return _run_async(_post_with_retry(self._post_async, cleaned))
 
 
 # ---------------------------------------------------------------------------
