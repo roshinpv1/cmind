@@ -16,6 +16,7 @@ Environment variables (all optional, sensible defaults):
   EMBEDDING_QUERY_PREFIX    Query instruction prefix
   EMBEDDING_API_URL         Remote endpoint URL
   EMBEDDING_API_KEY         Remote API key
+  EMBEDDING_TIMEOUT         HTTP timeout seconds      (default: 60)
 """
 
 import asyncio
@@ -46,35 +47,39 @@ from .chunker import CodeChunk
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Constants & shared helpers
 # ---------------------------------------------------------------------------
 
-_CHARS_PER_TOKEN = 4  # conservative estimate, same as ASTChunker
+_CHARS_PER_TOKEN = 4  # conservative estimate (~4 chars per token)
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds, doubles each retry
 
 
-def _truncate_text(text: str, max_tokens: int) -> str:
-    """Truncate a text to fit within max_tokens (safety net).
+def _prepare_texts(texts: List[str], max_tokens: int) -> List[str]:
+    """Truncate and normalise texts ONCE before sending to any provider.
 
-    The upstream ASTChunker should already size chunks correctly.
-    This is a last-resort guard against token-limit errors.
+    This is the single point of text preparation — providers receive
+    already-cleaned texts and never do their own truncation.
+
+    - Truncates to max_tokens * 4 chars (safety net; ASTChunker should
+      already produce correctly-sized chunks)
+    - Replaces newlines with spaces (required by most HTTP APIs)
     """
-    limit = max_tokens * _CHARS_PER_TOKEN
-    if len(text) > limit:
-        logger.warning(
-            f"[EMBEDDING] Truncating text from {len(text)} to {limit} chars "
-            f"(max_tokens={max_tokens})"
-        )
-        return text[:limit]
-    return text
-
-
-def _clean_texts(texts: List[str], max_tokens: int) -> List[str]:
-    """Truncate and normalise whitespace for API-based providers."""
-    return [_truncate_text(t, max_tokens).replace("\n", " ") for t in texts]
+    char_limit = max_tokens * _CHARS_PER_TOKEN
+    cleaned: List[str] = []
+    for t in texts:
+        if len(t) > char_limit:
+            logger.warning(
+                f"[EMBEDDING] Truncating text from {len(t)} to {char_limit} "
+                f"chars (max_tokens={max_tokens})"
+            )
+            t = t[:char_limit]
+        cleaned.append(t.replace("\n", " "))
+    return cleaned
 
 
 def _run_async(coro):
-    """Run an async coroutine from sync context, handling existing event loops."""
+    """Run an async coroutine from sync context, handling existing loops."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -92,18 +97,14 @@ def _parse_openai_response(data: dict) -> List[np.ndarray]:
     return [np.array(item["embedding"]) for item in results]
 
 
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = 2.0  # seconds, doubles each retry
-
-
 async def _post_with_retry(
     post_fn,
     texts: List[str],
     retries: int = _MAX_RETRIES,
 ) -> List[np.ndarray]:
-    """Call post_fn(texts) with retry logic.
+    """Call post_fn(texts) with automatic retry.
 
-    - 400 Bad Request → split batch in half and retry each half (payload too large)
+    - 400 Bad Request → split batch in half, retry each half (payload too large)
     - 429 / 5xx       → exponential backoff then retry
     - Other errors     → raise immediately
     """
@@ -112,18 +113,18 @@ async def _post_with_retry(
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
 
-        # --- 400: batch too large → halve and retry ---
+        # 400: batch too large → halve and retry
         if status == 400 and len(texts) > 1:
             mid = len(texts) // 2
             logger.warning(
-                f"[EMBEDDING] 400 Bad Request on batch of {len(texts)} — "
+                f"[EMBEDDING] 400 on batch of {len(texts)} — "
                 f"splitting into {mid} + {len(texts) - mid} and retrying"
             )
             left = await _post_with_retry(post_fn, texts[:mid], retries)
             right = await _post_with_retry(post_fn, texts[mid:], retries)
             return left + right
 
-        # --- 429 / 5xx: transient → backoff ---
+        # 429 / 5xx: transient → backoff
         if (status == 429 or status >= 500) and retries > 0:
             wait = _RETRY_BACKOFF * (_MAX_RETRIES - retries + 1)
             logger.warning(
@@ -142,7 +143,11 @@ async def _post_with_retry(
 
 
 class EmbeddingProvider(ABC):
-    """Abstract base for all embedding providers."""
+    """Abstract base for all embedding providers.
+
+    Subclasses implement encode_batch() and optionally encode_batch_async().
+    Text cleaning is handled by the Generator — providers receive clean text.
+    """
 
     supports_async: bool = False
 
@@ -152,6 +157,7 @@ class EmbeddingProvider(ABC):
 
     @abstractmethod
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        """Encode a batch of already-cleaned texts."""
         ...
 
     async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
@@ -212,9 +218,10 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
 
     supports_async = True
 
-    def __init__(self, model_name: str, max_tokens: int):
+    def __init__(self, model_name: str, max_tokens: int, timeout: float):
         self.model_name = model_name
         self.max_tokens = max_tokens
+        self.timeout = timeout
         self.base_url = os.environ.get("EMBEDDING_API_URL")
         self.api_key = os.environ.get("EMBEDDING_API_KEY")
 
@@ -228,7 +235,10 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
         )
 
     def _detect_dimension(self) -> int:
-        """Probe the remote API for embedding dimension."""
+        """Probe the API for embedding dimension, fall back to env var."""
+        override = os.getenv("EMBEDDING_DIMENSION")
+        if override:
+            return int(override)
         try:
             with httpx.Client(timeout=10.0) as client:
                 resp = client.post(
@@ -241,7 +251,7 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
                 logger.info(f"[EMBEDDING] Auto-detected dim: {dim}")
                 return dim
         except Exception as e:
-            fallback = int(os.getenv("EMBEDDING_DIMENSION", "768"))
+            fallback = 768
             logger.warning(f"[EMBEDDING] Dim detection failed ({e}), using {fallback}")
             return fallback
 
@@ -254,35 +264,22 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
-    async def _async_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
-        async with httpx.AsyncClient(timeout=60.0) as client:
+    async def _post(self, texts: List[str]) -> List[np.ndarray]:
+        """Single async POST to the embeddings endpoint."""
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(
                 f"{self.base_url}/embeddings",
                 headers=self._headers(),
-                json={"model": self.model_name, "input": cleaned_texts},
+                json={"model": self.model_name, "input": texts},
             )
             resp.raise_for_status()
             return _parse_openai_response(resp.json())
 
-    def _sync_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(
-                f"{self.base_url}/embeddings",
-                headers=self._headers(),
-                json={"model": self.model_name, "input": cleaned_texts},
-            )
-            response.raise_for_status()
-            data = response.json()
-            results = sorted(data["data"], key=lambda x: x["index"])
-            return [np.array(item["embedding"]) for item in results]
-
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
-        return _run_async(_post_with_retry(self._async_post, cleaned))
+        return _run_async(_post_with_retry(self._post, texts))
 
     async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
-        return await _post_with_retry(self._async_post, cleaned)
+        return await _post_with_retry(self._post, texts)
 
 
 # ---------------------------------------------------------------------------
@@ -295,12 +292,13 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
 
     supports_async = True
 
-    def __init__(self, model_name: str, max_tokens: int):
+    def __init__(self, model_name: str, max_tokens: int, timeout: float):
         if not ApigeeTokenManager:
             raise ImportError("ApigeeTokenManager not available")
 
         self.model_name = model_name
         self.max_tokens = max_tokens
+        self.timeout = timeout
         self.token_manager = ApigeeTokenManager()
         self.base_url = os.environ.get("ENTERPRISE_BASE_URL")
         self.wf_client_id = os.environ.get("WF_CLIENT_ID")
@@ -332,24 +330,23 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
-    async def _post_async(self, cleaned: List[str]) -> List[np.ndarray]:
+    async def _post(self, texts: List[str]) -> List[np.ndarray]:
+        """Single async POST to the Apigee embeddings endpoint."""
         token = await self.token_manager.get_token()
-        async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
+        async with httpx.AsyncClient(verify=False, timeout=self.timeout) as client:
             resp = await client.post(
                 f"{self.base_url}/v1/embeddings",
                 headers=self._headers(token),
-                json={"model": self.model_name, "input": cleaned},
+                json={"model": self.model_name, "input": texts},
             )
             resp.raise_for_status()
             return _parse_openai_response(resp.json())
 
-    async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
-        return await _post_with_retry(self._post_async, cleaned)
-
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        cleaned = _clean_texts(texts, self.max_tokens)
-        return _run_async(_post_with_retry(self._post_async, cleaned))
+        return _run_async(_post_with_retry(self._post, texts))
+
+    async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
+        return await _post_with_retry(self._post, texts)
 
 
 # ---------------------------------------------------------------------------
@@ -360,11 +357,9 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
 class EmbeddingGenerator:
     """High-level API for generating embeddings.
 
-    Reads all config from env vars:
-        EMBEDDING_PROVIDER, EMBEDDING_MODEL, EMBEDDING_MAX_TOKENS,
-        EMBEDDING_BATCH_SIZE, EMBEDDING_MAX_CONCURRENT, EMBEDDING_QUERY_PREFIX
-
-    Automatically selects parallel dispatch for HTTP providers.
+    Reads all config from env vars. Handles text preparation (truncation
+    and normalization) uniformly before passing to any provider. Dispatches
+    batches in parallel for HTTP providers, sequentially for local.
     """
 
     def __init__(
@@ -374,20 +369,22 @@ class EmbeddingGenerator:
         batch_size: int | None = None,
         query_prefix: str | None = None,
     ):
+        # ── Read all config from env ──
         self.provider_type = os.getenv("EMBEDDING_PROVIDER", "local").lower()
         self.model_name = model_name or os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         self.max_tokens = max_tokens or int(os.getenv("EMBEDDING_MAX_TOKENS", "512"))
         self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
         self.max_concurrent = int(os.getenv("EMBEDDING_MAX_CONCURRENT", "4"))
+        self.timeout = float(os.getenv("EMBEDDING_TIMEOUT", "60"))
         self.query_prefix = query_prefix or os.getenv(
             "EMBEDDING_QUERY_PREFIX",
             "Represent this sentence for searching relevant passages: ",
         )
 
         logger.info(
-            f"[EMBEDDING] Initializing provider={self.provider_type} "
-            f"model={self.model_name} max_tokens={self.max_tokens} "
-            f"batch_size={self.batch_size} max_concurrent={self.max_concurrent}"
+            f"[EMBEDDING] provider={self.provider_type} model={self.model_name} "
+            f"max_tokens={self.max_tokens} batch_size={self.batch_size} "
+            f"max_concurrent={self.max_concurrent} timeout={self.timeout}s"
         )
 
         self.provider = self._create_provider()
@@ -395,19 +392,19 @@ class EmbeddingGenerator:
 
     def _create_provider(self) -> EmbeddingProvider:
         if self.provider_type == "apigee":
-            return ApigeeEmbeddingProvider(self.model_name, self.max_tokens)
+            return ApigeeEmbeddingProvider(self.model_name, self.max_tokens, self.timeout)
         if self.provider_type == "remote":
-            return RemoteEmbeddingProvider(self.model_name, self.max_tokens)
+            return RemoteEmbeddingProvider(self.model_name, self.max_tokens, self.timeout)
         if self.provider_type == "local":
             return LocalEmbeddingProvider(self.model_name, self.max_tokens, self.batch_size)
         # Auto-detect: if EMBEDDING_API_URL is set, use remote; else local
         if os.environ.get("EMBEDDING_API_URL"):
             logger.info(f"[EMBEDDING] Unknown provider '{self.provider_type}', using remote")
-            return RemoteEmbeddingProvider(self.model_name, self.max_tokens)
+            return RemoteEmbeddingProvider(self.model_name, self.max_tokens, self.timeout)
         return LocalEmbeddingProvider(self.model_name, self.max_tokens, self.batch_size)
 
     # ------------------------------------------------------------------
-    # Batch embedding
+    # Batch embedding (main entry point for indexing)
     # ------------------------------------------------------------------
 
     def generate_embeddings(
@@ -415,8 +412,8 @@ class EmbeddingGenerator:
     ) -> list[tuple[CodeChunk, np.ndarray]]:
         """Generate embeddings for new chunks (skips already-indexed ones).
 
-        For HTTP providers: dispatches batches in parallel (up to max_concurrent).
-        For local provider: processes batches sequentially (GPU handles parallelism).
+        Text preparation (truncation, normalization) is applied here —
+        providers receive cleaned text.
         """
         if existing_hashes is None:
             existing_hashes = set()
@@ -425,7 +422,11 @@ class EmbeddingGenerator:
         if not new_chunks:
             return []
 
-        texts = [c.text for c in new_chunks]
+        # ── Prepare texts ONCE (truncate + normalize) ──
+        raw_texts = [c.text for c in new_chunks]
+        texts = _prepare_texts(raw_texts, self.max_tokens)
+
+        # ── Batch ──
         batches = [
             texts[i: i + self.batch_size]
             for i in range(0, len(texts), self.batch_size)
@@ -435,6 +436,7 @@ class EmbeddingGenerator:
             f"[EMBEDDING] Embedding {len(texts)} chunks in {len(batches)} batches"
         )
 
+        # ── Dispatch ──
         if self.provider.supports_async and len(batches) > 1:
             all_embeddings = self._parallel_embed(batches)
         else:
@@ -446,7 +448,7 @@ class EmbeddingGenerator:
     def _sequential_embed(
         self, batches: List[List[str]], total: int
     ) -> List[np.ndarray]:
-        """Process batches one at a time."""
+        """Process batches one at a time (local GPU or single-batch HTTP)."""
         all_embeddings: List[np.ndarray] = []
         for i, batch in enumerate(batches):
             embs = self.provider.encode_batch(batch)
@@ -473,7 +475,6 @@ class EmbeddingGenerator:
             results = await asyncio.gather(
                 *[_one(i, b) for i, b in enumerate(batches)]
             )
-            # Re-assemble in original order
             ordered = [embs for _, embs in sorted(results, key=lambda r: r[0])]
             flat: List[np.ndarray] = []
             for batch_embs in ordered:
@@ -489,12 +490,14 @@ class EmbeddingGenerator:
     def encode_query(self, query: str) -> list[float]:
         """Encode a search query with the instruction prefix."""
         prefixed = f"{self.query_prefix}{query}"
-        embs = self.provider.encode_batch([prefixed])
+        cleaned = _prepare_texts([prefixed], self.max_tokens)
+        embs = self.provider.encode_batch(cleaned)
         return embs[0].tolist() if len(embs) > 0 else []
 
     def encode_document(self, text: str) -> list[float]:
         """Encode a document text (no prefix)."""
-        embs = self.provider.encode_batch([text])
+        cleaned = _prepare_texts([text], self.max_tokens)
+        embs = self.provider.encode_batch(cleaned)
         return embs[0].tolist() if len(embs) > 0 else []
 
     def get_embedding_dim(self) -> int:
