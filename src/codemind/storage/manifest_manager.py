@@ -5,6 +5,7 @@ Provides high-level interface for storing and retrieving indexing state.
 """
 
 import hashlib
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from .models import FileManifest, RepositoryManifest
 class ManifestManager:
     """Manager for repository manifest operations."""
 
-    def __init__(self, db_path: str | Path = "data/codemind.db"):
+    def __init__(self, db_path: str | Path = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")):
         """
         Initialize manifest manager.
 

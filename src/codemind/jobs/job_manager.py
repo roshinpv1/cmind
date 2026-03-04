@@ -4,6 +4,7 @@ Job management for async indexing tasks.
 Tracks job status, progress, and errors.
 """
 
+import os
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
@@ -52,7 +53,7 @@ class JobModel(Base):
 class JobManager:
     """Manages indexing jobs."""
 
-    def __init__(self, db_path: str = "data/codemind.db"):
+    def __init__(self, db_path: str = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")):
         """Initialize job manager."""
         self.db = Database(db_path)
         self.db.init_db()

@@ -18,7 +18,7 @@ from codemind.indexer.chunker import CodeChunk
 class LanceDBStorage:
     """Append-only vector storage using LanceDB with configurable embedding dimensions."""
 
-    def __init__(self, db_path: str | Path = "data/lancedb", embedding_dim: int | None = None):
+    def __init__(self, db_path: str | Path = os.getenv("CODEMIND_LANCEDB_PATH", "data/lancedb"), embedding_dim: int | None = None):
         """
         Initialize LanceDB storage.
 

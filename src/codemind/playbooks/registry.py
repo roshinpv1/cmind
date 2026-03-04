@@ -8,6 +8,7 @@ The registry:
 - Formats playbooks for LLM prompts
 """
 
+import os
 from pathlib import Path
 from typing import Dict, Optional, List
 from .schema import PlaybookDefinition
@@ -20,7 +21,7 @@ class PlaybookRegistry:
     Playbooks are auto-discovered from Markdown files in the playbooks directory.
     """
     
-    def __init__(self, playbooks_dir: Path | str = "playbooks"):
+    def __init__(self, playbooks_dir: Path | str = os.getenv("CODEMIND_PLAYBOOKS_PATH", "playbooks")):
         """
         Initialize playbook registry.
         

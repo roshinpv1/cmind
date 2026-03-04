@@ -225,7 +225,7 @@ class GitRepoManager:
     - Automatic token resolution (GitSaaS → static env vars)
     """
 
-    def __init__(self, cache_dir: str = "data/repos"):
+    def __init__(self, cache_dir: str = os.getenv("CODEMIND_REPOS_PATH", "data/repos")):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
