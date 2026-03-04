@@ -42,23 +42,42 @@ class EmbeddingProvider(ABC):
     # Subclasses set this to True if they implement encode_batch_async()
     supports_async: bool = False
 
-    def _truncate_texts(self, texts: List[str], max_tokens: int) -> List[str]:
-        """Truncate texts to approximate max_tokens length (safety net).
+    def _split_to_fit(
+        self, texts: List[str], max_tokens: int
+    ) -> Tuple[List[str], List[int]]:
+        """Ensure every text fits within max_tokens by splitting oversized ones.
 
-        The chunker should normally produce texts within limits.
-        This is a last-resort safety net for API-based providers
-        to prevent token-limit errors. Uses ~4 chars/token estimate.
+        Uses ~4 chars/token estimate (same ratio as ASTChunker).
+        Unlike truncation, no data is dropped — oversized texts are split into
+        multiple consecutive sub-texts.
+
+        Returns:
+            (split_texts, source_indices) where source_indices[i] is the index
+            of the original text that split_texts[i] came from.
         """
         char_limit = max_tokens * 4
-        result = []
-        for t in texts:
-            if len(t) > char_limit:
-                logger.warning(f"[EMBEDDING] Truncating text from {len(t)} to {char_limit} chars "
-                               f"(max_tokens={max_tokens}). Consider adjusting chunker settings.")
-                result.append(t[:char_limit])
+        split_texts: List[str] = []
+        source_indices: List[int] = []
+
+        for orig_idx, text in enumerate(texts):
+            if len(text) <= char_limit:
+                split_texts.append(text)
+                source_indices.append(orig_idx)
             else:
-                result.append(t)
-        return result
+                # Split into windows of char_limit with no overlap (data-safe)
+                parts = [
+                    text[i: i + char_limit]
+                    for i in range(0, len(text), char_limit)
+                ]
+                logger.warning(
+                    f"[EMBEDDING] Text at index {orig_idx} exceeds {char_limit} chars "
+                    f"(len={len(text)}); split into {len(parts)} sub-texts. "
+                    f"Consider reducing EMBEDDING_MAX_TOKENS or chunk size."
+                )
+                split_texts.extend(parts)
+                source_indices.extend([orig_idx] * len(parts))
+
+        return split_texts, source_indices
 
     @abstractmethod
     def get_embedding_dim(self) -> int:
@@ -73,16 +92,45 @@ class EmbeddingProvider(ABC):
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self.encode_batch, texts)
 
+    @staticmethod
+    def _merge_split_embeddings(
+        sub_embeddings: List[np.ndarray],
+        source_indices: List[int],
+        n_original: int,
+    ) -> List[np.ndarray]:
+        """Average sub-embeddings that came from the same original text.
+
+        When a chunk was split into N sub-texts, we average their embeddings
+        back into a single vector. This preserves the 1-to-1 mapping between
+        original texts and returned embeddings, and re-normalises the result.
+        """
+        buckets: dict[int, List[np.ndarray]] = {i: [] for i in range(n_original)}
+        for emb, src_idx in zip(sub_embeddings, source_indices):
+            buckets[src_idx].append(emb)
+
+        merged = []
+        for i in range(n_original):
+            parts = buckets[i]
+            if len(parts) == 1:
+                merged.append(parts[0])
+            else:
+                avg = np.mean(parts, axis=0)
+                norm = np.linalg.norm(avg)
+                merged.append(avg / norm if norm > 0 else avg)
+        return merged
+
 
 class LocalEmbeddingProvider(EmbeddingProvider):
     """Local embedding using SentenceTransformers.
 
     GPU-level parallelism is handled internally by PyTorch — no async needed.
+    The SentenceTransformers model handles its own token truncation via
+    max_seq_length, but we also size chunks correctly upstream via ASTChunker.
     """
 
     supports_async = False  # Sequential batching is optimal for GPU
 
-    def __init__(self, model_name: str, max_tokens: int):
+    def __init__(self, model_name: str, max_tokens: int, batch_size: int = 32):
         if not HAS_SENTENCE_TRANSFORMERS:
             raise ImportError("sentence-transformers not installed. Required for local embeddings.")
 
@@ -95,16 +143,24 @@ class LocalEmbeddingProvider(EmbeddingProvider):
 
         logger.info(f"[EMBEDDING] Loading local model: {model_name} on device: {device}")
         self.model = SentenceTransformer(model_name, device=device)
-        self.model.max_seq_length = max_tokens
+        self.model.max_seq_length = max_tokens  # Hard cap at model level
+        self.max_tokens = max_tokens
+        self.batch_size = batch_size  # Respect configured batch_size for GPU memory
         self.embedding_dim = self.model.get_sentence_embedding_dimension()
 
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        """Encode texts using SentenceTransformers with the configured batch_size.
+
+        batch_size controls how many texts are processed per GPU forward pass.
+        Passing len(texts) here would ignore the configured limit and risk OOM
+        on large batches.
+        """
         return self.model.encode(
             texts,
-            batch_size=len(texts),
+            batch_size=self.batch_size,  # Use configured batch_size, not len(texts)
             show_progress_bar=False,
             normalize_embeddings=True,
         )
@@ -140,8 +196,8 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
     def get_embedding_dim(self) -> int:
         return self.embedding_dim
 
-    async def _get_embeddings_async(self, texts: List[str]) -> List[np.ndarray]:
-        """Async call to Apigee."""
+    async def _get_embeddings_async(self, cleaned_texts: List[str]) -> List[np.ndarray]:
+        """Raw async POST to Apigee. Expects already-split and cleaned texts."""
         token = await self.token_manager.get_token()
 
         url = f"{self.base_url}/v1/embeddings"
@@ -157,10 +213,6 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
             "Content-Type": "application/json"
         }
 
-        # Truncate to max_tokens and replace newlines
-        truncated = self._truncate_texts(texts, self.max_tokens)
-        cleaned_texts = [t.replace("\n", " ") for t in truncated]
-
         async with httpx.AsyncClient(verify=False, timeout=60.0) as client:
             response = await client.post(
                 url,
@@ -174,20 +226,26 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
             return [np.array(item["embedding"]) for item in results]
 
     async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
-        """Async batch encoding — uses native async HTTP."""
-        return await self._get_embeddings_async(texts)
+        """Async batch encoding — splits oversized texts, then merges back to 1-to-1."""
+        safe_texts, source_indices = self._split_to_fit(texts, self.max_tokens)
+        cleaned = [t.replace("\n", " ") for t in safe_texts]
+        sub_embeddings = await self._get_embeddings_async(cleaned)
+        return self._merge_split_embeddings(sub_embeddings, source_indices, len(texts))
 
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        """Synchronous wrapper for async call."""
+        """Synchronous wrapper — splits oversized texts, then merges back to 1-to-1."""
+        safe_texts, source_indices = self._split_to_fit(texts, self.max_tokens)
+        cleaned = [t.replace("\n", " ") for t in safe_texts]
         try:
-            return asyncio.run(self._get_embeddings_async(texts))
+            sub_embeddings = asyncio.run(self._get_embeddings_async(cleaned))
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                return loop.run_until_complete(self._get_embeddings_async(texts))
+                sub_embeddings = loop.run_until_complete(self._get_embeddings_async(cleaned))
             finally:
                 loop.close()
+        return self._merge_split_embeddings(sub_embeddings, source_indices, len(texts))
 
 
 class RemoteEmbeddingProvider(EmbeddingProvider):
@@ -241,10 +299,20 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
         return headers
 
     async def encode_batch_async(self, texts: List[str]) -> List[np.ndarray]:
-        """Async batch encoding using httpx.AsyncClient — enables parallel calls."""
-        truncated = self._truncate_texts(texts, self.max_tokens)
-        cleaned_texts = [t.replace("\n", " ") for t in truncated]
+        """Async batch encoding — splits oversized texts before sending."""
+        safe_texts, source_indices = self._split_to_fit(texts, self.max_tokens)
+        cleaned = [t.replace("\n", " ") for t in safe_texts]
+        sub_embeddings = await self._async_post(cleaned)
+        return self._merge_split_embeddings(sub_embeddings, source_indices, len(texts))
 
+    def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        """Synchronous batch encoding — splits oversized texts before sending."""
+        safe_texts, source_indices = self._split_to_fit(texts, self.max_tokens)
+        cleaned = [t.replace("\n", " ") for t in safe_texts]
+        sub_embeddings = self._sync_post(cleaned)
+        return self._merge_split_embeddings(sub_embeddings, source_indices, len(texts))
+
+    async def _async_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
                 f"{self.base_url}/embeddings",
@@ -256,11 +324,7 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
             results = sorted(data["data"], key=lambda x: x["index"])
             return [np.array(item["embedding"]) for item in results]
 
-    def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
-        """Synchronous embedding call using httpx.Client (works in both sync and async contexts)."""
-        truncated = self._truncate_texts(texts, self.max_tokens)
-        cleaned_texts = [t.replace("\n", " ") for t in truncated]
-
+    def _sync_post(self, cleaned_texts: List[str]) -> List[np.ndarray]:
         with httpx.Client(timeout=60.0) as client:
             response = client.post(
                 f"{self.base_url}/embeddings",
@@ -308,13 +372,13 @@ class EmbeddingGenerator:
         elif self.provider_type == "remote":
             self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
         elif self.provider_type == "local":
-            self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
+            self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens, self.batch_size)
         elif os.environ.get("EMBEDDING_API_URL"):
             # Fallback: use remote if API URL is set and provider type is unrecognized
             logger.info(f"[EMBEDDING] Unknown provider '{self.provider_type}', using remote (EMBEDDING_API_URL is set)")
             self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
         else:
-            self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
+            self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens, self.batch_size)
 
         self.embedding_dim = self.provider.get_embedding_dim()
 
