@@ -150,9 +150,14 @@ class IndexWorker:
                 stage="indexing",
             )
 
-            # Create workflow with graph adapter
+            # Progress callback — writes stage + progress to the DB in real time
+            def _on_progress(stage: str, progress: int):
+                self.job_manager.update_job(job_id, stage=stage, progress=progress)
+
+            # Create workflow with graph adapter and progress reporting
             workflow = IndexingWorkflow(
-                self.manifest, self.lance_storage, self.graph_db
+                self.manifest, self.lance_storage, self.graph_db,
+                progress_callback=_on_progress,
             )
 
             # Create workflow state

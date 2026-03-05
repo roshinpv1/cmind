@@ -47,10 +47,17 @@ class IndexingWorkflow:
         manifest_manager: ManifestManager,
         lance_storage: LanceDBStorage,
         graph_db,
+        progress_callback=None,
     ):
-        """Initialize workflow."""
+        """Initialize workflow.
+        
+        Args:
+            progress_callback: Optional callable(stage: str, progress: int)
+                               called after each workflow step to report progress.
+        """
         self.manifest = manifest_manager
         self.graph = graph_db
+        self._progress_callback = progress_callback
 
         # Initialize components
         self.ast_extractor = ASTExtractor()
@@ -65,50 +72,72 @@ class IndexingWorkflow:
         )
         self.graph_builder = GraphBuilder(graph_db)
 
+    def _report_progress(self, stage: str, progress: int):
+        """Report progress via callback if registered."""
+        if self._progress_callback:
+            try:
+                self._progress_callback(stage, progress)
+            except Exception as e:
+                print(f"[WORKFLOW] ⚠️ Progress callback error: {e}")
+
     def run(self, state: IndexingState) -> IndexingState:
         """Execute full indexing workflow."""
         try:
             print(f"[WORKFLOW] ========== STARTING INDEXING WORKFLOW ==========")
             print(f"[WORKFLOW] Repo: {state.repo_id}")
             
+            self._report_progress("detecting_changes", 5)
             state = self.detect_changes(state)
             if state.error:
                 print(f"[WORKFLOW] ❌ detect_changes failed: {state.error}")
                 return state
-            print(f"[WORKFLOW] ✅ detect_changes complete")
+            print(f"[WORKFLOW] ✅ detect_changes complete — {state.files_changed} changed files")
+            self._report_progress("detecting_changes", 10)
 
+            self._report_progress("extracting_ast", 15)
             state = self.extract_ast(state)
             if state.error:
                 print(f"[WORKFLOW] ❌ extract_ast failed: {state.error}")
                 return state
             print(f"[WORKFLOW] ✅ extract_ast complete")
+            self._report_progress("extracting_ast", 20)
 
+            self._report_progress("chunking", 25)
             state = self.chunk_files(state)  # FIXED: was chunk_code
             if state.error:
                 print(f"[WORKFLOW] ❌ chunk_files failed: {state.error}")
                 return state
-            print(f"[WORKFLOW] ✅ chunk_files complete")
+            print(f"[WORKFLOW] ✅ chunk_files complete — {state.chunks_created} chunks")
+            self._report_progress("chunking", 35)
 
+            self._report_progress("embedding", 40)
             state = self.generate_embeddings(state)
             if state.error:
                 print(f"[WORKFLOW] ❌ generate_embeddings failed: {state.error}")
                 return state
-            print(f"[WORKFLOW] ✅ generate_embeddings complete")
+            print(f"[WORKFLOW] ✅ generate_embeddings complete — {state.embeddings_generated} embeddings")
+            self._report_progress("embedding", 65)
 
+            self._report_progress("building_graph", 70)
             state = self.build_graph(state)
             if state.error:
                 print(f"[WORKFLOW] ❌ build_graph failed: {state.error}")
                 return state
             print(f"[WORKFLOW] ✅ build_graph complete")
+            self._report_progress("building_graph", 80)
 
+            self._report_progress("extracting_relationships", 85)
             state = self.extract_relationships(state)
             if state.error:
                 print(f"[WORKFLOW] ❌ extract_relationships failed: {state.error}")
                 return state
             print(f"[WORKFLOW] ✅ extract_relationships complete")
+            self._report_progress("extracting_relationships", 90)
 
+            self._report_progress("updating_manifest", 95)
             state = self.update_manifest(state)
             state.stage = "completed"
+            self._report_progress("completed", 100)
 
         except Exception as e:
             state.error = str(e)
