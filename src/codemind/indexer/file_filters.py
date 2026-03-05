@@ -124,9 +124,15 @@ IGNORED_DIRS = {
     "target",  # Rust
     "bin",
     "obj",  # .NET
+    "vendor",  # Go, PHP, Ruby
+    ".next",  # Next.js
+    ".nuxt",  # Nuxt.js
+    "coverage",
+    ".cache",
+    ".output",
 }
 
-# File patterns to ignore
+# File patterns to ignore (substring match on filename)
 IGNORED_PATTERNS = {
     ".pyc",
     ".pyo",
@@ -138,6 +144,25 @@ IGNORED_PATTERNS = {
     ".class",
     ".o",
     ".a",
+    ".min.js",   # Minified JS — huge single-line files freeze the parser
+    ".min.css",  # Minified CSS
+    ".bundle.",  # Bundled files
+    ".chunk.",   # Webpack chunks
+    ".map",      # Source maps
+}
+
+# Exact filenames to always skip (lock files, generated files)
+IGNORED_FILENAMES = {
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "composer.lock",
+    "Gemfile.lock",
+    "Pipfile.lock",
+    "poetry.lock",
+    "go.sum",
+    "Cargo.lock",
+    ".DS_Store",
 }
 
 # Extensionless filenames that should be indexed
@@ -174,11 +199,15 @@ def should_index_file(file_path: Path, max_size: int = MAX_FILE_SIZE_BYTES) -> b
     if not file_path.exists() or not file_path.is_file():
         return False
 
+    # Skip exact filenames that are known to cause issues
+    if file_path.name in IGNORED_FILENAMES:
+        return False
+
     # Check extension OR known filename
     if file_path.suffix.lower() not in CODE_EXTENSIONS and file_path.name not in KNOWN_FILENAMES:
         return False
 
-    # Check for ignored patterns
+    # Check for ignored patterns (substring match)
     if any(pattern in file_path.name for pattern in IGNORED_PATTERNS):
         return False
 
