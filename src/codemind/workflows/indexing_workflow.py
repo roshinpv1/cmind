@@ -268,44 +268,57 @@ class IndexingWorkflow:
         return state
 
     def generate_embeddings(self, state: IndexingState) -> IndexingState:
-        """Node: Generate embeddings."""
+        """Node: Generate embeddings in batches to limit memory."""
+        EMBED_BATCH_SIZE = 500  # Process and write 500 chunks at a time
+
         try:
             state.stage = "embedding"
             print(f"[EMBEDDING] ========== STARTING EMBEDDING STEP ==========")
             print(f"[EMBEDDING] Repo ID: {state.repo_id}")
-            print(f"[EMBEDDING] Has all_chunks attr: {hasattr(state, 'all_chunks')}")
-            if hasattr(state, 'all_chunks'):
-                print(f"[EMBEDDING] all_chunks length: {len(state.all_chunks) if state.all_chunks else 0}")
 
             if not hasattr(state, "all_chunks") or not state.all_chunks:
                 print(f"[EMBEDDING] ⚠️  No chunks found in state - skipping embedding")
                 return state
 
-            print(f"[EMBEDDING] Processing {len(state.all_chunks)} chunks...")
+            total_chunks = len(state.all_chunks)
+            print(f"[EMBEDDING] Processing {total_chunks} chunks in batches of {EMBED_BATCH_SIZE}...")
 
             # Get existing chunks from LanceDB to avoid re-embedding
             existing_hashes = set()
             try:
                 existing_data = self.storage.get_all_chunks(state.repo_id)
                 existing_hashes = {row["chunk_hash"] for row in existing_data}
+                del existing_data  # Free immediately
             except Exception:
-                # Table might not exist yet
                 pass
 
-            # Generate embeddings only for new chunks
-            print(f"[EMBEDDING] Calling embedder.generate_embeddings...")
-            new_chunks_with_embeddings = self.embedder.generate_embeddings(
-                state.all_chunks, existing_hashes
-            )
-            print(f"[EMBEDDING] Generated {len(new_chunks_with_embeddings)} new embeddings")
+            total_embedded = 0
 
-            # Add to LanceDB
-            if new_chunks_with_embeddings:
-                print(f"[EMBEDDING] Storing {len(new_chunks_with_embeddings)} embeddings")
-                self.storage.append_chunks(state.repo_id, new_chunks_with_embeddings)
-                print(f"[EMBEDDING] ✅ Successfully stored embeddings")
+            # Process in batches to limit peak memory
+            for batch_start in range(0, total_chunks, EMBED_BATCH_SIZE):
+                batch_end = min(batch_start + EMBED_BATCH_SIZE, total_chunks)
+                batch_chunks = state.all_chunks[batch_start:batch_end]
 
-            state.embeddings_generated = len(new_chunks_with_embeddings)
+                # Generate embeddings for this batch
+                new_with_emb = self.embedder.generate_embeddings(batch_chunks, existing_hashes)
+
+                # Write to LanceDB immediately
+                if new_with_emb:
+                    self.storage.append_chunks(state.repo_id, new_with_emb)
+                    total_embedded += len(new_with_emb)
+
+                pct = int(batch_end / total_chunks * 100)
+                print(f"[EMBEDDING] Batch {batch_start}-{batch_end}/{total_chunks} ({pct}%) — {len(new_with_emb)} new embeddings written")
+
+                # Free batch memory
+                del new_with_emb
+                del batch_chunks
+
+            state.embeddings_generated = total_embedded
+            print(f"[EMBEDDING] ✅ Done: {total_embedded} embeddings stored")
+
+            # Free chunk text from memory — no longer needed
+            state.all_chunks = None
 
         except Exception as e:
             print(f"[EMBEDDING] ❌ Error during embedding: {type(e).__name__}: {e}")
