@@ -199,6 +199,11 @@ class IndexingWorkflow:
 
     def chunk_files(self, state: IndexingState) -> IndexingState:
         """Node: Chunk files into smaller pieces."""
+        import time
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        PER_FILE_TIMEOUT = 30  # seconds — skip files that take longer
+
         try:
             state.stage = "chunking"
             total = len(state.changed_files)
@@ -208,6 +213,7 @@ class IndexingWorkflow:
             all_chunks = []
             skipped = 0
             errored = 0
+            timed_out = 0
 
             for idx, file_change in enumerate(state.changed_files):
                 file_path = Path(state.repo_path) / file_change.path
@@ -227,18 +233,26 @@ class IndexingWorkflow:
                         except OSError:
                             pass
 
-                        chunks = self.chunker.chunk_file(str(file_path))
-                        all_chunks.extend(chunks)
+                        # Run chunking with a timeout to prevent hangs
+                        with ThreadPoolExecutor(max_workers=1) as executor:
+                            future = executor.submit(self.chunker.chunk_file, str(file_path))
+                            try:
+                                chunks = future.result(timeout=PER_FILE_TIMEOUT)
+                                all_chunks.extend(chunks)
+                            except FuturesTimeout:
+                                timed_out += 1
+                                print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path} — skipping")
+                                future.cancel()
                     except Exception as e:
                         errored += 1
                         print(f"[CHUNKING] ⚠️ Error chunking {file_change.path}: {type(e).__name__}: {e}")
 
-                # Progress log every 100 files or at the end
-                if (idx + 1) % 100 == 0 or idx == total - 1:
+                # Progress log every 50 files or at the end
+                if (idx + 1) % 50 == 0 or idx == total - 1:
                     pct = int((idx + 1) / total * 100)
                     print(f"[CHUNKING] Progress: {idx + 1}/{total} files ({pct}%), {len(all_chunks)} chunks so far")
 
-            print(f"[CHUNKING] Created {len(all_chunks)} chunks total (skipped {skipped} large, {errored} errors)")
+            print(f"[CHUNKING] Created {len(all_chunks)} chunks total (skipped={skipped} large, errors={errored}, timeouts={timed_out})")
             state.chunks_created = len(all_chunks)
 
             # Store chunks in state for embedding
