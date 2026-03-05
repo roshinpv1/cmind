@@ -40,6 +40,9 @@ class ASTChunker:
         self.min_chunk_chars = min_chunk_chars
         self.ast_extractor = ASTExtractor()
 
+    # Max file size to chunk (500 KB) — very large files stall the pipeline
+    MAX_CHUNK_FILE_SIZE = 500 * 1024
+
     def chunk_file(self, file_path: Path | str, content: str | None = None) -> list[CodeChunk]:
         file_path = Path(file_path)
         """
@@ -54,6 +57,10 @@ class ASTChunker:
         """
         if content is None:
             try:
+                # Skip very large files early
+                size = file_path.stat().st_size
+                if size > self.MAX_CHUNK_FILE_SIZE:
+                    return []
                 with open(file_path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
             except Exception:
@@ -83,6 +90,11 @@ class ASTChunker:
         chunks: list[CodeChunk] = []
         covered_lines: set[int] = set()
 
+        # Pre-compute cumulative byte offsets O(n) instead of O(n²)
+        byte_offsets = [0] * (len(lines) + 1)
+        for i, line in enumerate(lines):
+            byte_offsets[i + 1] = byte_offsets[i] + len(line) + 1
+
         # Sort symbols by start line
         sorted_symbols = sorted(symbols, key=lambda s: s.start_line)
 
@@ -111,8 +123,8 @@ class ASTChunker:
                     chunk_hash=chunk_hash,
                     start_line=sym.start_line,
                     end_line=sym.end_line,
-                    start_byte=sum(len(lines[i]) + 1 for i in range(start)),
-                    end_byte=sum(len(lines[i]) + 1 for i in range(end)),
+                    start_byte=byte_offsets[start],
+                    end_byte=byte_offsets[min(end, len(lines))],
                     file_path=str(file_path),
                     symbol_name=sym.name,
                     symbol_type=sym.type,
@@ -135,8 +147,8 @@ class ASTChunker:
                     chunk_hash=chunk_hash,
                     start_line=start_idx + 1,
                     end_line=end_idx,
-                    start_byte=sum(len(lines[i]) + 1 for i in range(start_idx)),
-                    end_byte=sum(len(lines[i]) + 1 for i in range(end_idx)),
+                    start_byte=byte_offsets[start_idx],
+                    end_byte=byte_offsets[min(end_idx, len(lines))],
                     file_path=str(file_path),
                     symbol_name=None,
                     symbol_type="module",

@@ -201,11 +201,15 @@ class IndexingWorkflow:
         """Node: Chunk files into smaller pieces."""
         try:
             state.stage = "chunking"
+            total = len(state.changed_files)
             print(f"[CHUNKING] Starting chunking for repo: {state.repo_id}")
-            print(f"[CHUNKING] Changed files: {len(state.changed_files)}")
+            print(f"[CHUNKING] Changed files: {total}")
 
             all_chunks = []
-            for file_change in state.changed_files:
+            skipped = 0
+            errored = 0
+
+            for idx, file_change in enumerate(state.changed_files):
                 file_path = Path(state.repo_path) / file_change.path
 
                 # Chunk all programming-related files
@@ -213,14 +217,31 @@ class IndexingWorkflow:
                     file_path.suffix.lower() in CODE_EXTENSIONS
                     or file_path.name in KNOWN_FILENAMES
                 ):
-                    chunks = self.chunker.chunk_file(str(file_path))
-                    all_chunks.extend(chunks)
+                    try:
+                        # Skip very large files (>500 KB)
+                        try:
+                            fsize = file_path.stat().st_size
+                            if fsize > 500 * 1024:
+                                skipped += 1
+                                continue
+                        except OSError:
+                            pass
 
-            print(f"[CHUNKING] Created {len(all_chunks)} chunks total")
+                        chunks = self.chunker.chunk_file(str(file_path))
+                        all_chunks.extend(chunks)
+                    except Exception as e:
+                        errored += 1
+                        print(f"[CHUNKING] ⚠️ Error chunking {file_change.path}: {type(e).__name__}: {e}")
+
+                # Progress log every 100 files or at the end
+                if (idx + 1) % 100 == 0 or idx == total - 1:
+                    pct = int((idx + 1) / total * 100)
+                    print(f"[CHUNKING] Progress: {idx + 1}/{total} files ({pct}%), {len(all_chunks)} chunks so far")
+
+            print(f"[CHUNKING] Created {len(all_chunks)} chunks total (skipped {skipped} large, {errored} errors)")
             state.chunks_created = len(all_chunks)
 
             # Store chunks in state for embedding
-            print(f"[CHUNKING] Setting state.all_chunks with {len(all_chunks)} chunks")
             state.all_chunks = all_chunks
             print(f"[CHUNKING] ✅ Chunking complete")
 
