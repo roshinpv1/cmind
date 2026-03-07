@@ -40,9 +40,6 @@ class ASTChunker:
         self.min_chunk_chars = min_chunk_chars
         self.ast_extractor = ASTExtractor()
 
-    # Max file size to chunk (500 KB) — very large files stall the pipeline
-    MAX_CHUNK_FILE_SIZE = 500 * 1024
-
     def chunk_file(self, file_path: Path | str, content: str | None = None) -> list[CodeChunk]:
         file_path = Path(file_path)
         """
@@ -57,10 +54,6 @@ class ASTChunker:
         """
         if content is None:
             try:
-                # Skip very large files early
-                size = file_path.stat().st_size
-                if size > self.MAX_CHUNK_FILE_SIZE:
-                    return []
                 with open(file_path, encoding="utf-8", errors="replace") as f:
                     content = f.read()
             except Exception:
@@ -90,11 +83,6 @@ class ASTChunker:
         chunks: list[CodeChunk] = []
         covered_lines: set[int] = set()
 
-        # Pre-compute cumulative byte offsets O(n) instead of O(n²)
-        byte_offsets = [0] * (len(lines) + 1)
-        for i, line in enumerate(lines):
-            byte_offsets[i + 1] = byte_offsets[i] + len(line) + 1
-
         # Sort symbols by start line
         sorted_symbols = sorted(symbols, key=lambda s: s.start_line)
 
@@ -123,8 +111,8 @@ class ASTChunker:
                     chunk_hash=chunk_hash,
                     start_line=sym.start_line,
                     end_line=sym.end_line,
-                    start_byte=byte_offsets[start],
-                    end_byte=byte_offsets[min(end, len(lines))],
+                    start_byte=sum(len(lines[i]) + 1 for i in range(start)),
+                    end_byte=sum(len(lines[i]) + 1 for i in range(end)),
                     file_path=str(file_path),
                     symbol_name=sym.name,
                     symbol_type=sym.type,
@@ -147,8 +135,8 @@ class ASTChunker:
                     chunk_hash=chunk_hash,
                     start_line=start_idx + 1,
                     end_line=end_idx,
-                    start_byte=byte_offsets[start_idx],
-                    end_byte=byte_offsets[min(end_idx, len(lines))],
+                    start_byte=sum(len(lines[i]) + 1 for i in range(start_idx)),
+                    end_byte=sum(len(lines[i]) + 1 for i in range(end_idx)),
                     file_path=str(file_path),
                     symbol_name=None,
                     symbol_type="module",
@@ -178,8 +166,11 @@ class ASTChunker:
         while i < len(lines):
             end = i
             char_count = 0
-            while end < len(lines) and char_count < self.max_chunk_chars:
-                char_count += len(lines[end]) + 1
+            while end < len(lines):
+                next_chars = len(lines[end]) + 1
+                if char_count + next_chars > self.max_chunk_chars and end > i:
+                    break  # Stop before exceeding limit (but always take at least one line)
+                char_count += next_chars
                 end += 1
 
             chunk_lines = lines[i:end]
@@ -226,27 +217,55 @@ class ASTChunker:
 
         return ranges
 
-    def _char_chunk_text(
-        self, file_path: Path, text: str, base_line: int = 0,
-        language: str | None = None
+    def _char_chunk(
+        self, file_path: Path, content: str, language: str | None
     ) -> list[CodeChunk]:
-        """Split text into chunks that each fit within max_chunk_chars."""
+        """Fallback character-based chunking."""
+        lines = content.split("\n")
+        chunks = []
+        i = 0
+        # Use max_chunk_chars to derive line count (~40 chars/line average)
+        avg_chars_per_line = max(1, sum(len(l) for l in lines) // max(1, len(lines))) if lines else 40
+        chunk_size_lines = max(5, self.max_chunk_chars // avg_chars_per_line)
+
+        while i < len(lines):
+            end = min(i + chunk_size_lines, len(lines))
+            chunk_text = "\n".join(lines[i:end])
+
+            if len(chunk_text.strip()) >= self.min_chunk_chars:
+                chunk_hash = self._hash(chunk_text)
+                chunks.append(CodeChunk(
+                    text=chunk_text,
+                    chunk_hash=chunk_hash,
+                    start_line=i + 1,
+                    end_line=end,
+                    start_byte=sum(len(lines[j]) + 1 for j in range(i)),
+                    end_byte=sum(len(lines[j]) + 1 for j in range(end)),
+                    file_path=str(file_path),
+                    symbol_name=None,
+                    symbol_type=None,
+                    language=language,
+                ))
+
+            # Advance with some overlap
+            i = end - 3 if end < len(lines) else end
+
+        return chunks
+
+    def _char_chunk_text(
+        self, file_path: Path, text: str, base_line: int, language: str | None
+    ) -> list[CodeChunk]:
+        """Split a text block into chunks respecting max_chunk_chars."""
         lines = text.split("\n")
         chunks = []
         i = 0
+        avg_chars_per_line = max(1, sum(len(l) for l in lines) // max(1, len(lines))) if lines else 40
+        chunk_size_lines = max(5, self.max_chunk_chars // avg_chars_per_line)
 
         while i < len(lines):
-            # Greedily collect lines until hitting max_chunk_chars
-            end = i
-            char_count = 0
-            while end < len(lines):
-                line_len = len(lines[end]) + 1  # +1 for newline
-                if char_count + line_len > self.max_chunk_chars and end > i:
-                    break
-                char_count += line_len
-                end += 1
-
+            end = min(i + chunk_size_lines, len(lines))
             chunk_text = "\n".join(lines[i:end])
+
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
                 chunks.append(CodeChunk(
@@ -254,24 +273,17 @@ class ASTChunker:
                     chunk_hash=chunk_hash,
                     start_line=base_line + i + 1,
                     end_line=base_line + end,
-                    start_byte=0,
+                    start_byte=0,  # Approximate
                     end_byte=0,
                     file_path=str(file_path),
                     symbol_name=None,
-                    symbol_type=None,
+                    symbol_type="module",
                     language=language,
                 ))
 
-            # Advance with overlap
-            i = end - self.overlap_lines if end < len(lines) else end
+            i = end - 3 if end < len(lines) else end
 
         return chunks
-
-    def _char_chunk(
-        self, file_path: Path, content: str, language: str | None
-    ) -> list[CodeChunk]:
-        """Fallback character-based chunking."""
-        return self._char_chunk_text(file_path, content, base_line=0, language=language)
 
     def _hash(self, text: str) -> str:
         """Compute deterministic hash."""

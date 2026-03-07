@@ -199,10 +199,11 @@ class IndexingWorkflow:
 
     def chunk_files(self, state: IndexingState) -> IndexingState:
         """Node: Chunk files into smaller pieces."""
-        import time
+        import threading
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         PER_FILE_TIMEOUT = 30  # seconds — skip files that take longer
+        MAX_FILE_SIZE = 500 * 1024  # 500 KB
 
         try:
             state.stage = "chunking"
@@ -224,25 +225,39 @@ class IndexingWorkflow:
                     or file_path.name in KNOWN_FILENAMES
                 ):
                     try:
-                        # Skip very large files (>500 KB)
+                        # Skip very large files
                         try:
                             fsize = file_path.stat().st_size
-                            if fsize > 500 * 1024:
+                            if fsize > MAX_FILE_SIZE:
                                 skipped += 1
                                 continue
                         except OSError:
                             pass
 
-                        # Run chunking with a timeout to prevent hangs
-                        with ThreadPoolExecutor(max_workers=1) as executor:
-                            future = executor.submit(self.chunker.chunk_file, str(file_path))
+                        # Use a daemon thread with timeout so hangs don't block
+                        result_holder = [None]
+                        error_holder = [None]
+
+                        def _do_chunk(fp=str(file_path)):
                             try:
-                                chunks = future.result(timeout=PER_FILE_TIMEOUT)
-                                all_chunks.extend(chunks)
-                            except FuturesTimeout:
-                                timed_out += 1
-                                print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path} — skipping")
-                                future.cancel()
+                                result_holder[0] = self.chunker.chunk_file(fp)
+                            except Exception as ex:
+                                error_holder[0] = ex
+
+                        t = threading.Thread(target=_do_chunk, daemon=True)
+                        t.start()
+                        t.join(timeout=PER_FILE_TIMEOUT)
+
+                        if t.is_alive():
+                            # Thread is still running (hung) — skip this file
+                            timed_out += 1
+                            print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path}")
+                            # Daemon thread will be killed when process exits
+                        elif error_holder[0]:
+                            raise error_holder[0]
+                        elif result_holder[0]:
+                            all_chunks.extend(result_holder[0])
+
                     except Exception as e:
                         errored += 1
                         print(f"[CHUNKING] ⚠️ Error chunking {file_change.path}: {type(e).__name__}: {e}")

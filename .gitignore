@@ -96,3 +96,4 @@ tmp/
 temp/
 *.tmp
 /data_old
+/src/codemind/indexer_old
