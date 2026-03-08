@@ -247,8 +247,11 @@ class PlannerAgent:
         terminal_signals = [
             "Catalog entry generated and saved",
             "catalog entry saved",
+            "catalog entry generated",
             '"tool_executed": true',
             '"tool_executed":true',
+            "saved successfully",
+            "entry saved for",
         ]
         # Also auto-finish when a playbook returns a large structured JSON result
         # (e.g. analyze_svp, analyze_tech_debt, evaluate_build_vs_reuse, etc.)
@@ -284,6 +287,24 @@ class PlannerAgent:
                         }
                 except (json.JSONDecodeError, TypeError):
                     pass
+        
+        # Auto-finish if a playbook tool has already been executed
+        # (prevents repeating the same playbook like generate_catalog)
+        executed_playbooks = set()
+        for msg in state.get("messages", []):
+            if isinstance(msg, AIMessage) and hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    if tc.get("name", "").startswith("playbook_"):
+                        executed_playbooks.add(tc["name"])
+        if executed_playbooks and tool_messages:
+            # A playbook has already run and returned results — auto-finish
+            print(f"[PLANNER] Auto-finishing: playbook(s) already executed: {executed_playbooks}")
+            last_content = tool_messages[-1].content or ""
+            return {
+                "finished": True,
+                "final_result": last_content,
+                "iteration": iteration + 1,
+            }
         
         # Auto-finish after many successful runs
         if successful_runs >= 10:

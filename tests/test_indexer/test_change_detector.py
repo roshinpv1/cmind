@@ -6,10 +6,23 @@ Tests Git-based and hash-based change detection strategies.
 
 from pathlib import Path
 
-import git
+import pygit2
 import pytest
 
 from codemind.indexer import ChangeDetector, ChangeType, DetectionMethod
+
+
+def _git_add_commit(repo_path: Path, message: str):
+    """Helper: add all changed files and commit using pygit2."""
+    repo = pygit2.Repository(str(repo_path))
+    repo.index.add_all()
+    repo.index.write()
+    tree = repo.index.write_tree()
+    sig = pygit2.Signature("Test", "test@test.com")
+    parents = [repo.head.target] if not repo.head_is_unborn else []
+    repo.create_commit("refs/heads/main", sig, sig, message, tree, parents)
+    if repo.head_is_unborn:
+        repo.set_head("refs/heads/main")
 
 
 class TestGitDetection:
@@ -22,12 +35,11 @@ class TestGitDetection:
         repo_path.mkdir()
 
         # Initialize Git repo
-        repo = git.Repo.init(repo_path)
+        pygit2.init_repository(str(repo_path))
 
         # Create initial file
         (repo_path / "initial.py").write_text("def initial(): pass")
-        repo.index.add(["initial.py"])
-        repo.index.commit("Initial commit")
+        _git_add_commit(repo_path, "Initial commit")
 
         return repo_path
 
@@ -41,9 +53,7 @@ class TestGitDetection:
 
         # Add new file
         (git_repo / "new_file.py").write_text("def new(): pass")
-        repo = git.Repo(git_repo)
-        repo.index.add(["new_file.py"])
-        repo.index.commit("Add new file")
+        _git_add_commit(git_repo, "Add new file")
 
         # Detect changes
         changes = detector.detect_changes(last_commit=initial_commit)
@@ -63,9 +73,7 @@ class TestGitDetection:
 
         # Modify existing file
         (git_repo / "initial.py").write_text("def initial(): return 'modified'")
-        repo = git.Repo(git_repo)
-        repo.index.add(["initial.py"])
-        repo.index.commit("Modify file")
+        _git_add_commit(git_repo, "Modify file")
 
         # Detect changes
         changes = detector.detect_changes(last_commit=initial_commit)
@@ -83,9 +91,7 @@ class TestGitDetection:
 
         # Delete file
         (git_repo / "initial.py").unlink()
-        repo = git.Repo(git_repo)
-        repo.index.remove(["initial.py"])
-        repo.index.commit("Delete file")
+        _git_add_commit(git_repo, "Delete file")
 
         # Detect changes
         changes = detector.detect_changes(last_commit=initial_commit)
@@ -119,10 +125,7 @@ class TestGitDetection:
         (git_repo / "file1.py").write_text("def one(): pass")
         (git_repo / "file2.py").write_text("def two(): pass")
         (git_repo / "initial.py").write_text("def initial(): return 'updated'")
-
-        repo = git.Repo(git_repo)
-        repo.index.add(["file1.py", "file2.py", "initial.py"])
-        repo.index.commit("Multiple changes")
+        _git_add_commit(git_repo, "Multiple changes")
 
         changes = detector.detect_changes(last_commit=initial_commit)
 

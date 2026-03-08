@@ -32,11 +32,14 @@ class IndexingState:
     files_changed: int = 0
     chunks_created: int = 0
     embeddings_generated: int = 0
+    symbols_extracted: int = 0
     changed_files: list[FileChange] = field(default_factory=list)
     deleted_files: list[str] = field(default_factory=list)
     commit_hash: str | None = None  # Git commit hash if using git detection
     metadata: dict = field(default_factory=dict)
     org: str | None = None  # Organization owning this component
+    repo_url: str | None = None  # Git remote URL (when cloned)
+    cd_repo_url: str | None = None  # Companion CD repo URL (if found)
 
 
 class IndexingWorkflow:
@@ -85,6 +88,17 @@ class IndexingWorkflow:
         try:
             print(f"[WORKFLOW] ========== STARTING INDEXING WORKFLOW ==========")
             print(f"[WORKFLOW] Repo: {state.repo_id}")
+            
+            # Create index run record
+            try:
+                self.manifest.create_index_run(
+                    run_id=state.job_id,
+                    repo_id=state.repo_id,
+                    branch=getattr(state, 'branch', None),
+                    commit_sha=state.commit_hash,
+                )
+            except Exception as e:
+                print(f"[WORKFLOW] ⚠️ Failed to create index run: {e}")
             
             self._report_progress("detecting_changes", 5)
             state = self.detect_changes(state)
@@ -139,9 +153,32 @@ class IndexingWorkflow:
             state.stage = "completed"
             self._report_progress("completed", 100)
 
+            # Complete index run with stats
+            try:
+                self.manifest.complete_index_run(
+                    run_id=state.job_id,
+                    status="completed",
+                    files_indexed=state.files_changed,
+                    symbols_extracted=getattr(state, 'symbols_extracted', 0),
+                    chunks_created=state.chunks_created,
+                    embeddings_generated=state.embeddings_generated,
+                )
+            except Exception as e:
+                print(f"[WORKFLOW] ⚠️ Failed to complete index run: {e}")
+
         except Exception as e:
             state.error = str(e)
             state.stage = "failed"
+            # Record failed index run
+            try:
+                self.manifest.complete_index_run(
+                    run_id=state.job_id,
+                    status="failed",
+                    error=str(e),
+                    files_indexed=state.files_changed,
+                )
+            except Exception:
+                pass
 
         return state
 
@@ -155,8 +192,7 @@ class IndexingWorkflow:
 
             if repo:
                 last_commit = repo.last_commit_hash
-                last_hashes = self.manifest.get_file_hashes(repo.repo_id)
-                changes = detector.detect_changes(last_commit, last_hashes)
+                changes = detector.detect_changes(last_commit)
             else:
                 changes = detector.detect_changes()
 
@@ -501,7 +537,7 @@ class IndexingWorkflow:
         return state
 
     def update_manifest(self, state: IndexingState) -> IndexingState:
-        """Node: Update manifest."""
+        """Node: Update manifest, persist symbols, and save commit snapshot."""
         try:
             state.stage = "updating_manifest"
 
@@ -509,10 +545,9 @@ class IndexingWorkflow:
             repo = self.manifest.get_repository(state.repo_path)
             
             metadata = getattr(state, "metadata", {})
-            branch = getattr(state, "branch", "main")  # Start using branch if available in state
+            branch = getattr(state, "branch", "main")
             
             if not repo:
-                # Use ID from state (which might come from GitRepoManager)
                 self.manifest.create_repository(
                     state.repo_path, 
                     repo_id=state.repo_id,
@@ -521,17 +556,83 @@ class IndexingWorkflow:
                 )
                 repo = self.manifest.get_repository(state.repo_path)
             
-            # Update manifest with commit hash and metadata, ensuring ID consistency
+            # Update manifest with commit hash and metadata
+            metadata = getattr(state, "metadata", {})
+            # Inject cd_repo_url into metadata if present
+            if state.cd_repo_url:
+                metadata["cd_repo_url"] = state.cd_repo_url
+            
+            # Count total files on disk for accurate total
+            repo_dir = Path(state.repo_path)
+            total_files_on_disk = sum(1 for f in repo_dir.rglob("*") if f.is_file() and ".git" not in f.parts)
+
             self.manifest.update_repository(
-                state.repo_id,  # Use state ID to be sure
+                state.repo_id,
+                repo_url=state.repo_url,
                 branch=branch,
                 org=getattr(state, 'org', None),
                 last_commit_hash=state.commit_hash,
+                total_files=total_files_on_disk,
                 metadata=metadata
             )
 
-            # Update file manifests in batch
-            self.manifest.update_files(repo.repo_id, state.changed_files, state.deleted_files)
+            # Persist extracted symbols to `symbols` table
+            symbols_to_persist = []
+            repo_path = Path(state.repo_path)
+            for file_change in state.changed_files:
+                file_path = repo_path / file_change.path
+                if not file_path.exists():
+                    continue
+                
+                language = self.ast_extractor.detect_language(file_path)
+                if not language:
+                    continue
+                    
+                try:
+                    result = self.ast_extractor.extract(file_path, language)
+                    for sym in result.symbols:
+                        import hashlib
+                        symbol_id = hashlib.sha256(
+                            f"{state.repo_id}:{file_change.path}:{sym.type}:{sym.name}".encode()
+                        ).hexdigest()[:20]
+                        
+                        parent_id = None
+                        if sym.parent:
+                            parent_id = hashlib.sha256(
+                                f"{state.repo_id}:{file_change.path}:class:{sym.parent}".encode()
+                            ).hexdigest()[:20]
+                        
+                        symbols_to_persist.append({
+                            "symbol_id": symbol_id,
+                            "file_path": str(file_change.path),
+                            "symbol_name": sym.name,
+                            "symbol_type": sym.type,
+                            "signature": getattr(sym, 'signature', None),
+                            "language": language,
+                            "start_line": sym.start_line,
+                            "end_line": sym.end_line,
+                            "parent_symbol_id": parent_id,
+                            "docstring": getattr(sym, 'docstring', None),
+                            "commit_sha": state.commit_hash,
+                        })
+                except Exception as e:
+                    print(f"[MANIFEST] ⚠️ Symbol extraction failed for {file_change.path}: {e}")
+            
+            if symbols_to_persist:
+                count = self.manifest.upsert_symbols(state.repo_id, symbols_to_persist)
+                state.symbols_extracted = count
+                print(f"[MANIFEST] ✅ Persisted {count} symbols")
+
+            # Save commit snapshot
+            if state.commit_hash:
+                try:
+                    self.manifest.save_commit_snapshot(
+                        repo_id=state.repo_id,
+                        commit_sha=state.commit_hash,
+                        files_changed=state.files_changed,
+                    )
+                except Exception as e:
+                    print(f"[MANIFEST] ⚠️ Commit snapshot failed: {e}")
 
         except Exception as e:
             state.error = f"Manifest update failed: {e}"

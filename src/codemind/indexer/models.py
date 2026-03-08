@@ -15,6 +15,7 @@ class ChangeType(str, Enum):
 
     ADDED = "added"
     MODIFIED = "modified"
+    RENAMED = "renamed"
 
 
 class DetectionMethod(str, Enum):
@@ -30,9 +31,13 @@ class FileChange(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     path: str = Field(..., description="Relative path to the changed file")
-    change_type: ChangeType = Field(..., description="Type of change (added/modified)")
+    change_type: ChangeType = Field(..., description="Type of change (added/modified/renamed)")
     content_hash: str = Field(..., description="SHA-256 hash of file content")
     size_bytes: int = Field(..., description="File size in bytes")
+    old_path: str | None = Field(None, description="Previous path if renamed")
+    changed_lines: list[tuple[int, int]] | None = Field(
+        None, description="Changed line ranges (start, end) for partial re-indexing"
+    )
 
 
 class ChangeSet(BaseModel):

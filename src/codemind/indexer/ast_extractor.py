@@ -30,6 +30,11 @@ class Symbol:
     parent: str | None = None  # For methods, the class name
     bases: list[str] = field(default_factory=list)  # Base classes / interfaces
     parameters: list[str] = field(default_factory=list)  # Function parameters
+    return_type: str | None = None  # Return type annotation
+    signature: str | None = None  # Full signature string
+    decorators: list[str] = field(default_factory=list)  # Decorators / annotations
+    is_async: bool = False  # Whether the function is async
+    visibility: str | None = None  # "public", "private", "protected"
 
 
 @dataclass
@@ -338,6 +343,11 @@ class ASTExtractor:
         docstring = self._extract_docstring(node, content, language)
         bases = self._extract_bases(node, content, language) if "class" in sym_type or sym_type in ("struct", "interface", "trait") else []
         params = self._extract_parameters(node, content, language) if sym_type in ("function", "method") else []
+        return_type = self._extract_return_type(node, content, language) if sym_type in ("function", "method") else None
+        signature = self._extract_signature(node, content, language)
+        decorators = self._extract_decorators(node, content, language)
+        is_async = self._detect_async(node, language)
+        visibility = self._detect_visibility(name, node, language)
 
         return Symbol(
             name=name,
@@ -350,6 +360,11 @@ class ASTExtractor:
             parent=parent,
             bases=bases,
             parameters=params,
+            return_type=return_type,
+            signature=signature,
+            decorators=decorators,
+            is_async=is_async,
+            visibility=visibility,
         )
 
     def _classify_class_type(self, node_type: str) -> str:
@@ -609,6 +624,120 @@ class ASTExtractor:
         return None
 
     # -- Utilities ----------------------------------------------------------
+
+    def _extract_return_type(self, node, content: bytes, language: str) -> str | None:
+        """Extract return type annotation from a function node."""
+        try:
+            # Python: -> Type
+            if language == "python":
+                for child in node.children:
+                    if child.type == "type":
+                        return content[child.start_byte:child.end_byte].decode("utf-8", errors="replace").strip()
+                    if child.type == "->":
+                        # Next sibling is the return type
+                        idx = list(node.children).index(child)
+                        if idx + 1 < len(node.children):
+                            ret_node = node.children[idx + 1]
+                            return content[ret_node.start_byte:ret_node.end_byte].decode("utf-8", errors="replace").strip()
+
+            # TypeScript/Java/Go: look for type annotations after params
+            for child in node.children:
+                if child.type in ("type_annotation", "return_type", "type_identifier", "predefined_type"):
+                    return content[child.start_byte:child.end_byte].decode("utf-8", errors="replace").strip().lstrip(": ")
+
+        except Exception:
+            pass
+        return None
+
+    def _extract_signature(self, node, content: bytes, language: str) -> str | None:
+        """Extract the full signature (first line) of a symbol."""
+        try:
+            text = content[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+            first_line = text.split("\n")[0].strip()
+            # Clean up trailing colons/braces
+            first_line = first_line.rstrip(":{").strip()
+            return first_line if first_line else None
+        except Exception:
+            return None
+
+    def _extract_decorators(self, node, content: bytes, language: str) -> list[str]:
+        """Extract decorators/annotations from a symbol node."""
+        decorators = []
+        try:
+            # Check previous siblings (decorators appear before the function/class)
+            if node.parent:
+                found_self = False
+                for sibling in reversed(list(node.parent.children)):
+                    if sibling == node:
+                        found_self = True
+                        continue
+                    if found_self:
+                        if sibling.type in ("decorator", "annotation", "attribute"):
+                            text = content[sibling.start_byte:sibling.end_byte].decode("utf-8", errors="replace").strip()
+                            decorators.append(text)
+                        elif sibling.type == "comment":
+                            continue  # Skip comments between decorators
+                        else:
+                            break  # Stop at first non-decorator
+
+            # Also check direct children (some grammars nest decorators)
+            for child in node.children:
+                if child.type in ("decorator", "annotation", "decorator_list"):
+                    if child.type == "decorator_list":
+                        for dec in child.children:
+                            if dec.type == "decorator":
+                                text = content[dec.start_byte:dec.end_byte].decode("utf-8", errors="replace").strip()
+                                decorators.append(text)
+                    else:
+                        text = content[child.start_byte:child.end_byte].decode("utf-8", errors="replace").strip()
+                        decorators.append(text)
+
+        except Exception:
+            pass
+        return decorators
+
+    def _detect_async(self, node, language: str) -> bool:
+        """Detect if a function is async."""
+        try:
+            # Check node type
+            if "async" in node.type.lower():
+                return True
+            # Check for async keyword child
+            for child in node.children:
+                if child.type == "async" or (hasattr(child, 'text') and child.text == b"async"):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _detect_visibility(self, name: str, node, language: str) -> str | None:
+        """Detect symbol visibility."""
+        try:
+            # Python convention: _ = private, __ = name-mangled
+            if language == "python":
+                if name.startswith("__") and not name.endswith("__"):
+                    return "private"
+                elif name.startswith("_"):
+                    return "protected"
+                return "public"
+
+            # Java/TypeScript/C#: check for access modifier nodes
+            for child in node.children:
+                if child.type in ("modifiers", "accessibility_modifier"):
+                    text = child.text.decode("utf-8", errors="replace").lower() if hasattr(child, 'text') else ""
+                    for mod in ("public", "private", "protected", "internal"):
+                        if mod in text:
+                            return mod
+                elif child.type in ("public", "private", "protected"):
+                    return child.type
+
+            # Go: uppercase = exported (public), lowercase = unexported (private)
+            if language == "go":
+                return "public" if name[0].isupper() else "private"
+
+        except Exception:
+            pass
+        return None
 
     def _iter_children_recursive(self, node, max_depth: int = 10, _depth: int = 0):
         """Iterate children recursively up to max_depth."""

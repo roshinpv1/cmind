@@ -12,10 +12,10 @@ Enterprise-hardened with configurable timeouts, SSL handling, and fallback strat
 """
 
 import hashlib
+import logging
 import os
 import re
 import shutil
-import subprocess
 import time
 import zipfile
 from datetime import UTC, datetime, timezone
@@ -23,11 +23,13 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-import jwt
+import pygit2
 import requests
 import urllib3
-from git import Repo
-from github import Auth, Github
+
+from codemind.utils.git_credentials import GitCredentialProvider
+
+logger = logging.getLogger(__name__)
 
 
 # ===========================================================================
@@ -126,6 +128,7 @@ def _get_gitsaas_token(repo_url: str) -> Optional[str]:
 
 def _generate_jwt(app_id: str, private_key_pem: str) -> str:
     """Generate a short-lived JWT for GitHub App authentication (10 min)."""
+    import jwt
     now = int(time.time())
     payload = {"iat": now - 60, "exp": now + 600, "iss": app_id}
     return jwt.encode(payload, private_key_pem, algorithm="RS256")
@@ -215,19 +218,21 @@ def _format_pem_key(raw_key: str) -> str:
 # ===========================================================================
 
 class GitRepoManager:
-    """Manages Git repository cloning and checkout.
+    """Manages Git repository cloning and checkout via pygit2.
 
     Enterprise-hardened features:
-    - Configurable timeouts (CODEMIND_GIT_CLONE_TIMEOUT, etc.)
+    - Token auth (PAT/SSO/MFA) via GitCredentialProvider
+    - SSH key auth for Git SaaS / private repos
+    - GitHub App JWT auth for installation-based access
     - SSL bypass for GitHub Enterprise (GITHUB_ENTERPRISE_DISABLE_SSL)
-    - ZIP-download fallback when git clone fails for GitHub URLs
+    - ZIP-download fallback when clone fails for GitHub URLs
     - Classified error messages (timeout, auth, not-found, SSL)
-    - Automatic token resolution (GitSaaS → static env vars)
     """
 
     def __init__(self, cache_dir: str = os.getenv("CODEMIND_REPOS_PATH", "data/repos")):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._cred_provider = GitCredentialProvider()
 
     def ensure_repo(
         self, repo_url: str, branch: str = "main", token: str | None = None,
@@ -237,72 +242,77 @@ class GitRepoManager:
         Returns: (local_path, repo_id, current_commit)
         """
         if self._is_local_path(repo_url):
-            repo = Repo(repo_url)
-            return Path(repo_url), self._get_repo_id(repo_url), repo.head.commit.hexsha
+            discovered = pygit2.discover_repository(str(repo_url))
+            if not discovered:
+                raise GitRepoNotFoundError(f"Not a git repo: {repo_url}")
+            repo = pygit2.Repository(discovered)
+            return Path(repo_url), self._get_repo_id(repo_url), str(repo.head.target)
 
-        # Resolve token: explicit > GitSaaS > static env vars
-        if not token:
-            token = resolve_token(repo_url)
+        # Resolve credentials via provider
+        auth = self._cred_provider.resolve(repo_url, token=token)
+        callbacks = auth.callbacks
 
-        final_url = self._build_auth_url(repo_url, token)
         repo_name = self._extract_repo_name(repo_url)
         local_path = self.cache_dir / repo_name / branch
 
         if local_path.exists():
-            self._update_existing(local_path, final_url, branch, token)
+            self._update_existing(local_path, repo_url, branch, callbacks, auth.token)
         else:
-            self._clone_new(repo_url, final_url, branch, local_path, token)
+            self._clone_new(repo_url, branch, local_path, callbacks, auth.token)
 
-        repo = Repo(local_path)
-        return local_path, self._get_repo_id(repo_url), repo.head.commit.hexsha
+        repo = pygit2.Repository(str(local_path))
+        return local_path, self._get_repo_id(repo_url), str(repo.head.target)
 
     # --- Clone / Update ---
 
-    def _update_existing(self, local_path, final_url, branch, token):
-        repo = Repo(local_path)
-        origin = repo.remotes.origin
-        if token and final_url != origin.url:
-            origin.set_url(final_url)
-
+    def _update_existing(self, local_path, repo_url, branch, callbacks, token):
         try:
-            self._run_git(
-                ["git", "fetch", "origin"], cwd=str(local_path),
-                timeout=GIT_FETCH_TIMEOUT, repo_url=final_url,
-            )
-        except GitTimeoutError:
-            raise
-        except Exception as e:
-            raise self._classify_error(e, final_url)
+            repo = pygit2.Repository(str(local_path))
+            origin = repo.remotes["origin"]
 
-        if branch in repo.heads:
-            repo.heads[branch].checkout()
-        else:
-            repo.create_head(branch, origin.refs[branch]).set_tracking_branch(
-                origin.refs[branch]
-            ).checkout()
-        origin.pull()
+            # Fetch from remote
+            try:
+                origin.fetch(callbacks=callbacks)
+            except pygit2.GitError as e:
+                raise self._classify_error(e, repo_url)
 
-    def _clone_new(self, repo_url, final_url, branch, local_path, token):
+            # Checkout the branch
+            ref_name = f"refs/remotes/origin/{branch}"
+            try:
+                remote_ref = repo.references.get(ref_name)
+                if remote_ref:
+                    repo.checkout(remote_ref, strategy=pygit2.GIT_CHECKOUT_FORCE)
+                    # Fast-forward HEAD to remote branch
+                    local_ref = f"refs/heads/{branch}"
+                    repo.references.create(local_ref, remote_ref.target, force=True)
+                    repo.head.set_target(remote_ref.target)
+            except pygit2.GitError:
+                pass  # Branch may not exist yet
+
+            logger.info(f"[GIT] ✅ Updated {repo_url} → {local_path}")
+
+        except pygit2.GitError as e:
+            raise self._classify_error(e, repo_url)
+
+    def _clone_new(self, repo_url, branch, local_path, callbacks, token):
         local_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._run_git(
-                ["git", "clone", "--depth", "1", "--branch", branch,
-                 "--single-branch", final_url, str(local_path)],
-                timeout=GIT_CLONE_TIMEOUT, repo_url=repo_url,
+            pygit2.clone_repository(
+                repo_url, str(local_path),
+                checkout_branch=branch,
+                callbacks=callbacks,
             )
-            print(f"[GIT] ✅ Cloned {repo_url} → {local_path}")
-        except GitTimeoutError:
+            logger.info(f"[GIT] ✅ Cloned {repo_url} → {local_path}")
+
+        except pygit2.GitError as clone_err:
             if local_path.exists():
                 shutil.rmtree(local_path, ignore_errors=True)
-            raise
-        except Exception as clone_err:
-            if local_path.exists():
-                shutil.rmtree(local_path, ignore_errors=True)
+
             if self._is_github_url(repo_url):
-                print(f"[GIT] ⚠️ Clone failed, falling back to ZIP: {clone_err}")
+                logger.warning(f"[GIT] ⚠️ Clone failed, falling back to ZIP: {clone_err}")
                 try:
                     self._download_zip_fallback(repo_url, branch, token, local_path)
-                    print(f"[GIT] ✅ ZIP fallback succeeded for {repo_url}")
+                    logger.info(f"[GIT] ✅ ZIP fallback succeeded for {repo_url}")
                     return
                 except Exception as zip_err:
                     raise Exception(
@@ -311,33 +321,6 @@ class GitRepoManager:
                     )
             else:
                 raise self._classify_error(clone_err, repo_url)
-
-    # --- Subprocess runner ---
-
-    def _run_git(self, cmd, timeout, repo_url="", cwd=None):
-        env = os.environ.copy()
-        if self._is_enterprise_github(repo_url):
-            if os.getenv("GITHUB_ENTERPRISE_DISABLE_SSL", "false").lower() == "true":
-                env["GIT_SSL_NO_VERIFY"] = "true"
-            ca = os.getenv("GITHUB_ENTERPRISE_CA_BUNDLE")
-            if ca and os.path.exists(ca):
-                env["GIT_SSL_CAINFO"] = ca
-
-        safe_cmd = " ".join(cmd)
-        for secret in (os.getenv("GIT_ACCESS_TOKEN", ""), os.getenv("GITHUB_TOKEN", "")):
-            if secret:
-                safe_cmd = safe_cmd.replace(secret, "***")
-        print(f"[GIT] Running ({timeout}s timeout): {safe_cmd}")
-
-        try:
-            return subprocess.run(
-                cmd, cwd=cwd, env=env, timeout=timeout,
-                capture_output=True, text=True, check=True,
-            )
-        except subprocess.TimeoutExpired:
-            raise GitTimeoutError(f"Git operation timed out after {timeout}s")
-        except subprocess.CalledProcessError as e:
-            raise Exception(e.stderr.strip() or str(e))
 
     # --- ZIP fallback ---
 
@@ -405,13 +388,6 @@ class GitRepoManager:
 
     # --- URL helpers ---
 
-    def _build_auth_url(self, repo_url, token):
-        if not token or "@" in repo_url or not repo_url.startswith("https://"):
-            return repo_url
-        if "github" in urlparse(repo_url).netloc.lower():
-            return repo_url.replace("https://", f"https://{token}@", 1)
-        return repo_url
-
     def _is_github_url(self, url):
         try:
             return "github" in urlparse(url).netloc.lower()
@@ -436,11 +412,11 @@ class GitRepoManager:
 
     def _classify_error(self, error, repo_url):
         msg = str(error).lower()
-        if "authentication failed" in msg or "could not read" in msg:
+        if "authentication" in msg or "could not read" in msg or "401" in msg:
             return GitAuthError(f"Authentication failed for {repo_url}")
-        if "repository not found" in msg or "does not exist" in msg:
+        if "not found" in msg or "does not exist" in msg or "404" in msg:
             return GitRepoNotFoundError(f"Repository not found: {repo_url}")
-        if "ssl certificate" in msg:
+        if "ssl" in msg or "certificate" in msg:
             return Exception(f"SSL error for {repo_url}. Set GITHUB_ENTERPRISE_DISABLE_SSL=true")
         if "timeout" in msg:
             return GitTimeoutError(str(error))
@@ -463,43 +439,70 @@ class GitRepoManager:
     # --- Metadata extraction ---
 
     def extract_metadata(self, repo_path: Path) -> dict:
-        """Extract repository metadata (commit stats, authors, GitHub details)."""
+        """Extract repository metadata using pygit2 log walker."""
         try:
-            repo = Repo(repo_path)
-            if not repo.head.is_valid():
+            discovered = pygit2.discover_repository(str(repo_path))
+            if not discovered:
+                return {}
+            repo = pygit2.Repository(discovered)
+            if repo.head_is_unborn:
                 return {}
 
-            first_sha = repo.git.rev_list("--max-parents=0", "HEAD").splitlines()[0]
-            first_commit = repo.commit(first_sha)
+            head = repo.head.peel(pygit2.Commit)
 
+            # Walk to find first commit, collect authors and contributor counts
+            walker = repo.walk(head.id, pygit2.GIT_SORT_TIME | pygit2.GIT_SORT_REVERSE)
+            first_commit = None
+            total_commits = 0
+            contributor_counts: dict[str, int] = {}
+            for commit in walker:
+                if first_commit is None:
+                    first_commit = commit
+                total_commits += 1
+                author_name = commit.author.name
+                contributor_counts[author_name] = contributor_counts.get(author_name, 0) + 1
+
+            # Recent authors (last 4 unique)
             last_authors, seen = [], set()
-            for c in repo.iter_commits("HEAD", max_count=50):
-                if c.author.name not in seen:
-                    last_authors.append(c.author.name)
-                    seen.add(c.author.name)
+            walker2 = repo.walk(head.id, pygit2.GIT_SORT_TIME)
+            for commit in walker2:
+                name = commit.author.name
+                if name not in seen:
+                    last_authors.append(name)
+                    seen.add(name)
                     if len(last_authors) >= 4:
                         break
 
+            # Build contributors list sorted by most commits first
+            contributors = [
+                {"name": name, "commits": count}
+                for name, count in sorted(contributor_counts.items(), key=lambda x: x[1], reverse=True)
+            ]
+
             meta: dict[str, Any] = {
-                "first_commit_at": datetime.fromtimestamp(first_commit.committed_date, UTC),
-                "first_author": first_commit.author.name,
+                "first_commit_at": datetime.fromtimestamp(
+                    first_commit.commit_time, UTC
+                ) if first_commit else None,
+                "first_author": first_commit.author.name if first_commit else None,
                 "last_authors": last_authors,
-                "total_commits": int(repo.git.rev_list("--count", "HEAD")),
+                "total_commits": total_commits,
+                "contributors": contributors,
             }
 
             # GitHub metadata (stars, PRs)
             try:
-                remote_url = repo.remotes.origin.url
+                origin = repo.remotes["origin"]
+                remote_url = origin.url
                 if "github" in remote_url.lower():
                     gh = GitHubClient()
                     meta.update(gh.get_repo_details(remote_url))
                     gh.close()
             except Exception as e:
-                print(f"[GIT] GitHub metadata fetch failed: {e}")
+                logger.warning(f"[GIT] GitHub metadata fetch failed: {e}")
 
             return meta
         except Exception as e:
-            print(f"[GIT] Metadata extraction failed: {e}")
+            logger.warning(f"[GIT] Metadata extraction failed: {e}")
             return {}
 
 
@@ -511,6 +514,7 @@ class GitHubClient:
     """Fetch GitHub repo metadata (stars, PRs, topics) via PyGithub."""
 
     def __init__(self, token: Optional[str] = None, base_url: Optional[str] = None):
+        from github import Auth, Github
         self.token = token or self._resolve_static_token()
         kwargs: dict[str, Any] = {"timeout": 10, "retry": 0}
         if self.token:

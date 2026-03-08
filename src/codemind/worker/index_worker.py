@@ -18,7 +18,7 @@ load_dotenv()
 from codemind.jobs import JobManager, JobStatus
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
-from codemind.graph.graph_db import SQLiteGraphAdapter
+from codemind.graph.graph_db import KuzuGraphAdapter
 from codemind.workflows import IndexingState, IndexingWorkflow
 
 logger = logging.getLogger("codemind.worker")
@@ -54,6 +54,7 @@ class IndexWorker:
         self,
         poll_interval: int = 5,
         db_path: str = "data/codemind.db",
+        graph_db: "KuzuGraphAdapter | None" = None,
     ):
         self.poll_interval = poll_interval
 
@@ -62,9 +63,10 @@ class IndexWorker:
         self.manifest = ManifestManager(db_path=db_path)
         self.lance_storage = LanceDBStorage()
 
-        # Graph DB (SQLite Adapter) - Concurrency handled by WAL mode
-        # We reuse the database connection from job_manager
-        self.graph_db = SQLiteGraphAdapter(self.job_manager.db)
+        # Graph DB (Kuzu) - Use provided instance or create own
+        # When running inside the server process, the server passes its instance
+        # to avoid Kuzu single-process lock conflicts.
+        self.graph_db = graph_db if graph_db is not None else KuzuGraphAdapter()
 
         logger.info("Worker initialized (poll_interval=%ds)", poll_interval)
 
@@ -141,7 +143,9 @@ class IndexWorker:
 
         try:
             # Resolve repo path (clone if git URL)
-            actual_repo_path, actual_repo_id = self._resolve_repo(job)
+            resolved = self._resolve_repo(job)
+            actual_repo_path = resolved["repo_path"]
+            actual_repo_id = resolved["repo_id"]
 
             # Update job with resolved path
             self.job_manager.update_job(
@@ -166,6 +170,8 @@ class IndexWorker:
                 repo_id=actual_repo_id,
                 job_id=job_id,
                 org=job.get("org"),
+                repo_url=resolved.get("repo_url"),
+                cd_repo_url=resolved.get("cd_repo_url"),
             )
 
             # Run the full indexing workflow
@@ -202,12 +208,14 @@ class IndexWorker:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _resolve_repo(self, job: dict) -> tuple[str, str]:
+    def _resolve_repo(self, job: dict) -> dict:
         """
         Resolve the repository to a local path and repo_id.
 
         If repo_url is set, clones/updates the repo first.
         Also checks for a companion '-CD' repository and merges its files.
+
+        Returns dict with repo_path, repo_id, repo_url, cd_repo_url.
         """
         repo_url = job.get("repo_url")
         repo_path = job.get("repo_path")
@@ -224,18 +232,24 @@ class IndexWorker:
             )
 
             # Check for companion -CD repo and merge if found
-            self._try_clone_cd_companion(
+            cd_repo_url = self._try_clone_cd_companion(
                 repo_url, branch, local_path, git_manager, git_token
             )
 
-            return str(local_path), computed_repo_id
+            return {
+                "repo_path": str(local_path),
+                "repo_id": computed_repo_id,
+                "repo_url": repo_url,
+                "cd_repo_url": cd_repo_url,
+            }
 
         # Local path
-        if repo_id:
-            return repo_path, repo_id
-
-        # Fallback: compute repo_id from path
-        return repo_path, self.manifest._compute_repo_id(repo_path)
+        return {
+            "repo_path": repo_path,
+            "repo_id": repo_id or self.manifest._compute_repo_id(repo_path),
+            "repo_url": None,
+            "cd_repo_url": None,
+        }
 
     def _try_clone_cd_companion(self, repo_url, branch, main_local_path, git_manager, token):
         """
@@ -244,6 +258,8 @@ class IndexWorker:
         Convention: for repo 'my-service.git', the CD repo is 'my-service-CD.git'.
         CD files are placed under main_local_path/_cd/ to avoid collisions.
         If the CD repo doesn't exist or fails to clone, indexing proceeds normally.
+
+        Returns the CD repo URL if found, else None.
         """
         import shutil
 
@@ -282,9 +298,11 @@ class IndexWorker:
 
             cd_file_count = sum(1 for f in target_dir.rglob("*") if f.is_file())
             logger.info("✅ Merged %d CD companion files into %s", cd_file_count, target_dir)
+            return cd_url
 
         except Exception as e:
             logger.info("No CD companion found or clone failed: %s (this is OK)", e)
+            return None
 
 
 # ------------------------------------------------------------------

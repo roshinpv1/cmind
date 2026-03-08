@@ -1,17 +1,16 @@
 """
-Graph database adapter for SQLite.
+Graph database adapter for Kuzu.
 
-Replaces the previous KuzuDB implementation with a lightweight, concurrent
-SQLite-based graph storage using Recursive CTEs for queries.
+Embedded graph database using Cypher queries for code structure storage.
+Replaces the previous SQLite-based graph implementation.
 """
 
+import os
 from typing import Any
 from dataclasses import dataclass
+from pathlib import Path
 
-from sqlalchemy.dialects.sqlite import insert
-from sqlalchemy.orm import Session
-
-from codemind.storage.database import Database, GraphEdge, GraphNode
+import kuzu
 
 
 @dataclass
@@ -47,10 +46,9 @@ class GraphDB:
 
     def add_edge(self, edge: Edge):
         """Add edge if not exists."""
-        # Check for duplicate
         for e in self.edges:
             if e.from_id == edge.from_id and e.to_id == edge.to_id and e.type == edge.type:
-                return  # Already exists
+                return
         self.edges.append(edge)
 
     def get_node(self, node_id: str) -> Node | None:
@@ -65,14 +63,12 @@ class GraphDB:
     ) -> list[Edge]:
         """Query edges with filters."""
         results = self.edges
-
         if from_id:
             results = [e for e in results if e.from_id == from_id]
         if to_id:
             results = [e for e in results if e.to_id == to_id]
         if edge_type:
             results = [e for e in results if e.type == edge_type]
-
         return results
 
     def clear(self):
@@ -81,137 +77,272 @@ class GraphDB:
         self.edges.clear()
 
 
-class SQLiteGraphAdapter:
-    """Adapter for graph operations on SQLite."""
+class KuzuGraphAdapter:
+    """Adapter for graph operations on Kuzu embedded graph database."""
 
-    def __init__(self, db: Database | None = None):
-        """Initialize adapter."""
-        self.db = db or Database()
+    def __init__(self, db_path: str | Path | None = None):
+        """Initialize Kuzu graph database.
+        
+        Args:
+            db_path: Path to Kuzu database directory. 
+                     Defaults to CODEMIND_KUZU_PATH env or 'data/kuzu'.
+        """
+        if db_path is None:
+            db_path = os.getenv("CODEMIND_KUZU_PATH", "data/kuzu")
+        
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self.db = kuzu.Database(str(self.db_path))
+        self.conn = kuzu.Connection(self.db)
+        
+        self._init_schema()
 
-    def _upsert_node(self, node_id: str, node_type: str, repo_id: str, 
-                     name: str, file_path: str, properties: dict | None = None,
-                     start_line: int = 0, end_line: int = 0):
-        """Insert or update a node."""
-        with self.db.get_session() as session:
-            stmt = insert(GraphNode).values(
-                id=node_id,
-                type=node_type,
-                repo_id=repo_id,
-                name=name,
-                file_path=file_path,
-                properties=properties,
-                start_line=start_line,
-                end_line=end_line,
-            )
-            # Do update on conflict to ensure idempotency
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "name": name,
-                    "properties": properties,
-                    "start_line": start_line,
-                    "end_line": end_line,
-                },
-            )
-            session.execute(stmt)
-            session.commit()
+    def _init_schema(self):
+        """Create node and relationship tables if they don't exist."""
+        # Node tables
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS Repository('
+            'id STRING, name STRING, path STRING, '
+            'PRIMARY KEY(id))'
+        )
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS File('
+            'id STRING, repo_id STRING, name STRING, path STRING, '
+            'language STRING DEFAULT "", '
+            'PRIMARY KEY(id))'
+        )
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS Class('
+            'id STRING, repo_id STRING, name STRING, file_path STRING, '
+            'start_line INT64 DEFAULT 0, end_line INT64 DEFAULT 0, '
+            'PRIMARY KEY(id))'
+        )
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS Function('
+            'id STRING, repo_id STRING, name STRING, file_path STRING, '
+            'parent_class STRING DEFAULT "", '
+            'start_line INT64 DEFAULT 0, end_line INT64 DEFAULT 0, '
+            'PRIMARY KEY(id))'
+        )
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS Module('
+            'id STRING, repo_id STRING, name STRING, path STRING, '
+            'PRIMARY KEY(id))'
+        )
+        self.conn.execute(
+            'CREATE NODE TABLE IF NOT EXISTS API('
+            'id STRING, repo_id STRING, method STRING, route STRING, '
+            'file_path STRING, '
+            'PRIMARY KEY(id))'
+        )
 
-    def _add_edge(self, source_id: str, target_id: str, edge_type: str, properties: dict | None = None):
-        """Add an edge if it doesn't exist."""
-        with self.db.get_session() as session:
-            # Check if edge exists (to avoid unique constraint error spam)
-            # Although INSERT OR IGNORE is better
-            stmt = insert(GraphEdge).values(
-                source_id=source_id,
-                target_id=target_id,
-                type=edge_type,
-                properties=properties,
-            )
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=["source_id", "target_id", "type"]
-            )
-            session.execute(stmt)
-            session.commit()
+        # Relationship tables
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS CONTAINS(FROM Repository TO File)')
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS DECLARES(FROM File TO Class)')
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS DECLARES_FUNC(FROM File TO Function)')
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS HAS_METHOD(FROM Class TO Function)')
+        self.conn.execute(
+            'CREATE REL TABLE IF NOT EXISTS IMPORTS(FROM File TO File, '
+            'module_name STRING DEFAULT "")'
+        )
+        self.conn.execute(
+            'CREATE REL TABLE IF NOT EXISTS CALLS(FROM Function TO Function, '
+            'line INT64 DEFAULT 0)'
+        )
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS INHERITS_FROM(FROM Class TO Class)')
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS IMPLEMENTS(FROM Class TO Class)')
+        self.conn.execute('CREATE REL TABLE IF NOT EXISTS HANDLED_BY(FROM API TO Function)')
 
-    # -- Public Interface (matches previous KuzuGraphDB) --
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _execute(self, query: str, params: dict | None = None):
+        """Execute a Cypher query with optional parameters."""
+        try:
+            if params:
+                return self.conn.execute(query, params)
+            return self.conn.execute(query)
+        except Exception as e:
+            # Log but don't crash — graph ops are non-fatal
+            print(f"[KUZU] ⚠️ Query error: {e}\n  Query: {query[:200]}")
+            return None
+
+    def _result_to_list(self, result) -> list[list]:
+        """Convert Kuzu result to list of rows."""
+        if result is None:
+            return []
+        rows = []
+        while result.has_next():
+            rows.append(result.get_next())
+        return rows
+
+    # ── Public Interface (matches previous SQLiteGraphAdapter) ───────────
 
     def add_repository(self, repo_id: str, repo_path: str):
+        """Add or update a repository node."""
         node_id = f"repo:{repo_id}"
-        self._upsert_node(node_id, "Repository", repo_id, repo_id, repo_path, 
-                          properties={"path": repo_path})
+        self._execute(
+            'MERGE (r:Repository {id: $id}) '
+            'SET r.name = $name, r.path = $path',
+            {"id": node_id, "name": repo_id, "path": repo_path}
+        )
 
-    def add_file(self, repo_id: str, file_path: str):
+    def add_file(self, repo_id: str, file_path: str, language: str = ""):
+        """Add or update a file node and link to repository."""
         node_id = f"file:{repo_id}:{file_path}"
-        self._upsert_node(node_id, "File", repo_id, file_path.split("/")[-1], file_path,
-                          properties={"path": file_path})
-        
-        # Link to repo
         repo_node_id = f"repo:{repo_id}"
-        self._add_edge(repo_node_id, node_id, "CONTAINS")
+        
+        self._execute(
+            'MERGE (f:File {id: $id}) '
+            'SET f.repo_id = $repo_id, f.name = $name, f.path = $path, f.language = $lang',
+            {"id": node_id, "repo_id": repo_id, 
+             "name": file_path.split("/")[-1], "path": file_path, "lang": language}
+        )
+        # Link to repo
+        self._execute(
+            'MATCH (r:Repository {id: $rid}), (f:File {id: $fid}) '
+            'MERGE (r)-[:CONTAINS]->(f)',
+            {"rid": repo_node_id, "fid": node_id}
+        )
 
-    def add_class(self, repo_id: str, file_path: str, class_name: str, start_line: int = 0, end_line: int = 0):
+    def add_class(self, repo_id: str, file_path: str, class_name: str,
+                  start_line: int = 0, end_line: int = 0):
+        """Add or update a class node and link to file."""
         node_id = f"class:{repo_id}:{file_path}:{class_name}"
         file_node_id = f"file:{repo_id}:{file_path}"
         
-        self._upsert_node(node_id, "Class", repo_id, class_name, file_path, 
-                          start_line=start_line, end_line=end_line)
-        self._add_edge(file_node_id, node_id, "DECLARES")
+        self._execute(
+            'MERGE (c:Class {id: $id}) '
+            'SET c.repo_id = $repo_id, c.name = $name, c.file_path = $fp, '
+            'c.start_line = $sl, c.end_line = $el',
+            {"id": node_id, "repo_id": repo_id, "name": class_name, 
+             "fp": file_path, "sl": start_line, "el": end_line}
+        )
+        self._execute(
+            'MATCH (f:File {id: $fid}), (c:Class {id: $cid}) '
+            'MERGE (f)-[:DECLARES]->(c)',
+            {"fid": file_node_id, "cid": node_id}
+        )
 
-    def add_function(self, repo_id: str, file_path: str, function_name: str, 
+    def add_function(self, repo_id: str, file_path: str, function_name: str,
                      parent_class: str | None = None, start_line: int = 0, end_line: int = 0):
-        node_id = f"func:{repo_id}:{file_path}:{function_name}"
+        """Add or update a function node and link to parent."""
         if parent_class:
             node_id = f"func:{repo_id}:{file_path}:{parent_class}.{function_name}"
-            
-        self._upsert_node(node_id, "Function", repo_id, function_name, file_path,
-                          start_line=start_line, end_line=end_line,
-                          properties={"parent_class": parent_class})
+        else:
+            node_id = f"func:{repo_id}:{file_path}:{function_name}"
         
-        # Link to parent
+        self._execute(
+            'MERGE (fn:Function {id: $id}) '
+            'SET fn.repo_id = $repo_id, fn.name = $name, fn.file_path = $fp, '
+            'fn.parent_class = $pc, fn.start_line = $sl, fn.end_line = $el',
+            {"id": node_id, "repo_id": repo_id, "name": function_name,
+             "fp": file_path, "pc": parent_class or "", 
+             "sl": start_line, "el": end_line}
+        )
+        
         if parent_class:
             parent_id = f"class:{repo_id}:{file_path}:{parent_class}"
-            self._add_edge(parent_id, node_id, "HAS_METHOD")
+            self._execute(
+                'MATCH (c:Class {id: $cid}), (fn:Function {id: $fid}) '
+                'MERGE (c)-[:HAS_METHOD]->(fn)',
+                {"cid": parent_id, "fid": node_id}
+            )
         else:
-            parent_id = f"file:{repo_id}:{file_path}"
-            self._add_edge(parent_id, node_id, "DECLARES")
+            file_node_id = f"file:{repo_id}:{file_path}"
+            self._execute(
+                'MATCH (f:File {id: $fid}), (fn:Function {id: $fnid}) '
+                'MERGE (f)-[:DECLARES_FUNC]->(fn)',
+                {"fid": file_node_id, "fnid": node_id}
+            )
 
-    def add_import_edge(self, repo_id: str, from_file: str, to_file: str):
-        # We assume import is file-to-file for simplicity or node-to-node
-        # Previous Kuzu was add_import_edge(repo_id, from_file, to_file, import_name)
-        # We'll link file nodes
+    def add_import_edge(self, repo_id: str, from_file: str, to_file: str, 
+                        module_name: str = ""):
+        """Add an import relationship between files."""
         from_id = f"file:{repo_id}:{from_file}"
         to_id = f"file:{repo_id}:{to_file}"
-        self._add_edge(from_id, to_id, "IMPORTS")
+        self._execute(
+            'MATCH (a:File {id: $fid}), (b:File {id: $tid}) '
+            'MERGE (a)-[:IMPORTS {module_name: $mn}]->(b)',
+            {"fid": from_id, "tid": to_id, "mn": module_name}
+        )
 
     def add_call_edge(self, repo_id: str, caller_file: str, caller_func: str,
                       callee_file: str, callee_func: str, line: int = 0):
-        # Try to resolve IDs. Caller func might be in a class, which makes ID generation tricky without context.
-        # For MVP, we presume flat function names or simple generation.
-        # If accurate ID fails, we might skip. But graph builder usually knows context.
-        # Here we accept the raw strings and try to construct IDs.
-        # NOTE: This implies caller_func is unique in file or we use a convention.
+        """Add a function call relationship."""
         caller_id = f"func:{repo_id}:{caller_file}:{caller_func}"
         callee_id = f"func:{repo_id}:{callee_file}:{callee_func}"
-        
-        self._add_edge(caller_id, callee_id, "CALLS", properties={"line": line})
+        self._execute(
+            'MATCH (a:Function {id: $cid}), (b:Function {id: $tid}) '
+            'MERGE (a)-[:CALLS {line: $line}]->(b)',
+            {"cid": caller_id, "tid": callee_id, "line": line}
+        )
 
     def add_inheritance_edge(self, repo_id: str, child_file: str, child_class: str,
                              parent_file: str, parent_class: str):
+        """Add a class inheritance relationship."""
         child_id = f"class:{repo_id}:{child_file}:{child_class}"
         parent_id = f"class:{repo_id}:{parent_file}:{parent_class}"
-        self._add_edge(child_id, parent_id, "INHERITS_FROM")
+        self._execute(
+            'MATCH (child:Class {id: $cid}), (parent:Class {id: $pid}) '
+            'MERGE (child)-[:INHERITS_FROM]->(parent)',
+            {"cid": child_id, "pid": parent_id}
+        )
 
+    def add_implements_edge(self, repo_id: str, class_file: str, class_name: str,
+                            interface_file: str, interface_name: str):
+        """Add a class→interface implementation relationship."""
+        class_id = f"class:{repo_id}:{class_file}:{class_name}"
+        interface_id = f"class:{repo_id}:{interface_file}:{interface_name}"
+        self._execute(
+            'MATCH (c:Class {id: $cid}), (i:Class {id: $iid}) '
+            'MERGE (c)-[:IMPLEMENTS]->(i)',
+            {"cid": class_id, "iid": interface_id}
+        )
+
+    def add_module(self, repo_id: str, module_name: str, module_path: str):
+        """Add a module/package node."""
+        node_id = f"module:{repo_id}:{module_path}"
+        self._execute(
+            'MERGE (m:Module {id: $id}) '
+            'SET m.repo_id = $repo_id, m.name = $name, m.path = $path',
+            {"id": node_id, "repo_id": repo_id, "name": module_name, "path": module_path}
+        )
+
+    def add_api_handler(self, repo_id: str, method: str, route: str,
+                        file_path: str, function_name: str):
+        """Add an API endpoint node and link to its handler function."""
+        api_id = f"api:{repo_id}:{method}:{route}"
+        func_id = f"func:{repo_id}:{file_path}:{function_name}"
+        
+        self._execute(
+            'MERGE (a:API {id: $id}) '
+            'SET a.repo_id = $repo_id, a.method = $method, a.route = $route, '
+            'a.file_path = $fp',
+            {"id": api_id, "repo_id": repo_id, "method": method, 
+             "route": route, "fp": file_path}
+        )
+        self._execute(
+            'MATCH (a:API {id: $aid}), (fn:Function {id: $fid}) '
+            'MERGE (a)-[:HANDLED_BY]->(fn)',
+            {"aid": api_id, "fid": func_id}
+        )
 
     def close(self):
         """Close graph database connection."""
-        # No-op as we share the engine/session with app
-        pass
+        # Kuzu handles cleanup on garbage collection
+        self.conn = None
+        self.db = None
+
+
+# Backward compatibility alias
+SQLiteGraphAdapter = KuzuGraphAdapter
 
 
 class GraphBuilder:
-    """Builds code graph from AST and imports using SQLite adapter."""
+    """Builds code graph from AST and imports using Kuzu adapter."""
 
-    def __init__(self, graph_db: SQLiteGraphAdapter | None):
+    def __init__(self, graph_db: KuzuGraphAdapter | None):
         """Initialize builder. graph_db may be None."""
         self.graph = graph_db
         self.is_noop = graph_db is None
@@ -230,14 +361,14 @@ class GraphBuilder:
         if self.is_noop: return
         self.graph.add_class(repo_id, file_path, class_name)
 
-    def build_function_node(self, repo_id: str, file_path: str, function_name: str, 
+    def build_function_node(self, repo_id: str, file_path: str, function_name: str,
                             parent_class: str | None = None):
         if self.is_noop: return
         self.graph.add_function(repo_id, file_path, function_name, parent_class)
 
     def build_import_edges(self, repo_id: str, from_file: str, to_file: str, import_name: str):
         if self.is_noop: return
-        self.graph.add_import_edge(repo_id, from_file, to_file)
+        self.graph.add_import_edge(repo_id, from_file, to_file, module_name=import_name)
 
     def build_call_edges(self, repo_id: str, caller_file: str, caller_func: str,
                          callee_file: str, callee_func: str, line: int = 0):

@@ -23,6 +23,8 @@ class CodeChunk:
     symbol_name: str | None = None   # Function/class name if AST-derived
     symbol_type: str | None = None   # "function", "class", "method"
     language: str | None = None       # Programming language
+    docstring: str | None = None      # Extracted docstring from AST
+    context_header: str | None = None # File/class/import metadata for embeddings
 
 
 class CodeChunker:

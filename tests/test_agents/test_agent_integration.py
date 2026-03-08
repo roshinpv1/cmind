@@ -558,12 +558,13 @@ class TestAPIIntegration:
         from codemind.storage.lancedb_storage import LanceDBStorage
         from codemind.storage import ManifestManager
         from codemind.jobs import JobManager
-        from codemind.graph import SQLiteGraphAdapter
+        from codemind.graph import KuzuGraphAdapter
         from codemind.graph.graph_query import GraphQueryService
         import os
 
         db_path = str(tmp_path / "api_test.db")
         lance_dir = str(tmp_path / "lancedb_api_test")
+        kuzu_dir = str(tmp_path / "kuzu_api_test")
         os.makedirs(lance_dir, exist_ok=True)
 
         from fastapi import FastAPI
@@ -572,7 +573,7 @@ class TestAPIIntegration:
         manifest = ManifestManager(db_path=db_path)
         lance = LanceDBStorage(lance_dir)
         job_manager = JobManager(db_path=db_path)
-        graph_db = SQLiteGraphAdapter(job_manager.db)
+        graph_db = KuzuGraphAdapter(kuzu_dir)
         graph_query = GraphQueryService(graph_db)
 
         app.state.manifest = manifest

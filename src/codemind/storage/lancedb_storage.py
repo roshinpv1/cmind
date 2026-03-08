@@ -49,6 +49,8 @@ class LanceDBStorage:
                 pa.field("symbol_name", pa.string()),   # Function/class name (AST chunk)
                 pa.field("symbol_type", pa.string()),   # "function", "class", "method", "module"
                 pa.field("language", pa.string()),       # Programming language
+                pa.field("docstring", pa.string()),      # Extracted docstring from AST
+                pa.field("context_header", pa.string()), # File/class/import context header
             ]
         )
 
@@ -133,6 +135,8 @@ class LanceDBStorage:
                     "symbol_name": getattr(chunk, "symbol_name", None) or "",
                     "symbol_type": getattr(chunk, "symbol_type", None) or "",
                     "language": getattr(chunk, "language", None) or "",
+                    "docstring": getattr(chunk, "docstring", None) or "",
+                    "context_header": getattr(chunk, "context_header", None) or "",
                 }
             )
 

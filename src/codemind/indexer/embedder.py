@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class EmbeddingProvider(ABC):
     """Abstract base class for embedding providers."""
     
-    def _truncate_texts(self, texts: List[str], max_tokens: int) -> List[str]:
+    def _truncate_texts(self, texts: List[str], max_tokens: int, chunks=None) -> List[str]:
         """Truncate texts to approximate max_tokens length (safety net).
         
         The chunker should normally produce texts within limits.
@@ -44,10 +44,13 @@ class EmbeddingProvider(ABC):
         """
         char_limit = max_tokens * 4
         result = []
-        for t in texts:
+        for i, t in enumerate(texts):
             if len(t) > char_limit:
+                file_hint = ""
+                if chunks and i < len(chunks):
+                    file_hint = f" file={getattr(chunks[i], 'file_path', '?')}"
                 logger.warning(f"[EMBEDDING] Truncating text from {len(t)} to {char_limit} chars "
-                               f"(max_tokens={max_tokens}). Consider adjusting chunker settings.")
+                               f"(max_tokens={max_tokens}).{file_hint}")
                 result.append(t[:char_limit])
             else:
                 result.append(t)

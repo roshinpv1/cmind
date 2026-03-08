@@ -7,9 +7,51 @@ from typing import Optional, Any, Dict
 from .base import LLMDriver, LLMConfig, LLMProvider
 from .token_manager import ApigeeTokenManager, EnterpriseTokenManager
 
+import re as _re_mod
+
 class LocalDriver(LLMDriver):
     def __init__(self, config: LLMConfig):
         self.config = config
+
+    @staticmethod
+    def _detect_and_truncate_repetition(text: str, min_phrase_len: int = 15, max_repeats: int = 4) -> str:
+        """Detect degenerate repetition loops and truncate output.
+        
+        Finds phrases that repeat consecutively and cuts the output
+        before the repetition spirals. This is a safety net for local LLMs
+        that enter repetitive generation patterns.
+        """
+        if len(text) < min_phrase_len * max_repeats:
+            return text
+        
+        # Check for a repeating phrase pattern in the last portion of text
+        # Take the last 2000 chars and look for repeated substrings
+        tail = text[-2000:]
+        
+        # Try different phrase lengths from 15 to 100 chars
+        for phrase_len in range(min_phrase_len, min(100, len(tail) // max_repeats)):
+            # Extract a candidate phrase from the end
+            candidate = tail[-phrase_len:]
+            # Count how many times it appears consecutively at the end
+            count = 0
+            pos = len(tail)
+            while pos >= phrase_len:
+                segment = tail[pos - phrase_len:pos]
+                if segment == candidate:
+                    count += 1
+                    pos -= phrase_len
+                else:
+                    break
+            
+            if count >= max_repeats:
+                # Found repetition — truncate at the first occurrence
+                repeat_start = text.rfind(candidate * 2)
+                if repeat_start > 0:
+                    truncated = text[:repeat_start].rstrip(", \n")
+                    print(f"[LLM] ⚠️ Repetition detected ({count}x '{candidate[:30]}...'), truncated from {len(text)} to {len(truncated)} chars")
+                    return truncated
+        
+        return text
 
     async def generate(self, prompt: str, **kwargs) -> str:
         base_url = self.config.base_url or "http://localhost:1234/v1"
@@ -36,7 +78,8 @@ class LocalDriver(LLMDriver):
                     "model": self.config.model,
                     "messages": messages,
                     "temperature": temperature,
-                    "max_tokens": min(max_tokens, self.config.max_tokens)
+                    "max_tokens": min(max_tokens, self.config.max_tokens),
+                    "repeat_penalty": 1.2,
                 }
             )
             if response.status_code != 200:
@@ -44,7 +87,11 @@ class LocalDriver(LLMDriver):
                 print(f"[LLM] Error {response.status_code}: {error_body}")
                 response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            output = data["choices"][0]["message"]["content"]
+            
+            # Safety net: detect and truncate degenerate repetition loops
+            output = self._detect_and_truncate_repetition(output)
+            return output
 
     def is_available(self) -> bool:
         return bool(self.config.base_url)

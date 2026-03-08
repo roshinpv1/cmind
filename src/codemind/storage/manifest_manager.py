@@ -11,8 +11,8 @@ from pathlib import Path
 
 from codemind.indexer.models import FileChange
 
-from .database import Database
-from .models import FileManifest, RepositoryManifest
+from .database import CommitSnapshot, Database, IndexRun, SymbolRecord
+from .models import RepositoryManifest
 
 
 class ManifestManager:
@@ -217,6 +217,14 @@ class ManifestManager:
                     repo.last_pr_user = metadata["last_pr_user"]
                 if "last_pr_merged_at" in metadata:
                     repo.last_pr_merged_at = metadata["last_pr_merged_at"]
+                
+                # CD companion repo
+                if "cd_repo_url" in metadata:
+                    repo.cd_repo_url = metadata["cd_repo_url"]
+                
+                # Contributors
+                if "contributors" in metadata:
+                    repo.contributors = json.dumps(metadata["contributors"])
 
             repo.last_indexed_at = datetime.now(UTC)
             repo.updated_at = datetime.now(UTC)
@@ -225,81 +233,6 @@ class ManifestManager:
             session.refresh(repo)
             return repo
 
-    def get_file_hashes(self, repo_id: str) -> dict[str, str]:
-        """
-        Get all active file hashes for repository.
-
-        Args:
-            repo_id: Repository ID
-
-        Returns:
-            Dictionary mapping file paths to content hashes
-        """
-        with self.db.get_session() as session:
-            files = session.query(FileManifest).filter_by(repo_id=repo_id, is_active=True).all()
-            return {f.file_path: f.content_hash for f in files}
-
-    def update_files(
-        self,
-        repo_id: str,
-        changed_files: list[FileChange],
-        deleted_files: list[str],
-    ) -> None:
-        """
-        Update file manifests for repository.
-
-        Args:
-            repo_id: Repository ID
-            changed_files: List of changed files
-            deleted_files: List of deleted file paths
-        """
-        with self.db.get_session() as session:
-            now = datetime.now(UTC)
-
-            # Mark deleted files as inactive
-            if deleted_files:
-                session.query(FileManifest).filter(
-                    FileManifest.repo_id == repo_id,
-                    FileManifest.file_path.in_(deleted_files),
-                ).update({"is_active": False}, synchronize_session=False)
-
-            # Update or create changed files
-            for file_change in changed_files:
-                existing = (
-                    session.query(FileManifest)
-                    .filter_by(repo_id=repo_id, file_path=file_change.path)
-                    .first()
-                )
-
-                if existing:
-                    # Update existing
-                    existing.content_hash = file_change.content_hash
-                    existing.size_bytes = file_change.size_bytes
-                    existing.last_indexed_at = now
-                    existing.is_active = True
-                else:
-                    # Create new
-                    new_file = FileManifest(
-                        repo_id=repo_id,
-                        file_path=file_change.path,
-                        content_hash=file_change.content_hash,
-                        size_bytes=file_change.size_bytes,
-                        last_indexed_at=now,
-                        is_active=True,
-                    )
-                    session.add(new_file)
-
-            session.commit()
-
-            # Update repository total files count
-            total_active = (
-                session.query(FileManifest).filter_by(repo_id=repo_id, is_active=True).count()
-            )
-            repo = session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
-            if repo:
-                repo.total_files_indexed = total_active
-                repo.updated_at = now
-                session.commit()
 
     def delete_repository(self, repo_id: str) -> bool:
         """
@@ -320,3 +253,141 @@ class ManifestManager:
             session.delete(repo)
             session.commit()
             return True
+
+    # ── Index Run Operations ─────────────────────────────────────────────
+
+    def create_index_run(
+        self, run_id: str, repo_id: str, branch: str | None = None, commit_sha: str | None = None
+    ) -> IndexRun:
+        """Create a new index run record."""
+        with self.db.get_session() as session:
+            run = IndexRun(
+                run_id=run_id,
+                repo_id=repo_id,
+                branch=branch,
+                commit_sha=commit_sha,
+                started_at=datetime.now(UTC).isoformat(),
+                status="running",
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            return run
+
+    def complete_index_run(
+        self, run_id: str, status: str = "completed", 
+        files_indexed: int = 0, symbols_extracted: int = 0,
+        chunks_created: int = 0, embeddings_generated: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Complete an index run with stats."""
+        with self.db.get_session() as session:
+            run = session.query(IndexRun).filter_by(run_id=run_id).first()
+            if run:
+                run.completed_at = datetime.now(UTC).isoformat()
+                run.status = status
+                run.files_indexed = files_indexed
+                run.symbols_extracted = symbols_extracted
+                run.chunks_created = chunks_created
+                run.embeddings_generated = embeddings_generated
+                run.error = error
+                session.commit()
+
+    def get_index_runs(self, repo_id: str) -> list[IndexRun]:
+        """Get all index runs for a repository, newest first."""
+        with self.db.get_session() as session:
+            return (
+                session.query(IndexRun)
+                .filter_by(repo_id=repo_id)
+                .order_by(IndexRun.started_at.desc())
+                .all()
+            )
+
+    # ── Symbol Operations ────────────────────────────────────────────────
+
+    def upsert_symbols(self, repo_id: str, symbols: list[dict]) -> int:
+        """Batch upsert symbols for a repository.
+        
+        Deletes all existing symbols for the repo and inserts the fresh set.
+        This is safe because symbols are re-extracted from source every indexing run.
+        
+        Args:
+            repo_id: Repository ID
+            symbols: List of dicts with: symbol_id, file_path, symbol_name, 
+                     symbol_type, signature, language, start_line, end_line,
+                     parent_symbol_id, docstring, commit_sha
+        
+        Returns:
+            Number of symbols upserted
+        """
+        if not symbols:
+            return 0
+
+        with self.db.get_session() as session:
+            # Delete existing symbols for this repo to avoid UNIQUE conflicts
+            deleted = session.query(SymbolRecord).filter_by(repo_id=repo_id).delete()
+            if deleted:
+                print(f"[MANIFEST] Deleted {deleted} existing symbols for repo {repo_id}")
+
+            for sym in symbols:
+                record = SymbolRecord(
+                    symbol_id=sym["symbol_id"],
+                    repo_id=repo_id,
+                    file_path=sym.get("file_path", ""),
+                    symbol_name=sym.get("symbol_name", ""),
+                    symbol_type=sym.get("symbol_type", ""),
+                    signature=sym.get("signature"),
+                    language=sym.get("language"),
+                    start_line=sym.get("start_line", 0),
+                    end_line=sym.get("end_line", 0),
+                    parent_symbol_id=sym.get("parent_symbol_id"),
+                    docstring=sym.get("docstring"),
+                    commit_sha=sym.get("commit_sha"),
+                )
+                session.add(record)
+        
+            session.commit()
+            return len(symbols)
+
+    def get_symbols(
+        self, repo_id: str, file_path: str | None = None, symbol_type: str | None = None
+    ) -> list[SymbolRecord]:
+        """Query symbols for a repository."""
+        with self.db.get_session() as session:
+            query = session.query(SymbolRecord).filter_by(repo_id=repo_id)
+            if file_path:
+                query = query.filter_by(file_path=file_path)
+            if symbol_type:
+                query = query.filter_by(symbol_type=symbol_type)
+            return query.all()
+
+    # ── Commit Snapshot Operations ───────────────────────────────────────
+
+    def save_commit_snapshot(
+        self, repo_id: str, commit_sha: str, parent_commit: str | None = None,
+        files_changed: int = 0,
+    ) -> CommitSnapshot:
+        """Save a commit snapshot."""
+        with self.db.get_session() as session:
+            snapshot = CommitSnapshot(
+                repo_id=repo_id,
+                commit_sha=commit_sha,
+                parent_commit=parent_commit,
+                indexed_at=datetime.now(UTC).isoformat(),
+                files_changed=files_changed,
+            )
+            session.add(snapshot)
+            session.commit()
+            session.refresh(snapshot)
+            return snapshot
+
+    def get_commit_snapshots(self, repo_id: str) -> list[CommitSnapshot]:
+        """Get commit history for a repository."""
+        with self.db.get_session() as session:
+            return (
+                session.query(CommitSnapshot)
+                .filter_by(repo_id=repo_id)
+                .order_by(CommitSnapshot.indexed_at.desc())
+                .all()
+            )
+

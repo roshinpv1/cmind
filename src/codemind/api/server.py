@@ -94,7 +94,7 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources."""
-    from codemind.graph import SQLiteGraphAdapter
+    from codemind.graph import KuzuGraphAdapter
     from codemind.graph.graph_query import GraphQueryService
 
     # Initialize services
@@ -102,9 +102,9 @@ async def lifespan(app: FastAPI):
     app.state.lance_storage = LanceDBStorage()
     app.state.job_manager = JobManager()
     
-    # Graph DB (SQLite Adapter) - Reuse connection from job_manager
-    app.state.graph_db = SQLiteGraphAdapter(app.state.job_manager.db)
-    app.state.graph_query = GraphQueryService(app.state.graph_db)  # Graph query service
+    # Graph DB (Kuzu) - Independent embedded graph database
+    app.state.graph_db = KuzuGraphAdapter()
+    app.state.graph_query = GraphQueryService(app.state.graph_db)
 
     # Initialize agent services (existing doc generator)
     from . import agents as agents_module
@@ -136,9 +136,26 @@ async def lifespan(app: FastAPI):
     routes_msg += "============================="
     print(routes_msg, file=sys.stderr)
 
+    # Start index worker as background thread (shares Kuzu instance)
+    import threading
+    from codemind.worker.index_worker import IndexWorker, _shutdown as _worker_shutdown
+    import codemind.worker.index_worker as worker_module
+
+    worker = IndexWorker(
+        poll_interval=int(os.getenv("WORKER_POLL_INTERVAL", "5")),
+        db_path=os.getenv("CODEMIND_DB_PATH", "data/codemind.db"),
+        graph_db=app.state.graph_db,  # Share Kuzu instance
+    )
+    worker_thread = threading.Thread(target=worker.run, daemon=True, name="index-worker")
+    worker_thread.start()
+    print("[SERVER] ✅ Index worker started as background thread")
+
     yield
 
-    # Cleanup
+    # Cleanup: signal worker to stop, then close graph
+    worker_module._shutdown = True
+    worker_thread.join(timeout=10)
+    print("[SERVER] ⏹  Index worker stopped")
     app.state.graph_db.close()
 
 
@@ -452,11 +469,14 @@ class RepoListItem(BaseModel):
     last_pr_title: str | None = None
     last_pr_user: str | None = None
     last_pr_merged_at: str | None = None
+    cd_repo_url: str | None = None
+    contributors: list[dict] | None = None  # [{"name": "...", "commits": N}, ...]
 
 
 @app.get("/api/v1/repos", response_model=list[RepoListItem])
 async def list_repos():
     """List all indexed repositories."""
+    import json as _json
     manifest: ManifestManager = app.state.manifest
     repos = manifest.list_repositories()
     
@@ -476,6 +496,14 @@ async def list_repos():
                  name = potential_name
                  branch = potential_branch
 
+        # Parse contributors JSON
+        contributors = None
+        if r.contributors:
+            try:
+                contributors = _json.loads(r.contributors)
+            except Exception:
+                contributors = None
+
         results.append(RepoListItem(
             repo_id=r.repo_id,
             name=name or "unknown",
@@ -489,7 +517,9 @@ async def list_repos():
             total_commits=r.total_commits,
             last_pr_title=r.last_pr_title,
             last_pr_user=r.last_pr_user,
-            last_pr_merged_at=r.last_pr_merged_at
+            last_pr_merged_at=r.last_pr_merged_at,
+            cd_repo_url=r.cd_repo_url,
+            contributors=contributors,
         ))
         seen_repo_ids.add(r.repo_id)
 

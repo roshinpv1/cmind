@@ -2,65 +2,67 @@
 Database setup and session management.
 
 Provides SQLAlchemy engine and session configuration.
+Graph storage has been moved to Kuzu — this file handles metadata only.
 """
 
 from pathlib import Path
 
 
-from sqlalchemy import JSON, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, text
-from sqlalchemy.orm import Mapped, declarative_base, mapped_column, relationship, sessionmaker
+from sqlalchemy import JSON, Integer, String, Text, UniqueConstraint, create_engine, event, text
+from sqlalchemy.orm import Mapped, declarative_base, mapped_column, sessionmaker
 
 Base = declarative_base()
 
 
-class GraphNode(Base):
-    """Node in the code knowledge graph."""
+class IndexRun(Base):
+    """Tracks each indexing job's execution and stats."""
 
-    __tablename__ = "graph_nodes"
+    __tablename__ = "index_runs"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True)  # e.g. "file:/path/to/main.py"
-    type: Mapped[str] = mapped_column(String, index=True)  # file, class, function
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)  # Same as job_id
     repo_id: Mapped[str] = mapped_column(String, index=True)
-    name: Mapped[str] = mapped_column(String)  # Human readable name
+    commit_sha: Mapped[str | None] = mapped_column(String, nullable=True)
+    branch: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[str] = mapped_column(String)  # ISO datetime
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, default="running")  # running|completed|failed
+    files_indexed: Mapped[int] = mapped_column(Integer, default=0)
+    symbols_extracted: Mapped[int] = mapped_column(Integer, default=0)
+    chunks_created: Mapped[int] = mapped_column(Integer, default=0)
+    embeddings_generated: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SymbolRecord(Base):
+    """Queryable symbols table — classes, functions, methods, etc."""
+
+    __tablename__ = "symbols"
+
+    symbol_id: Mapped[str] = mapped_column(String, primary_key=True)  # hash(repo, file, type, name)
+    repo_id: Mapped[str] = mapped_column(String, index=True)
     file_path: Mapped[str] = mapped_column(String, index=True)
+    symbol_name: Mapped[str] = mapped_column(String, index=True)
+    symbol_type: Mapped[str] = mapped_column(String, index=True)  # class|function|method|interface
+    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
     start_line: Mapped[int] = mapped_column(Integer, default=0)
     end_line: Mapped[int] = mapped_column(Integer, default=0)
-    properties: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-
-    # Relationships
-    outgoing_edges = relationship(
-        "GraphEdge",
-        foreign_keys="GraphEdge.source_id",
-        back_populates="source_node",
-        cascade="all, delete-orphan",
-    )
-    incoming_edges = relationship(
-        "GraphEdge",
-        foreign_keys="GraphEdge.target_id",
-        back_populates="target_node",
-        cascade="all, delete-orphan",
-    )
+    parent_symbol_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    docstring: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-class GraphEdge(Base):
-    """Edge in the code knowledge graph."""
+class CommitSnapshot(Base):
+    """Tracks commit history for each repository."""
 
-    __tablename__ = "graph_edges"
+    __tablename__ = "commit_snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_id: Mapped[str] = mapped_column(ForeignKey("graph_nodes.id", ondelete="CASCADE"), index=True)
-    target_id: Mapped[str] = mapped_column(ForeignKey("graph_nodes.id", ondelete="CASCADE"), index=True)
-    type: Mapped[str] = mapped_column(String, index=True)  # calls, imports, defines
-    properties: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-
-    # Unique constraint to prevent duplicate edges
-    __table_args__ = (UniqueConstraint("source_id", "target_id", "type", name="uq_edge_source_target_type"),)
-
-    # Relationships
-    source_node = relationship("GraphNode", foreign_keys=[source_id], back_populates="outgoing_edges")
-    target_node = relationship("GraphNode", foreign_keys=[target_id], back_populates="incoming_edges")
-    target_node = relationship("GraphNode", foreign_keys=[target_id], back_populates="incoming_edges")
-
+    repo_id: Mapped[str] = mapped_column(String, index=True)
+    commit_sha: Mapped[str] = mapped_column(String)
+    parent_commit: Mapped[str | None] = mapped_column(String, nullable=True)
+    indexed_at: Mapped[str] = mapped_column(String)  # ISO datetime
+    files_changed: Mapped[int] = mapped_column(Integer, default=0)
 
 class CatalogStore(Base):
     """

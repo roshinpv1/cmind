@@ -12,6 +12,6 @@ Implemented in Milestones 2 and 6.
 """
 
 from .manifest_manager import ManifestManager
-from .models import FileManifest, RepositoryManifest
+from .models import RepositoryManifest
 
-__all__ = ["ManifestManager", "RepositoryManifest", "FileManifest"]
+__all__ = ["ManifestManager", "RepositoryManifest"]
