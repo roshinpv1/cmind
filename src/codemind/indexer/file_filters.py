@@ -45,6 +45,9 @@ CODE_EXTENSIONS = {
     ".csx",
     ".fs",
     ".fsx",
+    # VB.NET
+    ".vb",
+    ".vbs",
     # Other languages
     ".rb",
     ".php",
@@ -65,11 +68,19 @@ CODE_EXTENSIONS = {
     ".v",
     ".clj",
     ".cljs",
+    ".nim",
+    ".cr",     # Crystal
+    ".jl",     # Julia
+    ".ml",     # OCaml
+    ".mli",
     # Web / Markup
     ".html",
     ".htm",
     ".jsp",
     ".jspx",
+    ".aspx",
+    ".cshtml",  # Razor
+    ".razor",
     ".css",
     ".scss",
     ".sass",
@@ -107,37 +118,156 @@ CODE_EXTENSIONS = {
 
 # Directories to always ignore
 IGNORED_DIRS = {
+    # Version control
     ".git",
     ".svn",
     ".hg",
+    ".bzr",
+    # Python
     "__pycache__",
-    "node_modules",
     ".venv",
     "venv",
     "env",
     ".env",
-    "build",
-    "dist",
+    ".eggs",
+    ".tox",
+    ".nox",
     ".pytest_cache",
     ".mypy_cache",
-    ".tox",
-    "target",  # Rust
+    ".ruff_cache",
+    ".pytype",
+    "site-packages",
+    # JavaScript / Node
+    "node_modules",
+    ".next",
+    ".nuxt",
+    ".output",
+    ".turbo",
+    "bower_components",
+    ".parcel-cache",
+    ".cache",
+    # Java / JVM
+    "target",
+    ".gradle",
+    ".mvn",
+    # .NET
     "bin",
-    "obj",  # .NET
+    "obj",
+    "packages",
+    ".vs",
+    # Rust
+    # (also uses "target", already listed)
+    # Go
+    "vendor",
+    # Build artifacts
+    "build",
+    "dist",
+    "out",
+    "output",
+    "_build",
+    "cmake-build-debug",
+    "cmake-build-release",
+    # IDE / Editor
+    ".idea",
+    ".vscode",
+    ".eclipse",
+    ".settings",
+    ".project",
+    # Coverage / Reports
+    "coverage",
+    "htmlcov",
+    ".nyc_output",
+    # Documentation build
+    "_site",
+    "site",
+    ".docusaurus",
+    # Container / Infra
+    ".terraform",
+    ".serverless",
+    # Misc generated
+    "generated",
+    "auto-generated",
+    ".generated",
+    "migrations",       # DB migrations (often auto-generated)
+    "__snapshots__",
+    "__mocks__",
+    "__fixtures__",
 }
 
-# File patterns to ignore
+# File patterns to ignore (matched against filename)
 IGNORED_PATTERNS = {
+    # Python compiled
     ".pyc",
     ".pyo",
     ".pyd",
+    # Native binaries / libraries
     ".so",
     ".dll",
     ".dylib",
-    ".egg-info",
-    ".class",
     ".o",
     ".a",
+    ".lib",
+    ".obj",
+    ".exe",
+    # Java
+    ".class",
+    ".jar",
+    ".war",
+    ".ear",
+    # .NET
+    ".nupkg",
+    # Python packaging
+    ".egg-info",
+    ".egg",
+    ".whl",
+    # Source maps
+    ".map",
+    ".js.map",
+    ".css.map",
+    # Minified files (noise, not human-written)
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    # Lock files (auto-generated, extremely large)
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "Pipfile.lock",
+    "poetry.lock",
+    "Gemfile.lock",
+    "composer.lock",
+    "Cargo.lock",
+    "go.sum",
+    "packages.lock.json",
+    # Images / media (binary)
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".webp",
+    ".mp3",
+    ".mp4",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    # Archives
+    ".zip",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".rar",
+    ".7z",
+    # Database
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+    # Misc
+    ".DS_Store",
+    "Thumbs.db",
+    ".log",
 }
 
 # Extensionless filenames that should be indexed
