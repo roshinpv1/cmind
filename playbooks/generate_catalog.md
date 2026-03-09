@@ -121,6 +121,7 @@ fields:
 exclude_test_files: true
 grounding_fence: false
 inject_repo_metadata: true
+skip_schema_validation: true
 ```
 
 ## Search Strategy

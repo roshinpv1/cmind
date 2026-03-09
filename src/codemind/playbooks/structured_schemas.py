@@ -271,6 +271,102 @@ def build_pydantic_model(name: str, schema_dict: dict) -> type[BaseModel] | None
     return model
 
 
+def generate_example_json(schema_class: type[BaseModel]) -> str:
+    """
+    Generate an example JSON string from a Pydantic model's field definitions.
+    
+    Produces realistic placeholder values based on field types, descriptions,
+    and defaults so the LLM knows the expected output shape.
+    
+    Args:
+        schema_class: Pydantic BaseModel subclass
+        
+    Returns:
+        Pretty-printed JSON string with example values
+    """
+    import json as _json
+    
+    def _example_value(field_name: str, field_info) -> Any:
+        """Generate a single example value for a field."""
+        annotation = field_info.annotation
+        
+        # Unwrap Optional[X] → X
+        origin = getattr(annotation, "__origin__", None)
+        args = getattr(annotation, "__args__", ())
+        if origin is Union and type(None) in args:
+            annotation = next(a for a in args if a is not type(None))
+            origin = getattr(annotation, "__origin__", None)
+            args = getattr(annotation, "__args__", ())
+        
+        # Use non-trivial default if present
+        # PydanticUndefined / Ellipsis mean "required, no default" — skip them
+        default = field_info.default
+        from pydantic_core import PydanticUndefined
+        has_usable_default = (
+            default is not None
+            and default is not ...
+            and default is not PydanticUndefined
+            and default != ""
+            and default != 0
+            and default != []
+        )
+        if has_usable_default:
+            return default
+        
+        # list[X]
+        if origin is list:
+            item_type = args[0] if args else str
+            if isinstance(item_type, type) and issubclass(item_type, BaseModel):
+                return [_model_example(item_type)]
+            if item_type is str:
+                return [f"Example {field_name} item 1", f"Example {field_name} item 2"]
+            elif item_type is dict:
+                return [{"name": "Example", "description": "Example description"}]
+            elif item_type is int:
+                return [1, 2, 3]
+            return [f"item1", f"item2"]
+        
+        # dict
+        if annotation is dict or origin is dict:
+            return {"key": "value"}
+        
+        # Pydantic submodel
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return _model_example(annotation)
+        
+        # Scalars
+        if annotation is str:
+            desc = field_info.description or field_name
+            return f"Example {desc}"
+        if annotation is int:
+            # Respect ge/le constraints if available
+            metadata = field_info.metadata or []
+            for m in metadata:
+                if hasattr(m, "ge") and hasattr(m, "le"):
+                    return (m.ge + m.le) // 2
+            return 50
+        if annotation is float:
+            return 0.75
+        if annotation is bool:
+            return True
+        
+        return f"example_{field_name}"
+    
+    def _model_example(model_class: type[BaseModel]) -> dict:
+        """Generate example dict for a Pydantic model."""
+        result = {}
+        for fname, finfo in model_class.model_fields.items():
+            result[fname] = _example_value(fname, finfo)
+        return result
+    
+    try:
+        example = _model_example(schema_class)
+        return _json.dumps(example, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[SCHEMAS] Failed to generate example JSON: {e}")
+        return ""
+
+
 def get_schema_for_playbook(playbook_name: str, playbook_def=None) -> type[BaseModel] | None:
     """
     Get Pydantic schema for a playbook's output.

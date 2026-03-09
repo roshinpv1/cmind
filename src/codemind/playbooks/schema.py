@@ -73,6 +73,10 @@ class PlaybookDefinition(BaseModel):
         default=False,
         description="Whether to inject repo metadata (name, url, branch) into the prompt"
     )
+    skip_schema_validation: bool = Field(
+        default=False,
+        description="Whether to skip Pydantic schema validation of LLM output (e.g. for tool_call playbooks)"
+    )
     
     # Metadata
     deterministic: bool = Field(default=False, description="Whether output is deterministic")

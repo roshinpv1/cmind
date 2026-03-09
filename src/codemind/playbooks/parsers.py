@@ -127,6 +127,7 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         exclude_test_files = False
         grounding_fence = False
         inject_repo_metadata = False
+        skip_schema_validation = False
         if behavior_yaml:
             try:
                 behavior_dict = yaml.safe_load(behavior_yaml)
@@ -134,9 +135,10 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
                     exclude_test_files = behavior_dict.get("exclude_test_files", False)
                     grounding_fence = behavior_dict.get("grounding_fence", False)
                     inject_repo_metadata = behavior_dict.get("inject_repo_metadata", False)
+                    skip_schema_validation = behavior_dict.get("skip_schema_validation", False)
                     print(f"[PARSER] ✓ Parsed behavior for {name}: "
                           f"exclude_test={exclude_test_files}, grounding={grounding_fence}, "
-                          f"inject_meta={inject_repo_metadata}")
+                          f"inject_meta={inject_repo_metadata}, skip_validation={skip_schema_validation}")
             except Exception as e:
                 print(f"[PARSER] Failed to parse behavior YAML for {name}: {e}")
         
@@ -154,6 +156,7 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
             exclude_test_files=exclude_test_files,
             grounding_fence=grounding_fence,
             inject_repo_metadata=inject_repo_metadata,
+            skip_schema_validation=skip_schema_validation,
         )
         
         return playbook
