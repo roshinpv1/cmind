@@ -234,74 +234,72 @@ class IndexingWorkflow:
         return state
 
     def chunk_files(self, state: IndexingState) -> IndexingState:
-        """Node: Chunk files into smaller pieces."""
-        import threading
+        """Node: Chunk files in parallel using ThreadPoolExecutor."""
+        import os
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         PER_FILE_TIMEOUT = 30  # seconds — skip files that take longer
         MAX_FILE_SIZE = 500 * 1024  # 500 KB
+        MAX_WORKERS = min(os.cpu_count() or 4, 8)  # Cap at 8 to avoid over-subscribing
 
         try:
             state.stage = "chunking"
             total = len(state.changed_files)
-            print(f"[CHUNKING] Starting chunking for repo: {state.repo_id}")
-            print(f"[CHUNKING] Changed files: {total}")
+            print(f"[CHUNKING] Starting parallel chunking for repo: {state.repo_id}")
+            print(f"[CHUNKING] Changed files: {total}, workers: {MAX_WORKERS}")
 
             all_chunks = []
             skipped = 0
             errored = 0
             timed_out = 0
 
-            for idx, file_change in enumerate(state.changed_files):
+            # Pre-filter files: only chunkable files under size limit
+            chunkable = []
+            for file_change in state.changed_files:
                 file_path = Path(state.repo_path) / file_change.path
+                if not file_path.exists():
+                    continue
+                if file_path.suffix.lower() not in CODE_EXTENSIONS and file_path.name not in KNOWN_FILENAMES:
+                    continue
+                try:
+                    if file_path.stat().st_size > MAX_FILE_SIZE:
+                        skipped += 1
+                        continue
+                except OSError:
+                    pass
+                chunkable.append((file_change, file_path))
 
-                # Chunk all programming-related files
-                if file_path.exists() and (
-                    file_path.suffix.lower() in CODE_EXTENSIONS
-                    or file_path.name in KNOWN_FILENAMES
-                ):
+            print(f"[CHUNKING] Chunkable files: {len(chunkable)} (skipped {skipped} large)")
+
+            # Process files in parallel
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                # Submit all chunking tasks
+                futures = {}
+                for file_change, file_path in chunkable:
+                    future = pool.submit(self.chunker.chunk_file, str(file_path))
+                    futures[future] = file_change
+
+                # Collect results as they complete
+                done_count = 0
+                from concurrent.futures import as_completed
+                for future in as_completed(futures, timeout=PER_FILE_TIMEOUT * len(futures) + 60):
+                    file_change = futures[future]
+                    done_count += 1
                     try:
-                        # Skip very large files
-                        try:
-                            fsize = file_path.stat().st_size
-                            if fsize > MAX_FILE_SIZE:
-                                skipped += 1
-                                continue
-                        except OSError:
-                            pass
-
-                        # Use a daemon thread with timeout so hangs don't block
-                        result_holder = [None]
-                        error_holder = [None]
-
-                        def _do_chunk(fp=str(file_path)):
-                            try:
-                                result_holder[0] = self.chunker.chunk_file(fp)
-                            except Exception as ex:
-                                error_holder[0] = ex
-
-                        t = threading.Thread(target=_do_chunk, daemon=True)
-                        t.start()
-                        t.join(timeout=PER_FILE_TIMEOUT)
-
-                        if t.is_alive():
-                            # Thread is still running (hung) — skip this file
-                            timed_out += 1
-                            print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path}")
-                            # Daemon thread will be killed when process exits
-                        elif error_holder[0]:
-                            raise error_holder[0]
-                        elif result_holder[0]:
-                            all_chunks.extend(result_holder[0])
-
+                        chunks = future.result(timeout=PER_FILE_TIMEOUT)
+                        if chunks:
+                            all_chunks.extend(chunks)
+                    except FuturesTimeout:
+                        timed_out += 1
+                        print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path}")
                     except Exception as e:
                         errored += 1
                         print(f"[CHUNKING] ⚠️ Error chunking {file_change.path}: {type(e).__name__}: {e}")
 
-                # Progress log every 50 files or at the end
-                if (idx + 1) % 50 == 0 or idx == total - 1:
-                    pct = int((idx + 1) / total * 100)
-                    print(f"[CHUNKING] Progress: {idx + 1}/{total} files ({pct}%), {len(all_chunks)} chunks so far")
+                    # Progress log every 50 files or at the end
+                    if done_count % 50 == 0 or done_count == len(chunkable):
+                        pct = int(done_count / max(len(chunkable), 1) * 100)
+                        print(f"[CHUNKING] Progress: {done_count}/{len(chunkable)} files ({pct}%), {len(all_chunks)} chunks so far")
 
             print(f"[CHUNKING] Created {len(all_chunks)} chunks total (skipped={skipped} large, errors={errored}, timeouts={timed_out})")
             state.chunks_created = len(all_chunks)
