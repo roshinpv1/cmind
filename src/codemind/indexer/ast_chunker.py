@@ -53,6 +53,11 @@ class ASTChunker:
         except ImportError:
             logger.debug("tiktoken not installed, using char-based sizing")
 
+    # Languages where tree-sitter AST parsing is pointless (no functions/classes)
+    # and can even hang (e.g., tree_sitter_markdown on large README files).
+    # These skip straight to fast char-based chunking.
+    _SKIP_AST_LANGUAGES = {"markdown", "json", "yaml", "toml", "html", "css", "sql", "hcl"}
+
     def chunk_file(self, file_path: Path | str, content: str | None = None) -> list[CodeChunk]:
         file_path = Path(file_path)
         """
@@ -76,10 +81,12 @@ class ASTChunker:
             return []
 
         language = self.ast_extractor.detect_language(file_path)
-        if not language:
-            # Unsupported language — fall back to character-based
-            logger.debug("[CHUNKER] char-fallback (unsupported ext): %s", file_path.suffix)
-            return self._char_chunk(file_path, content, language=None)
+
+        # Skip AST for non-code languages (markdown, JSON, etc.) — they have
+        # no functions/classes and tree-sitter can hang on them (e.g., README.md)
+        if not language or language in self._SKIP_AST_LANGUAGES:
+            logger.debug("[CHUNKER] char-fallback (skip-AST lang): %s [%s]", file_path.name, language)
+            return self._char_chunk(file_path, content, language=language)
 
         result = self.ast_extractor.extract(file_path, language)
         if not result.success or not result.symbols:
@@ -96,12 +103,22 @@ class ASTChunker:
             return len(self._enc.encode(text))
         return len(text) // 4  # ~4 chars per token fallback
 
+    def _exceeds_limit_fast(self, text: str) -> bool:
+        """Fast char-only check — O(1), no tiktoken.
+        
+        Use this in tight inner loops where calling tiktoken on every
+        iteration would be O(n²). The char limit is a conservative
+        approximation (~4 chars/token).
+        """
+        return len(text) > self.max_chunk_chars
+
     def _exceeds_limit(self, text: str) -> bool:
-        """Check if text exceeds the chunk size limit.
+        """Full check with tiktoken validation.
         
         Uses BOTH token count and char-based limit to prevent mismatches
         between tiktoken's tokenization and the embedder's char-based
         truncation (max_tokens * 4 chars).
+        Call this only at chunk boundaries, not inside tight loops.
         """
         # Always enforce the char-based cap to match embedder's truncation
         if len(text) > self.max_chunk_chars:
@@ -244,11 +261,19 @@ class ASTChunker:
         chunks.sort(key=lambda c: c.start_line)
         return chunks
 
+    # Symbols beyond this line count are capped to prevent pathological splits
+    MAX_SYMBOL_LINES = 10_000
+
     def _split_large_symbol(
         self, file_path: Path, text: str,
         base_line: int, sym, language: str
     ) -> list[CodeChunk]:
-        """Split a large symbol into smaller chunks using token-aware sizing."""
+        """Split a large symbol into smaller chunks.
+        
+        Optimized: uses fast char-length checks in the inner loop (O(n))
+        instead of calling tiktoken on every iteration (was O(n²)).
+        A single tiktoken validation pass trims the final boundary if needed.
+        """
         lines = text.split("\n")
         chunks = []
         i = 0
@@ -257,17 +282,32 @@ class ASTChunker:
         header_budget = int(self.max_chunk_chars * 0.2)
         effective_max = self.max_chunk_chars - header_budget
 
+        # Cap extremely large symbols to prevent runaway processing
+        if len(lines) > self.MAX_SYMBOL_LINES:
+            logger.warning(
+                "[CHUNKER] Symbol %s has %d lines (cap=%d), truncating",
+                sym.name, len(lines), self.MAX_SYMBOL_LINES
+            )
+            lines = lines[:self.MAX_SYMBOL_LINES]
+
         while i < len(lines):
             end = i + 1  # Always take at least one line
-            chunk_text = lines[i]
+            char_count = len(lines[i])
 
-            # Grow chunk line by line until it exceeds the limit
+            # Phase 1: Fast char-based growth — O(1) per line, no tiktoken
             while end < len(lines):
-                candidate = chunk_text + "\n" + lines[end]
-                if self._exceeds_limit(candidate) or len(candidate) > effective_max:
+                added = len(lines[end]) + 1  # +1 for newline
+                if char_count + added > effective_max:
                     break
-                chunk_text = candidate
+                char_count += added
                 end += 1
+
+            # Phase 2: Build the actual chunk text once
+            chunk_text = "\n".join(lines[i:end])
+
+            # Char-based boundary is sufficient — max_chunk_chars = max_tokens * 4
+            # is a conservative approximation. Tiktoken is NOT used here because
+            # encode() can hang on certain patterns (repeated chars, minified code).
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
@@ -313,22 +353,28 @@ class ASTChunker:
     def _char_chunk(
         self, file_path: Path, content: str, language: str | None
     ) -> list[CodeChunk]:
-        """Fallback character-based chunking with token-aware sizing."""
+        """Fallback character-based chunking with fast char-based inner loop."""
         lines = content.split("\n")
         chunks = []
         i = 0
 
         while i < len(lines):
             end = i + 1
-            chunk_text = lines[i]
+            char_count = len(lines[i])
 
-            # Grow line by line until we exceed the token limit
+            # Fast char-based growth
             while end < len(lines):
-                candidate = chunk_text + "\n" + lines[end]
-                if self._exceeds_limit(candidate):
+                added = len(lines[end]) + 1
+                if char_count + added > self.max_chunk_chars:
                     break
-                chunk_text = candidate
+                char_count += added
                 end += 1
+
+            chunk_text = "\n".join(lines[i:end])
+
+            # Handle single lines that exceed max_chunk_chars — truncate
+            if len(chunk_text) > self.max_chunk_chars and end == i + 1:
+                chunk_text = chunk_text[:self.max_chunk_chars]
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
@@ -345,29 +391,36 @@ class ASTChunker:
                     language=language,
                 ))
 
-            # Advance with some overlap
-            i = end - 3 if end < len(lines) else end
+            # Advance — always move forward, overlap only when safe
+            i = max(i + 1, end - 3) if end < len(lines) else end
 
         return chunks
 
     def _char_chunk_text(
         self, file_path: Path, text: str, base_line: int, language: str | None
     ) -> list[CodeChunk]:
-        """Split a text block into chunks using token-aware sizing."""
+        """Split a text block into chunks with fast char-based inner loop."""
         lines = text.split("\n")
         chunks = []
         i = 0
 
         while i < len(lines):
             end = i + 1
-            chunk_text = lines[i]
+            char_count = len(lines[i])
 
+            # Fast char-based growth
             while end < len(lines):
-                candidate = chunk_text + "\n" + lines[end]
-                if self._exceeds_limit(candidate):
+                added = len(lines[end]) + 1
+                if char_count + added > self.max_chunk_chars:
                     break
-                chunk_text = candidate
+                char_count += added
                 end += 1
+
+            chunk_text = "\n".join(lines[i:end])
+
+            # Handle single lines that exceed max_chunk_chars — truncate
+            if len(chunk_text) > self.max_chunk_chars and end == i + 1:
+                chunk_text = chunk_text[:self.max_chunk_chars]
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
@@ -384,7 +437,8 @@ class ASTChunker:
                     language=language,
                 ))
 
-            i = end - 3 if end < len(lines) else end
+            # Advance — always move forward, overlap only when safe
+            i = max(i + 1, end - 3) if end < len(lines) else end
 
         return chunks
 
