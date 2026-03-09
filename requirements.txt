@@ -39,18 +39,18 @@ tree-sitter-cpp>=0.21.0
 tree-sitter-c-sharp>=0.21.0
 tree-sitter-ruby>=0.21.0
 tree-sitter-php>=0.21.0
-tree-sitter-swift>=0.21.0
-tree-sitter-kotlin>=0.21.0
-tree-sitter-scala>=0.21.0
-tree-sitter-bash>=0.21.0
-tree-sitter-html>=0.21.0
-tree-sitter-css>=0.21.0
-tree-sitter-json>=0.21.0
-tree-sitter-yaml>=0.21.0
-tree-sitter-toml>=0.21.0
-tree-sitter-sql>=0.21.0
-tree-sitter-markdown>=0.21.0
-tree-sitter-hcl>=0.21.0
+tree-sitter-swift
+tree-sitter-kotlin
+tree-sitter-scala
+tree-sitter-bash
+tree-sitter-html
+tree-sitter-css
+tree-sitter-json
+tree-sitter-yaml
+tree-sitter-toml
+tree-sitter-sql
+tree-sitter-markdown
+tree-sitter-hcl
 
 # --- Git Operations ---
 gitpython>=3.1.40
