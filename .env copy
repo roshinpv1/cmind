@@ -1,0 +1,62 @@
+# =================================================================
+# CodeMind v2: Agentic Graph-Grounded Code Intelligence
+# =================================================================
+
+# --- LLM Provider (Gateway Only) ---
+# Options: local, apigee, enterprise
+LLM_PROVIDER=local
+LOCAL_LLM_URL=http://localhost:1234/v1
+LOCAL_LLM_MODEL=qwen/qwen3-vl-8b
+LLM_MAX_TOKENS=100000
+
+# --- Embedding Model Configuration ---
+# Model: HuggingFace name or local path
+# Examples:
+#   - BAAI/bge-base-en-v1.5 (default, 768d)
+#   - sentence-transformers/all-MiniLM-L6-v2 (384d)
+#   - /path/to/local/model (local directory)
+EMBEDDING_PROVIDER=remote
+EMBEDDING_API_URL=http://localhost:1234/v1
+EMBEDDING_MODEL=text-embedding-embeddinggemma-300m
+# EMBEDDING_DIMENSION auto-detected via probe request; set manually to override
+EMBEDDING_MAX_TOKENS=2000
+EMBEDDING_BATCH_SIZE=32
+EMBEDDING_MAX_CONCURRENT=4
+EMBEDDING_QUERY_PREFIX="Represent this sentence for searching relevant passages: "
+
+# --- Alternative local configurations (uncomment one block) ---
+# EMBEDDING_PROVIDER=local
+# EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+# EMBEDDING_DIMENSION=768
+# EMBEDDING_MAX_TOKENS=512
+# EMBEDDING_BATCH_SIZE=32
+# EMBEDDING_QUERY_PREFIX="Represent this sentence for searching relevant passages: "
+
+#EMBEDDING_PROVIDER=local
+#EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+#EMBEDDING_DIMENSION=384
+#EMBEDDING_MAX_TOKENS=256
+#EMBEDDING_BATCH_SIZE=64
+#EMBEDDING_QUERY_PREFIX=""
+
+# --- Enterprise Git Integration ---
+# GitSaaS GitHub App credentials
+# APP_INSTALLATION_ID=1057118
+# GITSAAS_PRIVATE_KEY=MIIEOWIBAAKCAQEAnqb+v4WXVXDo
+
+# On-prem GitHub Enterprise tokens (uncomment and set real values)
+# ONPREM_WFS_GIT_TOKEN=ghp_abcd
+# ONPREM_GIT_TOKEN=ghp_xyz
+
+# Enterprise SSL (set to true to skip cert verification for on-prem GitHub)
+# GITHUB_ENTERPRISE_DISABLE_SSL=true
+
+# --- Data Storage Paths ---
+# Paths where CodeMind stores its persistent data on disk.
+# Override these to use a custom location (e.g. a shared volume in Docker/k8s).
+# CODEMIND_DB_PATH=data/codemind.db        # SQLite database (jobs + manifest)
+# CODEMIND_LANCEDB_PATH=data/lancedb       # LanceDB vector store
+# CODEMIND_REPOS_PATH=data/repos           # Cloned Git repository cache
+# CODEMIND_PLAYBOOKS_PATH=playbooks        # Playbook Markdown files directory
+
+CODEMIND_KUZU_PATH=data/kuzu_worker
