@@ -1,3 +1,12 @@
+---
+name: search_catalogs
+version: "1.0"
+description: Searches the software catalog to find components for a given requirement
+category: evaluation
+complexity: medium
+max_iterations: 5
+---
+
 # Playbook: search_catalogs
 name: search_catalogs
 description: Searches the software catalog to find components that satisfy a specific build requirement or software need.
@@ -93,6 +102,26 @@ Ensure ALL fields are present, including `overall_confidence_score`, even if the
 ```
 
 Do not output any text before or after the JSON block.
+
+## Anti-Patterns
+- Do NOT hallucinate catalog entries — every field in catalog_entry MUST come from the RETRIEVED CODE
+- Do NOT output conversational text, markdown tables, or bullet points — JSON only
+- Do NOT use non-standard keys like "project" or "development_plan"
+- Do NOT flatten catalog entries — metadata must be inside the "catalog_entry" object
+- Do NOT set confidence_score above 0 when relevance score is below 0.01
+- Do NOT generate a design document when no matches are found — return empty catalog_matches
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| No hallucination | 35% | Every catalog_entry field matches the RETRIEVED CODE exactly |
+| Schema compliance | 25% | All required wrapper fields present (capability, match_type, confidence_score, reasoning, catalog_entry) |
+| Scoring accuracy | 20% | Confidence scores correlate with actual relevance |
+| Fallback correctness | 20% | Returns empty catalog_matches when no relevant entries found |
+
+## Evaluation
+- requirement_summary must not be empty
+- overall_confidence_score must not be empty
 
 ## Output Schema
 ```yaml

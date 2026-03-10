@@ -9,6 +9,8 @@ import ProposalCreate from "./pages/admin/ProposalCreate";
 import Dashboard from "./pages/admin/Dashboard";
 import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
+import PlaybookStore from "./pages/user/PlaybookStore";
+import PlaybookComposer from "./pages/admin/PlaybookComposer";
 
 function App() {
   return (
@@ -18,6 +20,7 @@ function App() {
         <Route path="/" element={<Navigate to="/catalog-search" replace />} />
         <Route path="/catalog-search" element={<UserLayout><AgentCatalogSearch /></UserLayout>} />
         <Route path="/reasoning-lab" element={<UserLayout><ChatInterface /></UserLayout>} />
+        <Route path="/playbook-store" element={<UserLayout><PlaybookStore /></UserLayout>} />
 
         {/* Admin Routes */}
         <Route path="/admin" element={<AdminLayout><Dashboard /></AdminLayout>} />
@@ -28,6 +31,8 @@ function App() {
         <Route path="/admin/catalogs" element={<AdminLayout><CatalogList /></AdminLayout>} />
         <Route path="/admin/catalog/create" element={<AdminLayout><CatalogCreate /></AdminLayout>} />
         <Route path="/admin/catalogs/propose" element={<AdminLayout><ProposalCreate /></AdminLayout>} />
+        <Route path="/admin/playbook-composer" element={<AdminLayout><PlaybookComposer /></AdminLayout>} />
+        <Route path="/admin/playbook-composer/:id" element={<AdminLayout><PlaybookComposer /></AdminLayout>} />
 
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />
@@ -37,3 +42,4 @@ function App() {
 }
 
 export default App;
+

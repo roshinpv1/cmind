@@ -127,6 +127,12 @@ async def lifespan(app: FastAPI):
     app.include_router(autonomous_router)
     print("[SERVER] ✅ Autonomous agent system initialized (LangChain)")
 
+    # Initialize PlaybookStore API (CRUD + marketplace)
+    from .playbook_api import init_playbook_api, router as playbook_api_router
+    init_playbook_api(app.state.job_manager.db)
+    app.include_router(playbook_api_router)
+    print("[SERVER] ✅ PlaybookStore API initialized")
+
     # Log all registered routes at startup
     routes_msg = "\n===== REGISTERED ROUTES =====\n"
     for route in app.routes:

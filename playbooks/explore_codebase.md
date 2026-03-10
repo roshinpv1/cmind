@@ -1,3 +1,12 @@
+---
+name: explore_codebase
+version: "1.0"
+description: Multi-hop code exploration agent that iteratively searches, reads, and traces code
+category: exploration
+complexity: high
+max_iterations: 5
+---
+
 # Playbook: explore_codebase
 name: explore_codebase
 description: Multi-hop code exploration agent that iteratively searches, reads, and traces code to answer deep analysis questions.
@@ -42,6 +51,51 @@ When you have gathered enough information, respond with a clear, structured answ
 6. **Insights**: Non-obvious findings or potential issues
 
 Do NOT call any more tools once you are ready to answer. Just respond with text.
+
+## Examples
+
+### Example: "How does the payment processing work?"
+
+**Input goal**: "Trace the payment processing flow from API to database"
+
+**Expected output**:
+```json
+{
+  "summary": "Payment processing flows from PaymentController through PaymentService to StripeGateway, with transactions recorded in PostgreSQL via PaymentRepository.",
+  "analysis": "The payment flow starts at POST /api/payments (src/api/payments.py:34) which calls PaymentService.process_payment() (src/services/payment.py:67). This method validates the amount, creates a charge via StripeGateway.create_charge() (src/gateways/stripe.py:23), and records the transaction via PaymentRepository.save() (src/db/payment_repo.py:45). Error handling wraps the entire flow with rollback on Stripe failures.",
+  "key_files": [
+    "src/api/payments.py — API endpoint and request validation",
+    "src/services/payment.py — Business logic orchestration",
+    "src/gateways/stripe.py — Stripe API integration",
+    "src/db/payment_repo.py — Transaction persistence"
+  ],
+  "code_flow": "PaymentController.create() → PaymentService.process_payment() → StripeGateway.create_charge() → PaymentRepository.save()",
+  "insights": [
+    "No idempotency key is used for Stripe charges — duplicate payments are possible on retry",
+    "Payment amounts are stored as floats instead of integers (cents) — potential rounding issues"
+  ]
+}
+```
+
+## Anti-Patterns
+- Do NOT stop after a single search — always follow at least 2 levels deep
+- Do NOT reference files you haven't actually read with `read_file`
+- Do NOT provide generic summaries — every statement must cite a specific file and function
+- Do NOT leave insights empty — always find at least one non-obvious observation
+- Do NOT exceed 5 iterations — plan your searches efficiently
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Depth | 30% | At least 3 files read and analyzed |
+| Evidence | 30% | Every claim cites a specific file path |
+| Connectivity | 20% | Code flow traces at least one complete path |
+| Insights | 20% | At least 1 non-obvious finding |
+
+## Evaluation
+- key_files must contain >= 3 key_files
+- summary must not be empty
+- insights must not be empty
 
 ## Output Schema
 ```yaml

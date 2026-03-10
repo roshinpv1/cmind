@@ -40,99 +40,48 @@ interface PlaybookDef {
     templates: { label: string; prompt: string }[];
 }
 
-const PLAYBOOKS: PlaybookDef[] = [
-    {
-        id: "auto", label: "Auto-Pilot", icon: <Brain className="w-4 h-4" />,
-        color: "text-violet-600", bgColor: "bg-violet-50",
-        description: "Let the agent autonomously decide the best strategy",
-        requiresRepo: true,
-        templates: [
-            { label: "Analyze this codebase", prompt: "Analyze the overall architecture and key patterns of this codebase" },
-            { label: "Find similar components", prompt: "Search for similar components in the catalog that match this codebase's capabilities" },
-        ]
-    },
-    {
-        id: "code_analyzer", label: "Deep Code Analysis", icon: <Code2 className="w-4 h-4" />,
-        color: "text-blue-600", bgColor: "bg-blue-50",
-        description: "Deep-dive into code structure, patterns, and dependencies",
-        requiresRepo: true,
-        templates: [
-            { label: "Architecture overview", prompt: "What is the high-level architecture of this codebase?" },
-            { label: "API endpoints", prompt: "List all API endpoints with their request/response schemas" },
-            { label: "Key design patterns", prompt: "What design patterns are used in this codebase?" },
-        ]
-    },
-    {
-        id: "explore_codebase", label: "Explore Codebase", icon: <Compass className="w-4 h-4" />,
-        color: "text-teal-600", bgColor: "bg-teal-50",
-        description: "Navigate and explore files, symbols, and dependencies",
-        requiresRepo: true,
-        templates: [
-            { label: "Project structure", prompt: "Show me the project structure and main entry points" },
-            { label: "Find authentication logic", prompt: "Where is the authentication and authorization logic?" },
-            { label: "Database schema", prompt: "What is the database schema and data model?" },
-        ]
-    },
-    {
-        id: "search_catalogs", label: "Catalog Search", icon: <Search className="w-4 h-4" />,
-        color: "text-amber-600", bgColor: "bg-amber-50",
-        description: "Find existing components in the enterprise catalog",
-        requiresRepo: false,
-        templates: [
-            { label: "Agent framework", prompt: "Find components for building an AI agent framework" },
-            { label: "REST API gateway", prompt: "Find a REST API gateway or proxy service" },
-            { label: "Vector search", prompt: "Find components with vector search or embedding capabilities" },
-        ]
-    },
-    {
-        id: "design_solution", label: "Solution Architect", icon: <Layers className="w-4 h-4" />,
-        color: "text-indigo-600", bgColor: "bg-indigo-50",
-        description: "Design a multi-component architecture from existing catalog",
-        requiresRepo: false,
-        templates: [
-            { label: "E-commerce platform", prompt: "Design an e-commerce platform with catalog, cart, payments" },
-            { label: "ML pipeline", prompt: "Design an ML pipeline with data ingestion, training, and serving" },
-            { label: "Chat application", prompt: "Design a real-time chat application with message history" },
-        ]
-    },
-    {
-        id: "evaluate_build_vs_reuse", label: "Build vs Reuse", icon: <Scale className="w-4 h-4" />,
-        color: "text-emerald-600", bgColor: "bg-emerald-50",
-        description: "Compare building from scratch vs reusing existing components",
-        requiresRepo: false,
-        templates: [
-            { label: "Auth service", prompt: "Should I build or reuse an authentication service?" },
-            { label: "Notification system", prompt: "Evaluate build vs reuse for a notification/alerting system" },
-        ]
-    },
-    {
-        id: "generate_catalog", label: "Generate Catalog", icon: <Package className="w-4 h-4" />,
-        color: "text-orange-600", bgColor: "bg-orange-50",
-        description: "Analyze a repository and generate a catalog entry",
-        requiresRepo: true,
-        templates: [
-            { label: "Full catalog entry", prompt: "Generate a comprehensive catalog entry for this repository" },
-        ]
-    },
-    {
-        id: "analyze_svp", label: "SVP Analyzer", icon: <BarChart3 className="w-4 h-4" />,
-        color: "text-rose-600", bgColor: "bg-rose-50",
-        description: "Analyze software product viability and quality",
-        requiresRepo: true,
-        templates: [
-            { label: "Full SVP analysis", prompt: "Run a complete SVP (Software Viability & Performance) analysis" },
-        ]
-    },
-    {
-        id: "analyze_tech_debt", label: "Tech Debt Analysis", icon: <Wrench className="w-4 h-4" />,
-        color: "text-gray-600", bgColor: "bg-gray-100",
-        description: "Identify and quantify technical debt in the codebase",
-        requiresRepo: true,
-        templates: [
-            { label: "Full tech debt report", prompt: "Analyze technical debt — code duplication, outdated dependencies, complexity hotspots" },
-        ]
-    },
-];
+const ICON_MAP: Record<string, any> = {
+    Brain, Code2, Compass, BarChart3, Wrench, Scale, Layers, Package, Search, Sparkles
+};
+
+const COLOR_STYLES: Record<string, { color: string; bgColor: string }> = {
+    blue: { color: "text-blue-600", bgColor: "bg-blue-50" },
+    teal: { color: "text-teal-600", bgColor: "bg-teal-50" },
+    amber: { color: "text-amber-600", bgColor: "bg-amber-50" },
+    rose: { color: "text-rose-600", bgColor: "bg-rose-50" },
+    emerald: { color: "text-emerald-600", bgColor: "bg-emerald-50" },
+    indigo: { color: "text-indigo-600", bgColor: "bg-indigo-50" },
+    orange: { color: "text-orange-600", bgColor: "bg-orange-50" },
+    gray: { color: "text-gray-600", bgColor: "bg-gray-100" },
+    violet: { color: "text-violet-600", bgColor: "bg-violet-50" },
+};
+
+function apiToPlaybookDef(item: any): PlaybookDef {
+    const IconComp = ICON_MAP[item.icon] || Brain;
+    const styles = COLOR_STYLES[item.color] || COLOR_STYLES.violet;
+    return {
+        id: item.name,
+        label: item.name.replaceAll("_", " ").replace(/\b\w/g, (c: string) => c.toUpperCase()),
+        icon: <IconComp className="w-4 h-4" />,
+        color: styles.color,
+        bgColor: styles.bgColor,
+        description: item.description || "",
+        requiresRepo: item.requires_repo ?? true,
+        templates: item.templates || [],
+    };
+}
+
+// Fallback auto-pilot entry
+const AUTO_PILOT: PlaybookDef = {
+    id: "auto", label: "Auto-Pilot", icon: <Brain className="w-4 h-4" />,
+    color: "text-violet-600", bgColor: "bg-violet-50",
+    description: "Let the agent autonomously decide the best strategy",
+    requiresRepo: true,
+    templates: [
+        { label: "Analyze this codebase", prompt: "Analyze the overall architecture and key patterns of this codebase" },
+        { label: "Find similar components", prompt: "Search for similar components in the catalog that match this codebase's capabilities" },
+    ]
+};
 
 /* ─── Structured Result Renderers ──────────────────────────────── */
 
@@ -357,9 +306,21 @@ export default function ChatInterface() {
     const [currentJobId, setCurrentJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<AgentJob | null>(null);
     const [isPolling, setIsPolling] = useState(false);
+    const [playbooks, setPlaybooks] = useState<PlaybookDef[]>([AUTO_PILOT]);
     const logsEndRef = useRef<HTMLDivElement>(null);
 
-    const activePlaybook = PLAYBOOKS.find(p => p.id === selectedPlaybook) || PLAYBOOKS[0];
+    const activePlaybook = playbooks.find(p => p.id === selectedPlaybook) || playbooks[0];
+
+    // Load playbooks from API
+    useEffect(() => {
+        fetch("/api/v1/playbooks")
+            .then(r => r.json())
+            .then((data: any[]) => {
+                const mapped = [AUTO_PILOT, ...data.map(apiToPlaybookDef)];
+                setPlaybooks(mapped);
+            })
+            .catch(err => console.error("Failed to load playbooks", err));
+    }, []);
 
     // Load repositories
     useEffect(() => {
@@ -455,7 +416,7 @@ export default function ChatInterface() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                 {/* Strategy Tabs */}
                 <div className="flex items-center gap-1 px-4 py-2.5 overflow-x-auto border-b border-gray-50 bg-gray-50/50">
-                    {PLAYBOOKS.map(pb => (
+                    {playbooks.map((pb: PlaybookDef) => (
                         <button
                             key={pb.id}
                             onClick={() => setSelectedPlaybook(pb.id)}
@@ -511,7 +472,7 @@ export default function ChatInterface() {
                         <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-3">
                             <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2">Quick Start Templates</p>
                             <div className="space-y-1.5">
-                                {activePlaybook.templates.map((t, i) => (
+                                {activePlaybook.templates.map((t: { label: string; prompt: string }, i: number) => (
                                     <button
                                         key={i}
                                         onClick={() => handleTemplateClick(t)}

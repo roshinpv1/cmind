@@ -1,3 +1,12 @@
+---
+name: analyze_codebase
+version: "1.0"
+description: Deep multi-dimensional codebase analysis that answers any user query with evidence-backed findings
+category: analysis
+complexity: high
+max_iterations: 8
+---
+
 # Playbook: analyze_codebase
 name: analyze_codebase
 description: Performs deep, multi-dimensional analysis of a codebase to answer any user question with evidence-backed structured findings.
@@ -59,6 +68,60 @@ Produce a detailed structured analysis with:
 7. **Recommendations**: Actionable suggestions based on the analysis (if applicable)
 
 Do NOT call any more tools once you are ready to answer. Respond with your complete structured analysis.
+
+## Examples
+
+### Example: "How does the authentication flow work?"
+
+**Input goal**: "Explain the authentication flow end-to-end"
+
+**Expected output**:
+```json
+{
+  "executive_summary": "Authentication uses JWT tokens issued by AuthService in src/auth/service.py. Login requests are validated against bcrypt-hashed passwords in PostgreSQL, and tokens are verified by middleware on every protected route.",
+  "detailed_analysis": "The authentication system spans 4 key files...\n\n**Login Flow**: POST /api/auth/login hits AuthController.login() (src/api/auth.py:45) which calls AuthService.authenticate() (src/auth/service.py:78). This method queries UserRepository.find_by_email() (src/db/user_repo.py:23) and verifies the password using bcrypt.checkpw()...\n\n**Token Verification**: The JWTMiddleware (src/middleware/auth.py:12) intercepts all requests to /api/* routes, decodes the Bearer token using PyJWT, and injects the user context into request.state.user...",
+  "architecture_map": "AuthController → AuthService → UserRepository → PostgreSQL\n                  ↘ JWTMiddleware (request pipeline)",
+  "key_components": [
+    {"name": "AuthService", "file_path": "src/auth/service.py", "role": "Core auth logic — login, token generation, password verification", "relevance": "Central orchestrator of all auth operations"},
+    {"name": "JWTMiddleware", "file_path": "src/middleware/auth.py", "role": "Token verification on protected routes", "relevance": "Enforces auth on every API call"},
+    {"name": "UserRepository", "file_path": "src/db/user_repo.py", "role": "Database queries for user records", "relevance": "Data layer for credential lookup"}
+  ],
+  "data_flow": "Client → POST /login → AuthController → AuthService.authenticate() → UserRepository.find_by_email() → bcrypt verify → JWT sign → return token\nClient → GET /api/* → JWTMiddleware.verify() → decode token → inject user → route handler",
+  "findings": [
+    "Refresh tokens are not implemented — tokens expire after 24h with no renewal mechanism",
+    "Password reset flow exists but has no rate limiting (src/auth/service.py:142)",
+    "The JWT secret is loaded from env var JWT_SECRET with no rotation mechanism"
+  ],
+  "recommendations": [
+    "Add refresh token support to avoid forcing re-login every 24 hours",
+    "Add rate limiting to the password reset endpoint to prevent abuse",
+    "Consider implementing JWT key rotation using JWKS"
+  ]
+}
+```
+
+## Anti-Patterns
+- Do NOT list files without reading them first — always read the actual code before making claims
+- Do NOT claim a pattern exists without citing a specific file path and line number
+- Do NOT provide a vague executive_summary — it must directly answer the question in 2-3 concrete sentences
+- Do NOT leave key_components empty — always identify at least 3 relevant components
+- Do NOT skip the data_flow field — trace at least one complete path through the code
+- Do NOT make recommendations without evidence from the codebase
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Evidence citing | 30% | Every claim references a specific file path |
+| Completeness | 25% | All 7 schema fields are populated with substantive content |
+| Accuracy | 25% | No hallucinated file paths or function names |
+| Actionability | 20% | Findings contain specific, actionable observations |
+
+## Evaluation
+- key_components must contain >= 3 key_components
+- executive_summary must not be empty
+- detailed_analysis must not be empty
+- findings must not be empty
+- executive_summary must be <= 500 characters
 
 ## Output Schema
 ```yaml

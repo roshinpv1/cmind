@@ -62,6 +62,59 @@ def _repair_json(raw: str) -> dict | None:
     return None
 
 
+def _run_evaluation_rules(data: dict, rules: list[str]) -> list[str]:
+    """
+    Run evaluation rules against parsed LLM output.
+    
+    Supports rule patterns:
+    - "output must contain >= N <field>" — checks array length
+    - "<field> must not be empty" — checks for empty string/list
+    - "<field> must be <= N characters" — checks string length
+    - "all <field> values must ..." — informational, logged but not auto-checked
+    
+    Returns list of warning messages for failed rules.
+    """
+    warnings = []
+    for rule in rules:
+        rule_lower = rule.lower().strip()
+        try:
+            # Pattern: "output must contain >= N field_name" or "must contain >= N field_name"
+            import re as _re2
+            m = _re2.search(r'must contain\s*>=?\s*(\d+)\s+(\w+)', rule_lower)
+            if m:
+                min_count = int(m.group(1))
+                field = m.group(2)
+                val = data.get(field, [])
+                if isinstance(val, list) and len(val) < min_count:
+                    warnings.append(f"'{field}' has {len(val)} items, expected >= {min_count}")
+                continue
+            
+            # Pattern: "field_name must not be empty"
+            m = _re2.search(r'(\w+)\s+must not be empty', rule_lower)
+            if m:
+                field = m.group(1)
+                val = data.get(field)
+                if val is None or val == "" or val == [] or val == {}:
+                    warnings.append(f"'{field}' is empty")
+                continue
+            
+            # Pattern: "field_name must be <= N characters"
+            m = _re2.search(r'(\w+)\s+must be\s*<=?\s*(\d+)\s+characters', rule_lower)
+            if m:
+                field = m.group(1)
+                max_chars = int(m.group(2))
+                val = data.get(field, "")
+                if isinstance(val, str) and len(val) > max_chars:
+                    warnings.append(f"'{field}' is {len(val)} chars, expected <= {max_chars}")
+                continue
+                
+        except Exception:
+            pass  # Skip unparseable rules
+    
+    return warnings
+
+
+
 class PlaybookExecutionState(TypedDict):
     """State for playbook execution workflow."""
     playbook_name: str
@@ -427,6 +480,27 @@ class PlaybookExecutor:
                     f"LLM will generate based on available context only"
                 )
             sys_prompt = playbook.system_prompt
+            
+            # --- best-practice prompt injection ---
+            if playbook.anti_patterns:
+                sys_prompt += "\n\n### ANTI-PATTERNS (DO NOT DO THESE)\n"
+                for ap in playbook.anti_patterns:
+                    sys_prompt += f"- ❌ {ap}\n"
+            
+            if playbook.quality_rubric:
+                sys_prompt += "\n### QUALITY CRITERIA\n"
+                sys_prompt += "Your output will be evaluated on:\n"
+                for r in playbook.quality_rubric:
+                    sys_prompt += f"- **{r.get('criterion', '')}** ({r.get('weight', '')}): {r.get('pass_condition', '')}\n"
+            
+            if playbook.examples:
+                sys_prompt += "\n### FEW-SHOT EXAMPLE\n"
+                ex = playbook.examples[0]  # Use first example
+                sys_prompt += f"**Example query**: \"{ex.get('input', '')}\""
+                sys_prompt += f"\n**Example output**:\n```json\n{ex.get('output', '{}')}\n```\n"
+                sys_prompt += "(Your output should match this format and depth, but use REAL data from the codebase.)\n"
+            # --- end best-practice injection ---
+            
             user_goal = state["user_input"].get("goal", state["user_input"].get("query", ""))
             
             # Estimate total tokens
@@ -675,6 +749,17 @@ class PlaybookExecutor:
                                 raise je  # Re-raise if repair also failed
                             state["logs"].append(f"JSON repaired successfully")
                         print(f"[EXECUTOR] Parsed JSON keys: {list(data.keys())}", flush=True)
+                        
+                        # --- evaluation rules check ---
+                        if playbook.evaluation_rules:
+                            eval_warnings = _run_evaluation_rules(data, playbook.evaluation_rules)
+                            if eval_warnings:
+                                for w in eval_warnings:
+                                    state["logs"].append(f"  ⚠️ Eval: {w}")
+                                print(f"[EXECUTOR] Evaluation warnings: {eval_warnings}")
+                            else:
+                                state["logs"].append(f"  ✅ All {len(playbook.evaluation_rules)} evaluation rules passed")
+                        # --- end evaluation ---
                         
                         # Data-driven: if playbook uses grounding fence, validate against retrieved context
                         if playbook.grounding_fence and "catalog_matches" in data:
@@ -1021,6 +1106,26 @@ class PlaybookExecutor:
         
         # System prompt from the playbook definition
         system_prompt = playbook.system_prompt
+        
+        # --- best-practice prompt injection (shared with linear executor) ---
+        if playbook.anti_patterns:
+            system_prompt += "\n\n### ANTI-PATTERNS (DO NOT DO THESE)\n"
+            for ap in playbook.anti_patterns:
+                system_prompt += f"- ❌ {ap}\n"
+        
+        if playbook.quality_rubric:
+            system_prompt += "\n### QUALITY CRITERIA\n"
+            system_prompt += "Your output will be evaluated on:\n"
+            for r in playbook.quality_rubric:
+                system_prompt += f"- **{r.get('criterion', '')}** ({r.get('weight', '')}): {r.get('pass_condition', '')}\n"
+        
+        if playbook.examples:
+            system_prompt += "\n### FEW-SHOT EXAMPLE\n"
+            ex = playbook.examples[0]
+            system_prompt += f"**Example query**: \"{ex.get('input', '')}\""
+            system_prompt += f"\n**Example output**:\n```json\n{ex.get('output', '{}')}\n```\n"
+            system_prompt += "(Your output should match this format and depth, but use REAL data from the codebase.)\n"
+        # --- end best-practice injection ---
         
         # ── Agent Node ──
         async def agent_node(state: ReactExecutionState) -> dict:

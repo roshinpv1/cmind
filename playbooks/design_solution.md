@@ -1,3 +1,12 @@
+---
+name: design_solution
+version: "1.0"
+description: Synthesizes multi-component architecture using catalog components
+category: generation
+complexity: high
+max_iterations: 5
+---
+
 # Playbook: design_solution
 name: design_solution
 description: Synthesizes a multi-component architecture by analyzing user intent and searching the catalog for existing building blocks.
@@ -36,6 +45,26 @@ List any missing systems in the `gaps` array, and write a cohesive summary in `a
 - Do NOT hallucinate components. Only propose components that you actually found in the `RETRIEVED CODE` section.
 - If (and only if) no remotely relevant components are found in the catalog, your proposal must explicitly state that the entire solution requires custom development, listing the systems in the `gaps` array.
 - **Organization attribution:** When a catalog entry includes an `Organization` field, preserve it in the `catalog_entry` output so the user knows which team/org owns each proposed component.
+
+## Anti-Patterns
+- Do NOT hallucinate catalog components — only use components from RETRIEVED CODE
+- Do NOT reject partial matches — include them with lower confidence and adaptation notes
+- Do NOT omit the organization (org) field when it's present in catalog entries
+- Do NOT leave the gaps array empty if any required capability has no catalog match
+- Do NOT set overall_confidence_score above 90 unless all capabilities have full matches
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Catalog honesty | 30% | All matched components exist in RETRIEVED CODE |
+| Decomposition | 25% | User requirement decomposed into >= 3 functional blocks |
+| Gap identification | 25% | Unfulfilled capabilities explicitly listed in gaps |
+| Architecture coherence | 20% | architecture_composition explains how components integrate |
+
+## Evaluation
+- catalog_matches must contain >= 1 catalog_matches
+- requirement_summary must not be empty
+- architecture_composition must not be empty
 
 ## Search Strategy
 ```yaml

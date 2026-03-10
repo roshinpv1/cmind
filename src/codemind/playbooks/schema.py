@@ -42,6 +42,12 @@ class PlaybookDefinition(BaseModel):
     description: str = Field(..., description="What this playbook does")
     when_to_use: str = Field(..., description="When to select this playbook (intent-based)")
     
+    # Versioning & metadata
+    version: str = Field(default="1.0", description="Playbook version (major.minor)")
+    category: str = Field(default="analysis", description="Category: analysis, generation, evaluation, exploration")
+    complexity_level: str = Field(default="medium", description="Complexity: low, medium, high")
+    max_iterations: int = Field(default=5, description="Max iterations for ReAct-mode playbooks")
+    
     # Prompt-based architecture
     system_prompt: str = Field(..., description="System prompt that defines LLM behavior")
     search_strategy: SearchStrategy = Field(..., description="How to search for code")
@@ -78,12 +84,44 @@ class PlaybookDefinition(BaseModel):
         description="Whether to skip Pydantic schema validation of LLM output (e.g. for tool_call playbooks)"
     )
     
+    # Best practice fields
+    examples: list[dict] = Field(
+        default_factory=list,
+        description="Few-shot examples. Each dict has 'input' (goal text) and 'output' (expected JSON string)"
+    )
+    anti_patterns: list[str] = Field(
+        default_factory=list,
+        description="Things the LLM should NOT do"
+    )
+    quality_rubric: list[dict] = Field(
+        default_factory=list,
+        description="Quality criteria. Each dict has 'criterion', 'weight', 'pass_condition'"
+    )
+    evaluation_rules: list[str] = Field(
+        default_factory=list,
+        description="Post-output validation rules (e.g. 'output must contain >= 3 key_components')"
+    )
+    dependencies: dict = Field(
+        default_factory=dict,
+        description="Playbook dependency declarations: 'requires' and 'feeds_into' lists"
+    )
+    
     # Metadata
     deterministic: bool = Field(default=False, description="Whether output is deterministic")
     default_prompt: Optional[str] = Field(None, description="Default prompt if user provides none")
     
+    @property
+    def behavioral_flags(self) -> dict:
+        """Return behavioral flags as a dict for easy access."""
+        return {
+            "exclude_test_files": self.exclude_test_files,
+            "grounding_fence": self.grounding_fence,
+            "inject_repo_metadata": self.inject_repo_metadata,
+            "skip_schema_validation": self.skip_schema_validation,
+        }
+    
     def __str__(self):
-        return f"Playbook({self.name})"
+        return f"Playbook({self.name} v{self.version})"
 
     def to_prompt_description(self) -> str:
         """Format playbook description for LLM system prompt."""
@@ -92,3 +130,4 @@ class PlaybookDefinition(BaseModel):
             f"Description: {self.description}\n"
             f"When to use: {self.when_to_use}"
         )
+

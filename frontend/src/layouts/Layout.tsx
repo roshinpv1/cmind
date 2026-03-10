@@ -7,7 +7,8 @@ import {
     LayoutDashboard,
     BookOpen,
     Menu,
-    X
+    X,
+    Puzzle
 } from "lucide-react";
 import { useState } from "react";
 
@@ -20,6 +21,7 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         { name: "Index Repo", href: "/admin/index", icon: Database },
         { name: "Repositories", href: "/admin/repos", icon: Library },
         { name: "Catalogs", href: "/admin/catalogs", icon: BookOpen },
+        { name: "Playbook Composer", href: "/admin/playbook-composer", icon: Puzzle },
     ];
 
     return (
@@ -94,6 +96,9 @@ export function UserLayout({ children }: { children: React.ReactNode }) {
                             </Link>
                             <Link to="/reasoning-lab" className="text-sm font-medium text-gray-600 hover:text-primary">
                                 Reasoning Lab
+                            </Link>
+                            <Link to="/playbook-store" className="text-sm font-medium text-gray-600 hover:text-primary">
+                                PlaybookStore
                             </Link>
                         </nav>
                     </div>

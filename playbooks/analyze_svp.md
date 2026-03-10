@@ -1,3 +1,12 @@
+---
+name: analyze_svp
+version: "1.0"
+description: Comprehensive software product analysis for product and tech leadership
+category: analysis
+complexity: high
+max_iterations: 5
+---
+
 # Playbook: analyze_svp
 name: analyze_svp
 description: Performs comprehensive software product analysis — extracts business functionalities, modules, integrations, impact areas, and modernization scope for product and tech teams.
@@ -84,6 +93,28 @@ Summary table of quantitative indicators.
 - **Be actionable**: Your impact assessments should help teams plan sprints.
 - **No hallucination**: Only report what you can see evidence of in the `RETRIEVED CODE`.
 - **Use tables**: Present comparative and matrix data in markdown tables for readability.
+
+## Anti-Patterns
+- Do NOT list modules without identifying which business functionality they implement
+- Do NOT report integration points without specifying the type (API, message queue, database, etc.)
+- Do NOT assign change impact ratings without justifying them with module/integration counts
+- Do NOT hallucinate API endpoints — only report what is visible in the RETRIEVED CODE
+- Do NOT skip the report_markdown field — it must contain the full structured report
+- Do NOT leave business_functionalities empty — identify at least 3 capabilities
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Business coverage | 30% | At least 3 business functionalities identified |
+| Module mapping | 25% | Every business functionality maps to implementing modules |
+| Impact assessment | 25% | Change impact matrix has entries for every business function |
+| Specificity | 20% | File paths and component names cited throughout |
+
+## Evaluation
+- business_functionalities must contain >= 3 business_functionalities
+- modules must contain >= 2 modules
+- executive_summary must not be empty
+- report_markdown must not be empty
 
 ## Output Schema
 ```yaml

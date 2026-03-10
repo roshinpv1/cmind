@@ -1,3 +1,12 @@
+---
+name: evaluate_build_vs_reuse
+version: "1.0"
+description: Evaluates build-from-scratch vs reuse-existing-components with cost/effort comparison
+category: evaluation
+complexity: medium
+max_iterations: 5
+---
+
 # Playbook: evaluate_build_vs_reuse
 name: evaluate_build_vs_reuse
 description: Analyzes a user requirement and compares the cost/effort of building from scratch vs reusing existing catalog components.
@@ -52,6 +61,26 @@ You are the **Build vs Reuse Advisor** — a senior engineering economics analys
 - Always provide BOTH options (Build AND Reuse) even if one is clearly better.
 - All cost figures must be in USD.
 - Include the `catalog_entry` data for each matched component so the frontend can display it.
+
+## Anti-Patterns
+- Do NOT hallucinate catalog components — only propose components found in RETRIEVED CODE
+- Do NOT give cost estimates without showing the math (dev-months × rate)
+- Do NOT omit the REUSE option even if BUILD seems clearly better (always present both)
+- Do NOT set confidence_score above 80 if more than 30% of functional blocks are gaps
+- Do NOT ignore partial matches — include them with lower confidence scores
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Completeness | 30% | Both build_estimate and reuse_estimate fully populated |
+| Cost accuracy | 25% | Cost figures use the provided rate guidelines |
+| Catalog honesty | 25% | All matched components exist in RETRIEVED CODE |
+| Recommendation clarity | 20% | Clear BUILD/REUSE/HYBRID recommendation with reasoning |
+
+## Evaluation
+- functional_blocks must contain >= 2 functional_blocks
+- comparison must not be empty
+- requirement_summary must not be empty
 
 ## Search Strategy
 ```yaml

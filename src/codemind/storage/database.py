@@ -92,6 +92,46 @@ class CatalogStore(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=0) # timestamp
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
 
+
+class PlaybookStoreModel(Base):
+    """
+    Persisted playbooks — user-created, imported, or installed from the store.
+    Built-in playbooks live in playbooks/*.md but can be overridden here.
+    """
+    __tablename__ = "playbook_store"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)  # uuid
+    name: Mapped[str] = mapped_column(String, unique=True, index=True)
+    version: Mapped[str] = mapped_column(String, default="1.0")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    when_to_use: Mapped[str | None] = mapped_column(Text, nullable=True)
+    category: Mapped[str] = mapped_column(String, default="analysis")  # analysis|generation|evaluation|exploration
+    complexity: Mapped[str] = mapped_column(String, default="medium")
+    author: Mapped[str] = mapped_column(String, default="user")
+    is_builtin: Mapped[int] = mapped_column(Integer, default=0)
+    is_published: Mapped[int] = mapped_column(Integer, default=0)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    icon: Mapped[str] = mapped_column(String, default="Brain")
+    color: Mapped[str] = mapped_column(String, default="violet")
+
+    # Playbook content
+    system_prompt: Mapped[str] = mapped_column(Text, default="You are a helpful coding assistant.")
+    search_strategy: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    output_schema: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON  
+    behavior: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON
+    examples: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    anti_patterns: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    quality_rubric: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    evaluation_rules: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
+    templates: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON [{label, prompt}]
+    requires_repo: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Marketplace metadata
+    downloads: Mapped[int] = mapped_column(Integer, default=0)
+    rating: Mapped[float | None] = mapped_column(nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, default=0)
+
 class Database:
     """Database connection manager."""
 

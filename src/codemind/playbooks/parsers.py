@@ -2,7 +2,8 @@
 Parsers for playbook markdown files.
 
 Parses markdown playbook definitions into PlaybookDefinition objects.
-New format focuses on system_prompt and search_strategy.
+Supports YAML frontmatter, few-shot examples, anti-patterns, quality rubrics,
+evaluation rules, and dependency declarations.
 """
 
 from pathlib import Path
@@ -16,52 +17,11 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
     """
     Parse a markdown playbook file into a PlaybookDefinition.
     
-    Expected format:
-    ```markdown
-    # Playbook: Playbook Name
-    
-    ## Description
-    What this playbook does
-    
-    ## When to Use
-    When to select this playbook
-    
-    ## System Prompt
-    System prompt for LLM
-    
-    ## Output Schema
-    ```yaml
-    type: json_response       # or "tool_call"
-    tool_name: save_catalog_entry  # only if type is tool_call
-    fields:
-      field_name: {type: string, required: true}
-      score: {type: integer, min: 0, max: 100, default: 50}
-    ```
-    
-    ## Behavior
-    ```yaml
-    exclude_test_files: true
-    grounding_fence: false
-    inject_repo_metadata: true
-    ```
-    
-    ## Search Strategy
-    ```yaml
-    queries:
-      - "search query 1"
-      - "search query 2"
-    file_types:
-      - ".py"
-      - ".js"
-    limit: 10
-    mode: semantic
-    min_score: 0.7
-    max_batches: 5
-    ```
-    
-    ## Deterministic
-    true/false
-    ```
+    Supports optional YAML frontmatter (--- delimited) and these sections:
+    - ## Description, ## When to Use, ## System Prompt
+    - ## Output Schema, ## Behavior, ## Search Strategy
+    - ## Examples (few-shot), ## Anti-Patterns, ## Quality Rubric
+    - ## Evaluation, ## Dependencies, ## Deterministic
     
     Args:
         file_path: Path to markdown file
@@ -71,20 +31,32 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
     """
     try:
         content = file_path.read_text()
+        
+        # --- Parse optional YAML frontmatter ---
+        frontmatter = _extract_frontmatter(content)
+        # Strip frontmatter from content for section parsing
+        if frontmatter:
+            content = _strip_frontmatter(content)
+        
         lines = content.split('\n')
         
-        # Extract playbook name from header
-        name = None
-        for line in lines:
-            if line.startswith('# Playbook:'):
-                name = line.replace('# Playbook:', '').strip()
-                break
+        # Extract playbook name from header or frontmatter
+        name = frontmatter.get("name") if frontmatter else None
+        if not name:
+            for line in lines:
+                if line.startswith('# Playbook:'):
+                    name = line.replace('# Playbook:', '').strip()
+                    break
+                # Also check for name: line outside frontmatter (legacy format)
+                if line.startswith('name: '):
+                    name = line.replace('name:', '').strip()
+                    break
         
         if not name:
             print(f"[PARSER] No playbook name found in {file_path}")
             return None
         
-        # Extract sections
+        # --- Extract standard sections ---
         description = _extract_section(content, "## Description")
         when_to_use = _extract_section(content, "## When to Use")
         system_prompt = _extract_section(content, "## System Prompt")
@@ -93,6 +65,13 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         deterministic_str = _extract_section(content, "## Deterministic")
         output_schema_yaml = _extract_code_block(content, "## Output Schema")
         behavior_yaml = _extract_code_block(content, "## Behavior")
+        
+        # --- Extract new best-practice sections ---
+        examples = _extract_examples(content)
+        anti_patterns = _extract_bullet_list(content, "## Anti-Patterns")
+        quality_rubric = _extract_quality_rubric(content)
+        evaluation_rules = _extract_bullet_list(content, "## Evaluation")
+        dependencies_yaml = _extract_code_block(content, "## Dependencies")
         
         # Parse search strategy (YAML)
         search_strategy = SearchStrategy()
@@ -142,10 +121,45 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
             except Exception as e:
                 print(f"[PARSER] Failed to parse behavior YAML for {name}: {e}")
         
+        # Parse dependencies (YAML)
+        dependencies = {}
+        if dependencies_yaml:
+            try:
+                deps_dict = yaml.safe_load(dependencies_yaml)
+                if deps_dict and isinstance(deps_dict, dict):
+                    dependencies = deps_dict
+            except Exception:
+                pass
+        
+        # Frontmatter overrides
+        version = str(frontmatter.get("version", "1.0")) if frontmatter else "1.0"
+        category = frontmatter.get("category", "analysis") if frontmatter else "analysis"
+        complexity_level = frontmatter.get("complexity", "medium") if frontmatter else "medium"
+        max_iterations = frontmatter.get("max_iterations", 5) if frontmatter else 5
+        
+        # Log new sections if present
+        extras = []
+        if examples:
+            extras.append(f"examples={len(examples)}")
+        if anti_patterns:
+            extras.append(f"anti_patterns={len(anti_patterns)}")
+        if quality_rubric:
+            extras.append(f"rubric={len(quality_rubric)}")
+        if evaluation_rules:
+            extras.append(f"eval_rules={len(evaluation_rules)}")
+        if dependencies:
+            extras.append(f"deps={list(dependencies.keys())}")
+        if extras:
+            print(f"[PARSER] ✓ Best practices for {name}: {', '.join(extras)}")
+        
         playbook = PlaybookDefinition(
             name=name,
-            description=description or "No description provided",
+            description=frontmatter.get("description", description or "No description provided") if frontmatter else (description or "No description provided"),
             when_to_use=when_to_use or "Not specified",
+            version=version,
+            category=category,
+            complexity_level=complexity_level,
+            max_iterations=max_iterations,
             system_prompt=system_prompt or "You are a helpful coding assistant.",
             default_prompt=default_prompt,
             search_strategy=search_strategy,
@@ -157,6 +171,11 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
             grounding_fence=grounding_fence,
             inject_repo_metadata=inject_repo_metadata,
             skip_schema_validation=skip_schema_validation,
+            examples=examples,
+            anti_patterns=anti_patterns,
+            quality_rubric=quality_rubric,
+            evaluation_rules=evaluation_rules,
+            dependencies=dependencies,
         )
         
         return playbook
@@ -167,6 +186,51 @@ def parse_playbook_markdown(file_path: Path) -> Optional[PlaybookDefinition]:
         traceback.print_exc()
         return None
 
+
+# ---------------------------------------------------------------------------
+# Frontmatter parsing
+# ---------------------------------------------------------------------------
+
+def _extract_frontmatter(content: str) -> Optional[dict]:
+    """Extract YAML frontmatter from --- delimited block at start of file."""
+    stripped = content.lstrip()
+    if not stripped.startswith('---'):
+        return None
+    
+    # Find closing ---
+    lines = stripped.split('\n')
+    end_idx = None
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == '---':
+            end_idx = i
+            break
+    
+    if end_idx is None:
+        return None
+    
+    yaml_text = '\n'.join(lines[1:end_idx])
+    try:
+        return yaml.safe_load(yaml_text) or {}
+    except Exception:
+        return None
+
+
+def _strip_frontmatter(content: str) -> str:
+    """Remove YAML frontmatter from content."""
+    stripped = content.lstrip()
+    if not stripped.startswith('---'):
+        return content
+    
+    lines = stripped.split('\n')
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == '---':
+            return '\n'.join(lines[i + 1:])
+    return content
+
+
+# ---------------------------------------------------------------------------
+# Section extractors
+# ---------------------------------------------------------------------------
 
 def _extract_section(content: str, header: str) -> Optional[str]:
     """
@@ -236,3 +300,109 @@ def _extract_code_block(content: str, header: str) -> Optional[str]:
     if code_lines:
         return '\n'.join(code_lines).strip()
     return None
+
+
+def _extract_bullet_list(content: str, header: str) -> list[str]:
+    """Extract a bullet-point list from a section as a list of strings."""
+    section = _extract_section(content, header)
+    if not section:
+        return []
+    
+    items = []
+    for line in section.split('\n'):
+        line = line.strip()
+        if line.startswith('- '):
+            items.append(line[2:].strip())
+        elif line.startswith('* '):
+            items.append(line[2:].strip())
+    return items
+
+
+def _extract_examples(content: str) -> list[dict]:
+    """
+    Extract few-shot examples from ## Examples section.
+    
+    Expected format:
+    ## Examples
+    ### Example: "description"
+    **Input goal**: "query text"
+    **Expected output**:
+    ```json
+    { ... }
+    ```
+    """
+    section = _extract_section(content, "## Examples")
+    if not section:
+        return []
+    
+    examples = []
+    lines = section.split('\n')
+    current_input = None
+    in_output_block = False
+    output_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        
+        # Extract input goal
+        if stripped.startswith('**Input goal**:') or stripped.startswith('**Input**:'):
+            current_input = stripped.split(':', 1)[1].strip().strip('"\'')
+        
+        # Detect output code block
+        if stripped.startswith('```') and in_output_block:
+            # End of output block
+            if current_input and output_lines:
+                examples.append({
+                    "input": current_input,
+                    "output": '\n'.join(output_lines).strip()
+                })
+            current_input = None
+            output_lines = []
+            in_output_block = False
+            continue
+        
+        if stripped.startswith('```') and not in_output_block:
+            in_output_block = True
+            continue
+        
+        if in_output_block:
+            output_lines.append(line)
+    
+    return examples
+
+
+def _extract_quality_rubric(content: str) -> list[dict]:
+    """
+    Extract quality rubric from ## Quality Rubric section.
+    
+    Supports both YAML code blocks and markdown tables:
+    | Criterion | Weight | Pass Condition |
+    """
+    # Try YAML first
+    yaml_block = _extract_code_block(content, "## Quality Rubric")
+    if yaml_block:
+        try:
+            parsed = yaml.safe_load(yaml_block)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+    
+    # Try markdown table
+    section = _extract_section(content, "## Quality Rubric")
+    if not section:
+        return []
+    
+    rubric = []
+    for line in section.split('\n'):
+        line = line.strip()
+        # Skip table header and separator
+        if line.startswith('|') and '---' not in line and 'Criterion' not in line:
+            cells = [c.strip() for c in line.split('|')[1:-1]]
+            if len(cells) >= 3:
+                rubric.append({
+                    "criterion": cells[0],
+                    "weight": cells[1],
+                    "pass_condition": cells[2],
+                })
+    return rubric

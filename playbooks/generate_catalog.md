@@ -1,3 +1,12 @@
+---
+name: generate_catalog
+version: "1.0"
+description: Generates a comprehensive catalog entry for a repository
+category: generation
+complexity: medium
+max_iterations: 5
+---
+
 # Playbook: generate_catalog
 name: generate_catalog
 description: Analyzes a repository to generate a comprehensive catalog entry describing its purpose, architecture, tech stack, and quality assessment.
@@ -115,6 +124,27 @@ fields:
   complexity_tier: {type: string, required: true, default: "medium", description: "Complexity: low / medium / high / extreme"}
   business_functionalities: {type: array, required: true, items: string, default: [], description: "Core business capabilities and domain features"}
 ```
+
+## Anti-Patterns
+- Do NOT output a report or markdown — you MUST output a JSON block invoking save_catalog_entry
+- Do NOT hallucinate tech stack items not visible in the code
+- Do NOT assign quality_score above 80 without citing specific evidence (tests, docs, error handling)
+- Do NOT leave business_functionalities empty — identify at least 3 capabilities
+- Do NOT skip metadata fields (first_author, total_commits) when they appear in context
+- Do NOT use generic descriptions — be specific about what the project actually does
+
+## Quality Rubric
+| Criterion | Weight | Pass Condition |
+|---|---|---|
+| Completeness | 30% | All required fields populated with meaningful data |
+| Tech stack accuracy | 25% | Only technologies visible in code are listed |
+| Quality score calibration | 25% | Score matches evidence from pros/cons |
+| Discoverability | 20% | Topics array includes relevant searchable terms |
+
+## Evaluation
+- business_functionalities must contain >= 3 business_functionalities
+- description must not be empty
+- summary_detailed must not be empty
 
 ## Behavior
 ```yaml
