@@ -323,13 +323,23 @@ class ManifestManager:
         if not symbols:
             return 0
 
+        # Deduplicate by symbol_id — large repos can produce duplicates
+        # (e.g., same file path via symlinks, re-exported symbols, etc.)
+        deduped: dict[str, dict] = {}
+        for sym in symbols:
+            deduped[sym["symbol_id"]] = sym
+        unique_symbols = list(deduped.values())
+        
+        if len(unique_symbols) < len(symbols):
+            print(f"[MANIFEST] Deduplicated {len(symbols)} → {len(unique_symbols)} symbols (removed {len(symbols) - len(unique_symbols)} duplicates)")
+
         with self.db.get_session() as session:
             # Delete existing symbols for this repo to avoid UNIQUE conflicts
             deleted = session.query(SymbolRecord).filter_by(repo_id=repo_id).delete()
             if deleted:
                 print(f"[MANIFEST] Deleted {deleted} existing symbols for repo {repo_id}")
 
-            for sym in symbols:
+            for sym in unique_symbols:
                 record = SymbolRecord(
                     symbol_id=sym["symbol_id"],
                     repo_id=repo_id,
@@ -347,7 +357,7 @@ class ManifestManager:
                 session.add(record)
         
             session.commit()
-            return len(symbols)
+            return len(unique_symbols)
 
     def get_symbols(
         self, repo_id: str, file_path: str | None = None, symbol_type: str | None = None

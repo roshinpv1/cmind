@@ -150,6 +150,11 @@ class IndexingWorkflow:
 
             self._report_progress("updating_manifest", 95)
             state = self.update_manifest(state)
+            if state.error and "Manifest update failed" in state.error:
+                # Manifest update is non-fatal — embeddings and graph are already persisted.
+                # Log the error but let the job complete successfully.
+                print(f"[WORKFLOW] ⚠️ Manifest update had errors (non-fatal): {state.error}")
+                state.error = None  # Clear so job isn't marked FAILED
             state.stage = "completed"
             self._report_progress("completed", 100)
 
@@ -533,6 +538,42 @@ class IndexingWorkflow:
             # Non-fatal: don't set state.error so indexing continues
 
         return state
+
+    @classmethod
+    def repair_manifest(cls, repo_path: str, repo_id: str, manifest: ManifestManager, lance_storage: LanceDBStorage, graph_db) -> dict:
+        """Standalone repair: re-run only the manifest update for an existing repo.
+        
+        Use this to fix jobs that completed indexing but failed at manifest update.
+        All expensive work (embeddings, graph) is already persisted — this just
+        re-extracts symbols from source and updates the DB.
+        
+        Returns dict with status and details.
+        """
+        workflow = cls(manifest, lance_storage, graph_db)
+        
+        # Reconstruct minimal state from the repo on disk
+        state = IndexingState(
+            repo_path=repo_path,
+            repo_id=repo_id,
+            job_id="repair",
+        )
+        
+        # Detect files to build changed_files list
+        state = workflow.detect_changes(state)
+        if state.error:
+            return {"status": "error", "error": state.error}
+        
+        # Run only the manifest update
+        state = workflow.update_manifest(state)
+        if state.error:
+            return {"status": "error", "error": state.error}
+        
+        return {
+            "status": "repaired",
+            "repo_id": repo_id,
+            "files": state.files_changed,
+            "symbols": state.symbols_extracted,
+        }
 
     def update_manifest(self, state: IndexingState) -> IndexingState:
         """Node: Update manifest, persist symbols, and save commit snapshot."""

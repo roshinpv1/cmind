@@ -660,6 +660,43 @@ async def get_repo_detail(repo_id: str):
     raise HTTPException(status_code=404, detail="Repository not found in manifest or catalog")
 
 
+@app.post("/api/v1/repos/{repo_id}/repair")
+async def repair_repo_manifest(repo_id: str):
+    """Re-run manifest update for a repo that failed at the manifest step.
+    
+    Useful when indexing completed (embeddings, graph built) but the
+    final manifest/symbol persistence crashed. Avoids re-running the
+    full expensive pipeline.
+    """
+    from urllib.parse import unquote
+    repo_id = unquote(repo_id)
+    
+    manifest: ManifestManager = app.state.manifest
+    repo = manifest.get_repository_by_id(repo_id)
+    
+    if not repo:
+        raise HTTPException(status_code=404, detail="Repository not found in manifest")
+    
+    from codemind.workflows import IndexingWorkflow
+    from codemind.storage.lancedb_storage import LanceDBStorage
+    
+    lance = LanceDBStorage()
+    graph_db = app.state.job_manager.graph_db if hasattr(app.state.job_manager, 'graph_db') else None
+    
+    result = IndexingWorkflow.repair_manifest(
+        repo_path=repo.repo_path,
+        repo_id=repo_id,
+        manifest=manifest,
+        lance_storage=lance,
+        graph_db=graph_db,
+    )
+    
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["error"])
+    
+    return result
+
+
 @app.put("/api/v1/repos/{repo_id}")
 async def update_repo_metadata(repo_id: str, request: RepoUpdateRequest):
     """Update repository metadata."""
