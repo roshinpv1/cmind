@@ -12,23 +12,18 @@ from typing import List, Optional
 
 def estimate_tokens(text: str) -> int:
     """
-    Estimate token count for text.
-    
-    Simple estimation: ~4 chars per token on average.
-    For more accuracy, use tiktoken library.
-    
+    Count tokens in text using tiktoken (accurate) or char-based fallback.
+
+    Delegates to the centralized token counter in codemind.llm.token_counter.
+
     Args:
         text: Input text
-        
+
     Returns:
-        Estimated token count
+        Token count
     """
-    if not text:
-        return 0
-    
-    # Simple estimation: chars / 4
-    # This is conservative for code (code has more tokens per char)
-    return len(text) // 3
+    from codemind.llm.token_counter import count_tokens
+    return count_tokens(text)
 
 
 def split_into_chunks(

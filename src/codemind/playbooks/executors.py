@@ -512,14 +512,9 @@ class PlaybookExecutor:
             cfg_max = getattr(self.llm, 'config', None)
             cfg_max = cfg_max.max_tokens if cfg_max else 4096
             
-            # ── Dynamic Token Budget ────────────────────────────────────
-            # Instead of fixed percentages, we measure the actual prompt
-            # first and give all remaining tokens to the response.
-            #
-            # cfg_max = max output tokens the model supports
-            # We treat prompt + response as fitting within a context window
-            # estimated at 4× the output limit (conservative for most models).
-            CONTEXT_WINDOW = cfg_max * 4  # e.g. 4096 → 16384 effective context
+            # Get context window from config (respects LLM_CONTEXT_WINDOW env var)
+            llm_config = getattr(self.llm, 'config', None)
+            CONTEXT_WINDOW = llm_config.effective_context_window if llm_config else cfg_max * 4
             MIN_OUTPUT_TOKENS = max(1024, cfg_max // 4)  # floor: never less than 1024 or 25% of cfg_max
             
             # Single-pass: give response all remaining tokens after prompt

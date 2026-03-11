@@ -66,3 +66,4 @@ python-dotenv>=1.0.0             # .env file loading
 pyyaml>=6.0                      # Skill markdown YAML frontmatter parsing
 click>=8.1.7                     # CLI interface
 structlog>=24.1.0                # Structured logging
+tiktoken>=0.5.0                  # Accurate token counting for LLM budgets

@@ -19,8 +19,16 @@ class LLMConfig:
     api_key: Optional[str] = None
     base_url: Optional[str] = None
     temperature: float = 0.1
-    max_tokens: int = 4000
+    max_tokens: int = 4096
+    context_window: int = 0  # 0 = auto (max_tokens * 4)
     timeout: float = 600.0 # Seconds
+
+    @property
+    def effective_context_window(self) -> int:
+        """Context window size. If 0, defaults to max_tokens * 4."""
+        if self.context_window > 0:
+            return self.context_window
+        return self.max_tokens * 4
 
 class LLMDriver(ABC):
     @abstractmethod

@@ -45,13 +45,10 @@ class ASTChunker:
         self.min_chunk_chars = min_chunk_chars
         self.ast_extractor = ASTExtractor()
 
-        # Lazy-load tiktoken
-        self._enc = None
-        try:
-            import tiktoken
-            self._enc = tiktoken.get_encoding("cl100k_base")
-        except ImportError:
-            logger.debug("tiktoken not installed, using char-based sizing")
+        # Use shared token counter (tiktoken with fallback)
+        from codemind.llm.token_counter import count_tokens as _count_tokens, CHARS_PER_TOKEN
+        self._count_tokens_fn = _count_tokens
+        self._chars_per_token = CHARS_PER_TOKEN
 
     # Languages where tree-sitter AST parsing is pointless (no functions/classes)
     # and can even hang (e.g., tree_sitter_markdown on large README files).
@@ -98,10 +95,8 @@ class ASTChunker:
         return self._ast_chunk(file_path, content, result.symbols, language, result)
 
     def _token_count(self, text: str) -> int:
-        """Count tokens using tiktoken (or estimate from chars)."""
-        if self._enc:
-            return len(self._enc.encode(text))
-        return len(text) // 4  # ~4 chars per token fallback
+        """Count tokens using shared tiktoken counter."""
+        return self._count_tokens_fn(text)
 
     def _exceeds_limit_fast(self, text: str) -> bool:
         """Fast char-only check — O(1), no tiktoken.

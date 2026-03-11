@@ -36,22 +36,23 @@ class EmbeddingProvider(ABC):
     """Abstract base class for embedding providers."""
     
     def _truncate_texts(self, texts: List[str], max_tokens: int, chunks=None) -> List[str]:
-        """Truncate texts to approximate max_tokens length (safety net).
+        """Truncate texts to max_tokens using tiktoken (or char fallback).
         
         The chunker should normally produce texts within limits.
         This is a last-resort safety net for API-based providers
-        to prevent token-limit errors. Uses ~4 chars/token estimate.
+        to prevent token-limit errors.
         """
-        char_limit = max_tokens * 4
+        from codemind.llm.token_counter import count_tokens, truncate_to_tokens
         result = []
         for i, t in enumerate(texts):
-            if len(t) > char_limit:
+            token_count = count_tokens(t)
+            if token_count > max_tokens:
                 file_hint = ""
                 if chunks and i < len(chunks):
                     file_hint = f" file={getattr(chunks[i], 'file_path', '?')}"
-                logger.warning(f"[EMBEDDING] Truncating text from {len(t)} to {char_limit} chars "
-                               f"(max_tokens={max_tokens}).{file_hint}")
-                result.append(t[:char_limit])
+                logger.warning(f"[EMBEDDING] Truncating text from {token_count} to {max_tokens} tokens"
+                               f".{file_hint}")
+                result.append(truncate_to_tokens(t, max_tokens))
             else:
                 result.append(t)
         return result

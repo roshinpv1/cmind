@@ -566,13 +566,14 @@ class PlannerAgent:
             
             config = getattr(self.llm, 'config', None)
             cfg_max = config.max_tokens if config else 4096
+            context_window = config.effective_context_window if config else cfg_max * 4
             
             data_context = "\n---\n".join(all_data[:5])
             
             synthesis_prompt = (
                 "You are a code analysis assistant. Answer based ONLY on the data below.\n\n"
                 "USER GOAL: " + state["goal"] + "\n\n"
-                "GATHERED DATA:\n" + data_context[:max(8000, cfg_max * 3)] + "\n\n"
+                "GATHERED DATA:\n" + data_context[:max(8000, context_window * 3)] + "\n\n"
                 "Provide a clear, detailed answer. Synthesize the findings completely based on the data.\n\n"
                 "Your answer:"
             )
