@@ -76,12 +76,22 @@ class CallExtractor:
             with open(file_path, "rb") as f:
                 content = f.read()
 
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                parser.timeout_micros = int(timeout * 1_000_000)
+
             tree = parser.parse(content)
+            if tree is None:
+                print(f"[REL] ⚠️  Call extraction parser timed out for {file_path}")
+                return []
+                
             return self._extract_from_tree(
                 tree.root_node, content, language, str(file_path), start_time, timeout
             )
-        except TimeoutError:
-            raise
+        except (TimeoutError, ValueError):
+            print(f"[REL] ⚠️  Call extraction timed out or failed parsing for {file_path}")
+            return []
         except Exception:
             return []
 

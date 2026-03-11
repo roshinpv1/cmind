@@ -239,7 +239,16 @@ class ASTExtractor:
             with open(file_path, "rb") as f:
                 content = f.read()
 
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                parser.timeout_micros = int(timeout * 1_000_000)
+
             tree = parser.parse(content)
+            if tree is None:
+                return ASTExtractionResult(
+                    symbols=[], imports=[], language=language, success=False, error="Parser timed out (returned None)"
+                )
 
             import time
             start_time = time.time()
@@ -251,9 +260,9 @@ class ASTExtractor:
                 symbols=symbols, imports=imports, language=language, success=True
             )
 
-        except TimeoutError as e:
+        except (TimeoutError, ValueError) as e:
             return ASTExtractionResult(
-                symbols=[], imports=[], language=language, success=False, error=str(e)
+                symbols=[], imports=[], language=language, success=False, error=f"AST parsing timed out or failed: {e}"
             )
         except Exception as e:
             return ASTExtractionResult(
