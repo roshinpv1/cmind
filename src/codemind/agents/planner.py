@@ -77,9 +77,8 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
                             # Pydantic dicts might have non-serializable objects (like dates), default=str
                             return json.dumps(outputs["data"], default=str)
                         elif outputs.get("result"):
-                            truncated = str(outputs["result"])[:3800]
-                            return json.dumps({"result": truncated})
-                        return json.dumps(outputs, default=str)[:4000]
+                            return json.dumps({"result": str(outputs["result"])}, default=str)
+                        return json.dumps(outputs, default=str)
                     else:
                         return json.dumps({"error": result.get("error", "Playbook failed")})
                 except Exception as e:
@@ -360,7 +359,7 @@ class PlannerAgent:
         try:
             # Invoke LLM with tools
             config = getattr(self.llm, 'config', None)
-            think_tokens = max(256, (config.max_tokens if config else 4096) // 20)
+            think_tokens = max(512, (config.max_tokens if config else 4096) // 4)
             
             response = await self._llm_with_tools.ainvoke(
                 messages,
@@ -494,7 +493,7 @@ class PlannerAgent:
                     
                     for key, val in outputs.items():
                         if isinstance(val, str) and len(val) > 20:
-                            all_data.append(val[:2000])
+                            all_data.append(val[:8000])
                         elif isinstance(val, list):
                             all_data.append(str(val[:10]))
         
@@ -530,7 +529,7 @@ class PlannerAgent:
                                 playbook_output = parsed
                     except (json.JSONDecodeError, TypeError):
                         pass
-                    all_data.append(content[:2000])
+                    all_data.append(content[:8000])
         
         print(f"[PLANNER] Collected: playbook_output={'yes' if playbook_output else 'no'}, all_data={len(all_data)} items")
         
@@ -565,19 +564,21 @@ class PlannerAgent:
         elif all_data:
             print(f"[PLANNER] 🔄 Synthesizing from {len(all_data)} data sources")
             
+            config = getattr(self.llm, 'config', None)
+            cfg_max = config.max_tokens if config else 4096
+            
             data_context = "\n---\n".join(all_data[:5])
             
             synthesis_prompt = (
                 "You are a code analysis assistant. Answer based ONLY on the data below.\n\n"
                 "USER GOAL: " + state["goal"] + "\n\n"
-                "GATHERED DATA:\n" + data_context[:8000] + "\n\n"
+                "GATHERED DATA:\n" + data_context[:max(8000, cfg_max * 3)] + "\n\n"
                 "Provide a clear, detailed answer. Synthesize the findings completely based on the data.\n\n"
                 "Your answer:"
             )
             
             try:
-                config = getattr(self.llm, 'config', None)
-                synth_tokens = max(512, (config.max_tokens if config else 4096) // 10)
+                synth_tokens = cfg_max  # Full output budget for synthesis
                 answer_text = await self.llm.generate(
                     synthesis_prompt,
                     system_prompt="You are a helpful code analysis assistant. Answer questions based only on the provided data.",
