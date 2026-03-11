@@ -47,7 +47,7 @@ class CallExtractor:
         self.ast_extractor = ASTExtractor()
 
     def extract_calls(
-        self, file_path: Path, language: str | None = None
+        self, file_path: Path, language: str | None = None, timeout: float = 10.0
     ) -> list[CallSite]:
         """
         Extract all function calls from a source file.
@@ -55,6 +55,7 @@ class CallExtractor:
         Args:
             file_path: Path to source file
             language: Programming language (auto-detected if None)
+            timeout: Maximum execution time in seconds
 
         Returns:
             List of CallSite objects
@@ -68,17 +69,25 @@ class CallExtractor:
         if not parser:
             return []
 
+        import time
+        start_time = time.time()
+
         try:
             with open(file_path, "rb") as f:
                 content = f.read()
 
             tree = parser.parse(content)
-            return self._extract_from_tree(tree.root_node, content, language, str(file_path))
+            return self._extract_from_tree(
+                tree.root_node, content, language, str(file_path), start_time, timeout
+            )
+        except TimeoutError:
+            raise
         except Exception:
             return []
 
     def _extract_from_tree(
-        self, root_node, content: bytes, language: str, file_path: str
+        self, root_node, content: bytes, language: str, file_path: str,
+        start_time: float, timeout: float
     ) -> list[CallSite]:
         """Walk AST and find all call expressions within functions."""
         calls: list[CallSite] = []
@@ -89,7 +98,10 @@ class CallExtractor:
             return calls
 
         # Find all function bodies, then look for calls within them
-        self._walk_functions(root_node, content, language, func_types, call_types, calls, file_path)
+        self._walk_functions(
+            root_node, content, language, func_types, call_types, calls, file_path,
+            start_time=start_time, timeout=timeout
+        )
         return calls
 
     def _walk_functions(
@@ -97,9 +109,15 @@ class CallExtractor:
         func_types: list[str], call_types: list[str],
         calls: list[CallSite], file_path: str,
         current_func: str | None = None,
-        depth: int = 0
+        depth: int = 0,
+        start_time: float = 0.0,
+        timeout: float = 10.0
     ):
         """Recursively find functions and extract calls within them."""
+        import time
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Call extraction timed out for {file_path}")
+
         # Prevent infinite recursion on extremely nested/minified files (e.g., JS)
         if depth > 50:
             return
@@ -109,19 +127,34 @@ class CallExtractor:
                 func_name = self._get_name(child, content)
                 if func_name:
                     # Extract calls within this function
-                    self._find_calls_in_node(child, content, language, call_types, calls, file_path, func_name, depth + 1)
+                    self._find_calls_in_node(
+                        child, content, language, call_types, calls, file_path, func_name, depth + 1,
+                        start_time=start_time, timeout=timeout
+                    )
                     # Also recurse for nested functions
-                    self._walk_functions(child, content, language, func_types, call_types, calls, file_path, func_name, depth + 1)
+                    self._walk_functions(
+                        child, content, language, func_types, call_types, calls, file_path, func_name, depth + 1,
+                        start_time=start_time, timeout=timeout
+                    )
             else:
-                self._walk_functions(child, content, language, func_types, call_types, calls, file_path, current_func, depth + 1)
+                self._walk_functions(
+                    child, content, language, func_types, call_types, calls, file_path, current_func, depth + 1,
+                    start_time=start_time, timeout=timeout
+                )
 
     def _find_calls_in_node(
         self, node, content: bytes, language: str,
         call_types: list[str], calls: list[CallSite],
         file_path: str, caller_name: str,
-        depth: int = 0
+        depth: int = 0,
+        start_time: float = 0.0,
+        timeout: float = 10.0
     ):
         """Find all call expressions within a node."""
+        import time
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Call extraction timed out for {file_path}")
+
         if depth > 50:
             return
 
@@ -138,7 +171,10 @@ class CallExtractor:
                     ))
             # Recurse (but not into nested function definitions)
             if child.type not in FUNCTION_NODE_TYPES.get(language, []):
-                self._find_calls_in_node(child, content, language, call_types, calls, file_path, caller_name, depth + 1)
+                self._find_calls_in_node(
+                    child, content, language, call_types, calls, file_path, caller_name, depth + 1,
+                    start_time=start_time, timeout=timeout
+                )
 
     def _extract_callee(self, call_node, content: bytes, language: str) -> tuple[str | None, str | None]:
         """Extract the callee name and optional module from a call expression."""

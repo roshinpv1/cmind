@@ -209,7 +209,7 @@ class ASTExtractor:
         """Detect programming language from file extension."""
         return LANGUAGE_MAP.get(file_path.suffix.lower())
 
-    def extract(self, file_path: Path, language: str | None = None) -> ASTExtractionResult:
+    def extract(self, file_path: Path, language: str | None = None, timeout: float = 15.0) -> ASTExtractionResult:
         """
         Extract AST information from any supported language.
 
@@ -241,13 +241,20 @@ class ASTExtractor:
 
             tree = parser.parse(content)
 
-            symbols = self._extract_symbols(tree.root_node, content, language)
+            import time
+            start_time = time.time()
+
+            symbols = self._extract_symbols(tree.root_node, content, language, start_time, timeout)
             imports = self._extract_imports(tree.root_node, content, language)
 
             return ASTExtractionResult(
                 symbols=symbols, imports=imports, language=language, success=True
             )
 
+        except TimeoutError as e:
+            return ASTExtractionResult(
+                symbols=[], imports=[], language=language, success=False, error=str(e)
+            )
         except Exception as e:
             return ASTExtractionResult(
                 symbols=[], imports=[], language=language, success=False, error=str(e)
@@ -287,21 +294,32 @@ class ASTExtractor:
 
     # -- Generic symbol extraction ------------------------------------------
 
-    def _extract_symbols(self, root_node, content: bytes, language: str) -> list[Symbol]:
+    def _extract_symbols(self, root_node, content: bytes, language: str, start_time: float, timeout: float) -> list[Symbol]:
         """Extract all symbols (classes, functions, methods) from AST."""
         symbols: list[Symbol] = []
         func_types = FUNCTION_NODE_TYPES.get(language, [])
         class_types = CLASS_NODE_TYPES.get(language, [])
 
-        self._walk_for_symbols(root_node, content, language, func_types, class_types, symbols, parent=None)
+        self._walk_for_symbols(
+            root_node, content, language, func_types, class_types, symbols, parent=None,
+            depth=0, start_time=start_time, timeout=timeout
+        )
         return symbols
 
     def _walk_for_symbols(
         self, node, content: bytes, language: str,
         func_types: list[str], class_types: list[str],
-        symbols: list[Symbol], parent: str | None
+        symbols: list[Symbol], parent: str | None,
+        depth: int, start_time: float, timeout: float
     ):
         """Recursively walk AST and extract symbols."""
+        import time
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"AST extraction timed out")
+            
+        if depth > 50:
+            return
+
         for child in node.children:
             if child.type in func_types:
                 sym = self._node_to_symbol(child, content, language,
@@ -321,14 +339,16 @@ class ASTExtractor:
                     if body:
                         self._walk_for_symbols(
                             body, content, language, func_types, class_types,
-                            symbols, parent=sym.name
+                            symbols, parent=sym.name,
+                            depth=depth + 1, start_time=start_time, timeout=timeout
                         )
             else:
                 # Continue walking for nested definitions (e.g., Go type blocks)
                 if child.child_count > 0 and child.type not in func_types:
                     self._walk_for_symbols(
                         child, content, language, func_types, class_types,
-                        symbols, parent=parent
+                        symbols, parent=parent,
+                        depth=depth + 1, start_time=start_time, timeout=timeout
                     )
 
     def _node_to_symbol(

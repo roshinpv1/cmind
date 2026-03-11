@@ -396,6 +396,9 @@ class IndexingWorkflow:
             # Build file nodes and extract structure
             print(f"[GRAPH] Processing {len(state.changed_files)} changed files...")
             files_processed = 0
+            
+            import time
+
             for file_change in state.changed_files:
                 file_path = Path(state.repo_path) / file_change.path
 
@@ -411,30 +414,33 @@ class IndexingWorkflow:
                 language = self.ast_extractor.detect_language(file_path)
                 if language:
                     try:
+                        # Cooperative internal timeout will handle stalls
                         result = self.ast_extractor.extract(file_path, language)
 
-                        # Add class nodes
-                        for symbol in result.symbols:
-                            if symbol.type in ("class", "interface", "struct", "trait", "enum"):
-                                self.graph_builder.build_class_node(
-                                    state.repo_id,
-                                    str(file_change.path),
-                                    symbol.name,
-                                )
+                        if result and result.symbols:
+                            # Add class nodes
+                            for symbol in result.symbols:
+                                if symbol.type in ("class", "interface", "struct", "trait", "enum"):
+                                    self.graph_builder.build_class_node(
+                                        state.repo_id,
+                                        str(file_change.path),
+                                        symbol.name,
+                                    )
 
-                        # Add function nodes
-                        for symbol in result.symbols:
-                            if symbol.type in ("function", "method"):
-                                parent_class = symbol.parent if symbol.type == "method" else None
-                                self.graph_builder.build_function_node(
-                                    state.repo_id,
-                                    str(file_change.path),
-                                    symbol.name,
-                                    parent_class,
-                                )
+                            # Add function nodes
+                            for symbol in result.symbols:
+                                if symbol.type in ("function", "method"):
+                                    parent_class = symbol.parent if symbol.type == "method" else None
+                                    self.graph_builder.build_function_node(
+                                        state.repo_id,
+                                        str(file_change.path),
+                                        symbol.name,
+                                        parent_class,
+                                    )
+                    except TimeoutError:
+                        print(f"[GRAPH] ⚠️  AST extraction timed out for {file_change.path}, skipping.")
                     except Exception as e:
                         print(f"[GRAPH] ⚠️  AST extraction failed for {file_change.path}: {e}")
-                        pass
 
             print(f"[GRAPH] ✅ Processed {files_processed} files")
 
@@ -461,24 +467,22 @@ class IndexingWorkflow:
             symbol_file_map: dict[str, list[str]] = {}  # name → [file_paths]
 
             import time
-            from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
-            # Use a thread pool to allow timing out individual file extractions
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                for file_change in state.changed_files:
-                    file_path = repo_path / file_change.path
-                    if not file_path.exists():
-                        continue
+            # 1. Extract AST and Imports
+            for file_change in state.changed_files:
+                file_path = repo_path / file_change.path
+                if not file_path.exists():
+                    continue
 
-                    language = self.ast_extractor.detect_language(file_path)
-                    if not language:
-                        continue
+                language = self.ast_extractor.detect_language(file_path)
+                if not language:
+                    continue
 
-                    try:
-                        # Time-bound AST extraction to prevent infinite stalls on complex minified files
-                        future = executor.submit(self.ast_extractor.extract, file_path, language)
-                        result = future.result(timeout=15.0)
+                try:
+                    # Cooperative internal timeout will handle stalls
+                    result = self.ast_extractor.extract(file_path, language)
 
+                    if result and result.symbols:
                         # Index symbols
                         for sym in result.symbols:
                             if sym.name not in symbol_file_map:
@@ -515,25 +519,23 @@ class IndexingWorkflow:
                                                 )
                                                 inherit_edges += 1
 
-                    except TimeoutError:
-                        print(f"[REL] ⚠️  AST extraction timed out for {file_change.path} (>15s), skipping.")
-                        continue
-                    except Exception as e:
-                        print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
+                except TimeoutError:
+                    print(f"[REL] ⚠️  AST extraction timed out for {file_change.path}, skipping.")
+                except Exception as e:
+                    print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
 
-            # Build CALLS edges
+            # 2. Extract Calls
             print(f"[REL] Extracting calls from {len(state.changed_files)} files...")
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                for file_change in state.changed_files:
-                    file_path = repo_path / file_change.path
-                    if not file_path.exists():
-                        continue
+            for file_change in state.changed_files:
+                file_path = repo_path / file_change.path
+                if not file_path.exists():
+                    continue
 
-                    try:
-                        # Time-bound call extraction
-                        future = executor.submit(self.call_extractor.extract_calls, file_path)
-                        calls = future.result(timeout=10.0)
-                        
+                try:
+                    # Cooperative internal timeout
+                    calls = self.call_extractor.extract_calls(file_path)
+                    
+                    if calls:
                         for call in calls:
                             # Resolve callee to a file
                             if call.callee_name in symbol_file_map:
@@ -545,11 +547,10 @@ class IndexingWorkflow:
                                         call.line,
                                     )
                                     call_edges += 1
-                    except TimeoutError:
-                        print(f"[REL] ⚠️  Call extraction timed out for {file_change.path} (>10s), skipping.")
-                        continue
-                    except Exception:
-                        pass
+                except TimeoutError:
+                    print(f"[REL] ⚠️  Call extraction timed out for {file_change.path}, skipping.")
+                except Exception:
+                    pass
 
             print(f"[REL] ✅ Extracted {import_edges} imports, {call_edges} calls, {inherit_edges} inheritance edges")
 
