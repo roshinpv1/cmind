@@ -460,74 +460,96 @@ class IndexingWorkflow:
             # Build a symbol-to-file index for resolving cross-file calls
             symbol_file_map: dict[str, list[str]] = {}  # name → [file_paths]
 
-            for file_change in state.changed_files:
-                file_path = repo_path / file_change.path
-                if not file_path.exists():
-                    continue
+            import time
+            from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
-                language = self.ast_extractor.detect_language(file_path)
-                if not language:
-                    continue
+            # Use a thread pool to allow timing out individual file extractions
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                for file_change in state.changed_files:
+                    file_path = repo_path / file_change.path
+                    if not file_path.exists():
+                        continue
 
-                try:
-                    result = self.ast_extractor.extract(file_path, language)
+                    language = self.ast_extractor.detect_language(file_path)
+                    if not language:
+                        continue
 
-                    # Index symbols
-                    for sym in result.symbols:
-                        if sym.name not in symbol_file_map:
-                            symbol_file_map[sym.name] = []
-                        symbol_file_map[sym.name].append(str(file_change.path))
+                    try:
+                        # Time-bound AST extraction to prevent infinite stalls on complex minified files
+                        future = executor.submit(self.ast_extractor.extract, file_path, language)
+                        result = future.result(timeout=15.0)
 
-                    # Build IMPORTS edges
-                    for imp in result.imports:
-                        resolved = import_resolver.resolve(
-                            imp.module, language, source_file=file_path
-                        )
-                        if resolved:
-                            self.graph_builder.build_import_edges(
-                                state.repo_id, str(file_change.path), resolved, imp.module
+                        # Index symbols
+                        for sym in result.symbols:
+                            if sym.name not in symbol_file_map:
+                                symbol_file_map[sym.name] = []
+                            symbol_file_map[sym.name].append(str(file_change.path))
+
+                        # Build IMPORTS edges
+                        for imp in result.imports:
+                            # Skip resolving massive imports to avoid ImportResolver O(N) worst-case
+                            if len(state.changed_files) > 1000 and len(imp.module) > 200:
+                                continue
+                                
+                            resolved = import_resolver.resolve(
+                                imp.module, language, source_file=file_path
                             )
-                            import_edges += 1
+                            if resolved:
+                                self.graph_builder.build_import_edges(
+                                    state.repo_id, str(file_change.path), resolved, imp.module
+                                )
+                                import_edges += 1
 
-                    # Build INHERITS edges
-                    for sym in result.symbols:
-                        if sym.bases:
-                            for base in sym.bases:
-                                # Find the file that declares the base class
-                                if base in symbol_file_map:
-                                    for base_file in symbol_file_map[base]:
-                                        if base_file != str(file_change.path):
-                                            self.graph_builder.build_inheritance_edges(
-                                                state.repo_id,
-                                                str(file_change.path), sym.name,
-                                                base_file, base,
-                                            )
-                                            inherit_edges += 1
+                        # Build INHERITS edges
+                        for sym in result.symbols:
+                            if sym.bases:
+                                for base in sym.bases:
+                                    # Find the file that declares the base class
+                                    if base in symbol_file_map:
+                                        for base_file in symbol_file_map[base]:
+                                            if base_file != str(file_change.path):
+                                                self.graph_builder.build_inheritance_edges(
+                                                    state.repo_id,
+                                                    str(file_change.path), sym.name,
+                                                    base_file, base,
+                                                )
+                                                inherit_edges += 1
 
-                except Exception as e:
-                    print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
+                    except TimeoutError:
+                        print(f"[REL] ⚠️  AST extraction timed out for {file_change.path} (>15s), skipping.")
+                        continue
+                    except Exception as e:
+                        print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
 
             # Build CALLS edges
-            for file_change in state.changed_files:
-                file_path = repo_path / file_change.path
-                if not file_path.exists():
-                    continue
+            print(f"[REL] Extracting calls from {len(state.changed_files)} files...")
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                for file_change in state.changed_files:
+                    file_path = repo_path / file_change.path
+                    if not file_path.exists():
+                        continue
 
-                try:
-                    calls = self.call_extractor.extract_calls(file_path)
-                    for call in calls:
-                        # Resolve callee to a file
-                        if call.callee_name in symbol_file_map:
-                            for callee_file in symbol_file_map[call.callee_name]:
-                                self.graph_builder.build_call_edges(
-                                    state.repo_id,
-                                    str(file_change.path), call.caller_name,
-                                    callee_file, call.callee_name,
-                                    call.line,
-                                )
-                                call_edges += 1
-                except Exception:
-                    pass
+                    try:
+                        # Time-bound call extraction
+                        future = executor.submit(self.call_extractor.extract_calls, file_path)
+                        calls = future.result(timeout=10.0)
+                        
+                        for call in calls:
+                            # Resolve callee to a file
+                            if call.callee_name in symbol_file_map:
+                                for callee_file in symbol_file_map[call.callee_name]:
+                                    self.graph_builder.build_call_edges(
+                                        state.repo_id,
+                                        str(file_change.path), call.caller_name,
+                                        callee_file, call.callee_name,
+                                        call.line,
+                                    )
+                                    call_edges += 1
+                    except TimeoutError:
+                        print(f"[REL] ⚠️  Call extraction timed out for {file_change.path} (>10s), skipping.")
+                        continue
+                    except Exception:
+                        pass
 
             print(f"[REL] ✅ Extracted {import_edges} imports, {call_edges} calls, {inherit_edges} inheritance edges")
 

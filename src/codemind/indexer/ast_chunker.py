@@ -118,9 +118,7 @@ class ASTChunker:
         # Always enforce the char-based cap to match embedder's truncation
         if len(text) > self.max_chunk_chars:
             return True
-        if self._enc:
-            return self._token_count(text) > self.max_tokens
-        return False  # Already checked chars above
+        return self._token_count(text) > self.max_tokens
 
     def _build_context_header(
         self, file_path: Path, sym, imports: list | None, language: str

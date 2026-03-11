@@ -96,26 +96,35 @@ class CallExtractor:
         self, node, content: bytes, language: str,
         func_types: list[str], call_types: list[str],
         calls: list[CallSite], file_path: str,
-        current_func: str | None = None
+        current_func: str | None = None,
+        depth: int = 0
     ):
         """Recursively find functions and extract calls within them."""
+        # Prevent infinite recursion on extremely nested/minified files (e.g., JS)
+        if depth > 50:
+            return
+
         for child in node.children:
             if child.type in func_types:
                 func_name = self._get_name(child, content)
                 if func_name:
                     # Extract calls within this function
-                    self._find_calls_in_node(child, content, language, call_types, calls, file_path, func_name)
+                    self._find_calls_in_node(child, content, language, call_types, calls, file_path, func_name, depth + 1)
                     # Also recurse for nested functions
-                    self._walk_functions(child, content, language, func_types, call_types, calls, file_path, func_name)
+                    self._walk_functions(child, content, language, func_types, call_types, calls, file_path, func_name, depth + 1)
             else:
-                self._walk_functions(child, content, language, func_types, call_types, calls, file_path, current_func)
+                self._walk_functions(child, content, language, func_types, call_types, calls, file_path, current_func, depth + 1)
 
     def _find_calls_in_node(
         self, node, content: bytes, language: str,
         call_types: list[str], calls: list[CallSite],
-        file_path: str, caller_name: str
+        file_path: str, caller_name: str,
+        depth: int = 0
     ):
         """Find all call expressions within a node."""
+        if depth > 50:
+            return
+
         for child in node.children:
             if child.type in call_types:
                 callee_name, callee_module = self._extract_callee(child, content, language)
@@ -129,7 +138,7 @@ class CallExtractor:
                     ))
             # Recurse (but not into nested function definitions)
             if child.type not in FUNCTION_NODE_TYPES.get(language, []):
-                self._find_calls_in_node(child, content, language, call_types, calls, file_path, caller_name)
+                self._find_calls_in_node(child, content, language, call_types, calls, file_path, caller_name, depth + 1)
 
     def _extract_callee(self, call_node, content: bytes, language: str) -> tuple[str | None, str | None]:
         """Extract the callee name and optional module from a call expression."""
