@@ -505,20 +505,32 @@ class PlaybookExecutor:
             
             # Estimate total tokens
             code_text = "\n".join([c.get('chunk_text', '') for c in code_chunks])
-            total_tokens = estimate_tokens(sys_prompt) + estimate_tokens(code_text) + estimate_tokens(user_goal)
+            code_tokens = estimate_tokens(code_text)
+            prompt_overhead = estimate_tokens(sys_prompt) + estimate_tokens(user_goal)
+            total_tokens = prompt_overhead + code_tokens
             
             cfg_max = getattr(self.llm, 'config', None)
             cfg_max = cfg_max.max_tokens if cfg_max else 4096
             
-            MAX_CONTEXT = int(cfg_max * 0.7)  # 70% of max for prompt, 30% for response
+            # ── Dynamic Token Budget ────────────────────────────────────
+            # Instead of fixed percentages, we measure the actual prompt
+            # first and give all remaining tokens to the response.
+            #
+            # cfg_max = max output tokens the model supports
+            # We treat prompt + response as fitting within a context window
+            # estimated at 4× the output limit (conservative for most models).
+            CONTEXT_WINDOW = cfg_max * 4  # e.g. 4096 → 16384 effective context
+            MIN_OUTPUT_TOKENS = max(1024, cfg_max // 4)  # floor: never less than 1024 or 25% of cfg_max
             
-            # Derive all token budgets from config
-            code_context_tokens = int(cfg_max * 0.5)       # 50% for code in single-pass
-            single_pass_output = int(cfg_max * 0.3)         # 30% for single-pass output
-            batch_chunk_tokens = int(cfg_max * 0.15)        # 15% per batch chunk
-            batch_output_tokens = int(cfg_max * 0.1)        # 10% per batch output
-            reduce_output_tokens = int(cfg_max * 0.3)       # 30% for final reduce output
-            reduce_context_chars = int(cfg_max * 2.5)       # ~2.5 chars/token for reduce context
+            # Single-pass: give response all remaining tokens after prompt
+            available_for_code = CONTEXT_WINDOW - prompt_overhead - MIN_OUTPUT_TOKENS
+            code_context_tokens = max(available_for_code, 2000)  # at least 2k for code
+            
+            # Decide: single-pass vs. map-reduce
+            MAX_CONTEXT = CONTEXT_WINDOW - MIN_OUTPUT_TOKENS  # total prompt budget
+            
+            # Dynamic output: measure actual prompt, give the rest to response
+            # (will be calculated after building the actual prompt)
             
             try:
                 if total_tokens <= MAX_CONTEXT:
@@ -599,6 +611,20 @@ class PlaybookExecutor:
                         f.write(f"\n\n=== USER MSG ({len(user_msg)} chars) ===\n")
                         f.write(user_msg)
                     
+                    # Dynamic output: measure actual prompt, give all remaining to response
+                    actual_prompt_tokens = estimate_tokens(sys_prompt) + estimate_tokens(user_msg)
+                    single_pass_output = max(
+                        CONTEXT_WINDOW - actual_prompt_tokens,
+                        MIN_OUTPUT_TOKENS
+                    )
+                    # Cap to cfg_max (the model's max output limit)
+                    single_pass_output = min(single_pass_output, cfg_max)
+                    
+                    state["logs"].append(
+                        f"  Token budget: prompt={actual_prompt_tokens}, output={single_pass_output}, "
+                        f"context_window={CONTEXT_WINDOW}, cfg_max={cfg_max}"
+                    )
+                    
                     output = await self.llm.generate(
                         user_msg,
                         system_prompt=sys_prompt,
@@ -642,24 +668,40 @@ class PlaybookExecutor:
                     state["logs"].append(f"  Generated {len(output)} chars in single pass (max_tokens={single_pass_output})")
                 
                 else:
-                    # Context too large - use map-reduce
-                    state["logs"].append(f"  Context too large ({total_tokens} tokens), using map-reduce")
+                    # ── Map-Reduce: Context too large for single pass ────
+                    state["logs"].append(f"  Context too large ({total_tokens} tokens > {MAX_CONTEXT}), using map-reduce")
                     
                     max_batches = getattr(playbook.search_strategy, 'max_batches', 5)
+                    
+                    # Dynamic batch sizing: divide code evenly across batches
+                    # Each batch gets enough tokens for its code + proportional output
+                    batch_chunk_tokens = max(code_tokens // max_batches, 2000)
                     batches = split_into_chunks(code_chunks, max_tokens_per_chunk=batch_chunk_tokens)
                     batch_results = []
                     
                     # Cap batches to configured limit
                     batches_to_process = batches[:max_batches]
+                    num_batches = len(batches_to_process)
+                    
+                    # Dynamic batch output: each batch gets a fair share of output budget
+                    # At least 1024 tokens per batch, capped at cfg_max
+                    batch_output_tokens = max(cfg_max // num_batches, 1024)
+                    batch_output_tokens = min(batch_output_tokens, cfg_max)
+                    
+                    state["logs"].append(
+                        f"  Map-reduce: {num_batches} batches, ~{batch_chunk_tokens} code tokens/batch, "
+                        f"{batch_output_tokens} output tokens/batch"
+                    )
                     
                     for i, batch in enumerate(batches_to_process):
                         batch_code = format_code_chunks_for_llm(batch, max_tokens=batch_chunk_tokens)
                         
                         map_msg = (
                             "USER REQUEST:\n" + user_goal + "\n\n"
-                            "CODE BATCH " + str(i+1) + "/" + str(len(batches_to_process)) + ":\n"
+                            "CODE BATCH " + str(i+1) + "/" + str(num_batches) + ":\n"
                             + batch_code + "\n\n"
-                            "Analyze this batch for the user's request:"
+                            "Analyze this batch thoroughly for the user's request. "
+                            "Include ALL relevant findings — do not summarize or abbreviate."
                         )
                         
                         batch_output = await self.llm.generate(
@@ -668,17 +710,51 @@ class PlaybookExecutor:
                             max_tokens=batch_output_tokens
                         )
                         batch_results.append(batch_output)
-                        state["logs"].append(f"  Processed batch {i+1}/{len(batches_to_process)}")
+                        state["logs"].append(f"  Processed batch {i+1}/{num_batches} ({len(batch_output)} chars)")
                     
                     # Reduce: Merge all batch results
-                    partial = "\n\n---\n\n".join(
-                        ["Batch " + str(i+1) + ":\n" + result for i, result in enumerate(batch_results)]
-                    )
-                    reduce_msg = (
+                    # Instead of hard char truncation, proportionally trim if needed
+                    partial_sections = []
+                    for i, result in enumerate(batch_results):
+                        partial_sections.append(f"=== Batch {i+1}/{num_batches} ===\n{result}")
+                    partial = "\n\n".join(partial_sections)
+                    
+                    reduce_preamble = (
                         "USER REQUEST:\n" + user_goal + "\n\n"
-                        "PARTIAL ANALYSES FROM CODE BATCHES:\n" + partial[:reduce_context_chars] + "\n\n"
-                        "Synthesize these into ONE comprehensive, cohesive final output:"
+                        "Below are detailed analyses from " + str(num_batches) + " code batches. "
+                        "Synthesize ALL findings into ONE comprehensive, cohesive final output. "
+                        "Do NOT lose any details from the batch analyses.\n\n"
                     )
+                    
+                    # Measure reduce prompt and give all remaining to output
+                    reduce_prompt_tokens = estimate_tokens(sys_prompt) + estimate_tokens(reduce_preamble)
+                    available_for_partial = CONTEXT_WINDOW - reduce_prompt_tokens - MIN_OUTPUT_TOKENS
+                    
+                    # Proportionally trim batch results if they exceed available space
+                    partial_tokens = estimate_tokens(partial)
+                    if partial_tokens > available_for_partial and available_for_partial > 0:
+                        # Trim each batch result proportionally
+                        chars_per_batch = max((available_for_partial * 3) // num_batches, 500)
+                        trimmed_sections = []
+                        for i, result in enumerate(batch_results):
+                            trimmed = result[:chars_per_batch]
+                            if len(result) > chars_per_batch:
+                                trimmed += "\n... [trimmed for context limit]"
+                            trimmed_sections.append(f"=== Batch {i+1}/{num_batches} ===\n{trimmed}")
+                        partial = "\n\n".join(trimmed_sections)
+                        state["logs"].append(
+                            f"  Proportionally trimmed batch results: {partial_tokens} → {estimate_tokens(partial)} tokens"
+                        )
+                    
+                    reduce_msg = reduce_preamble + partial
+                    
+                    # Dynamic reduce output: all remaining tokens after prompt
+                    actual_reduce_prompt = estimate_tokens(sys_prompt) + estimate_tokens(reduce_msg)
+                    reduce_output_tokens = max(
+                        CONTEXT_WINDOW - actual_reduce_prompt,
+                        MIN_OUTPUT_TOKENS
+                    )
+                    reduce_output_tokens = min(reduce_output_tokens, cfg_max)
                     
                     final_output = await self.llm.generate(
                         reduce_msg,
@@ -686,7 +762,10 @@ class PlaybookExecutor:
                         max_tokens=reduce_output_tokens
                     )
                     state["llm_output"] = final_output
-                    state["logs"].append(f"  Merged {len(batch_results)} batches into final output")
+                    state["logs"].append(
+                        f"  Merged {num_batches} batches into final output "
+                        f"({len(final_output)} chars, max_tokens={reduce_output_tokens})"
+                    )
             
             except Exception as e:
                 state["error"] = f"LLM generation error: {str(e)}"

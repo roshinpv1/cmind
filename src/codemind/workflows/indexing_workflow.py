@@ -576,11 +576,15 @@ class IndexingWorkflow:
         }
 
     def update_manifest(self, state: IndexingState) -> IndexingState:
-        """Node: Update manifest, persist symbols, and save commit snapshot."""
-        try:
-            state.stage = "updating_manifest"
+        """Node: Update manifest, persist symbols, and save commit snapshot.
+        
+        Structured as 3 independent phases so a failure in symbol persistence
+        doesn't prevent the repo from appearing in the manifest.
+        """
+        state.stage = "updating_manifest"
 
-            # Create or update repository
+        # ── Phase 1: Create/update repository in manifest (CRITICAL) ─────
+        try:
             repo = self.manifest.get_repository(state.repo_path)
             
             metadata = getattr(state, "metadata", {})
@@ -594,10 +598,10 @@ class IndexingWorkflow:
                     org=getattr(state, 'org', None)
                 )
                 repo = self.manifest.get_repository(state.repo_path)
+                print(f"[MANIFEST] ✅ Created repository entry for {state.repo_id}")
             
             # Update manifest with commit hash and metadata
             metadata = getattr(state, "metadata", {})
-            # Inject cd_repo_url into metadata if present
             if state.cd_repo_url:
                 metadata["cd_repo_url"] = state.cd_repo_url
             
@@ -614,8 +618,16 @@ class IndexingWorkflow:
                 total_files=total_files_on_disk,
                 metadata=metadata
             )
+            print(f"[MANIFEST] ✅ Updated repository manifest ({total_files_on_disk} files)")
 
-            # Persist extracted symbols to `symbols` table
+        except Exception as e:
+            # This is a critical failure — repo won't appear in list
+            state.error = f"Manifest update failed: {e}"
+            print(f"[MANIFEST] ❌ Repository creation/update failed: {e}")
+            return state
+
+        # ── Phase 2: Persist symbols (OPTIONAL — failure is non-fatal) ───
+        try:
             symbols_to_persist = []
             repo_path = Path(state.repo_path)
             for file_change in state.changed_files:
@@ -662,18 +674,19 @@ class IndexingWorkflow:
                 state.symbols_extracted = count
                 print(f"[MANIFEST] ✅ Persisted {count} symbols")
 
-            # Save commit snapshot
-            if state.commit_hash:
-                try:
-                    self.manifest.save_commit_snapshot(
-                        repo_id=state.repo_id,
-                        commit_sha=state.commit_hash,
-                        files_changed=state.files_changed,
-                    )
-                except Exception as e:
-                    print(f"[MANIFEST] ⚠️ Commit snapshot failed: {e}")
-
         except Exception as e:
-            state.error = f"Manifest update failed: {e}"
+            # Symbol persistence is non-fatal — repo is already saved
+            print(f"[MANIFEST] ⚠️ Symbol persistence failed (non-fatal): {e}")
+
+        # ── Phase 3: Save commit snapshot (OPTIONAL) ─────────────────────
+        if state.commit_hash:
+            try:
+                self.manifest.save_commit_snapshot(
+                    repo_id=state.repo_id,
+                    commit_sha=state.commit_hash,
+                    files_changed=state.files_changed,
+                )
+            except Exception as e:
+                print(f"[MANIFEST] ⚠️ Commit snapshot failed: {e}")
 
         return state
