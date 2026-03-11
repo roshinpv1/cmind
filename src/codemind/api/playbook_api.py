@@ -154,11 +154,8 @@ def _seed_builtins():
     try:
         from ..storage.database import PlaybookStoreModel
 
-        # Check if already seeded
-        count = session.query(PlaybookStoreModel).filter_by(is_builtin=1).count()
-        if count > 0:
-            print(f"[PLAYBOOK_API] Built-in playbooks already seeded ({count})")
-            return
+        # We will now upsert (sync) local MD files on every startup
+        # instead of skipping if already seeded.
 
         registry = PlaybookRegistry()
         icon_map = {
@@ -210,44 +207,70 @@ def _seed_builtins():
         }
 
         now = int(time.time())
+        updated_count = 0
+        inserted_count = 0
         for name in registry.list_playbooks():
             pb = registry.get_playbook(name)
             if not pb:
                 continue
             icon, color = icon_map.get(name, ("Brain", "violet"))
-            row = PlaybookStoreModel(
-                id=str(uuid.uuid4()),
-                name=pb.name,
-                version=pb.version,
-                description=pb.description,
-                when_to_use=pb.when_to_use,
-                category=pb.category,
-                complexity=pb.complexity_level,
-                author="system",
-                is_builtin=1,
-                is_published=1,
-                icon=icon,
-                color=color,
-                system_prompt=pb.system_prompt,
-                search_strategy=json.dumps(pb.search_strategy.model_dump() if pb.search_strategy else {}),
-                output_schema=json.dumps(pb.output_schema),
-                behavior=json.dumps(pb.behavioral_flags),
-                examples=json.dumps(pb.examples),
-                anti_patterns=json.dumps(pb.anti_patterns),
-                quality_rubric=json.dumps(pb.quality_rubric),
-                evaluation_rules=json.dumps(pb.evaluation_rules),
-                templates=json.dumps(template_map.get(name, [])),
-                requires_repo=0 if not requires_repo_map.get(name, True) else 1,
-                tags=json.dumps([pb.category, pb.complexity_level]),
-                downloads=0,
-                rating=0.0,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(row)
+            
+            existing = session.query(PlaybookStoreModel).filter_by(name=pb.name, is_builtin=1).first()
+            if existing:
+                # Update existing built-in to sync with local file changes
+                existing.version = pb.version
+                existing.description = pb.description
+                existing.when_to_use = pb.when_to_use
+                existing.category = pb.category
+                existing.complexity = pb.complexity_level
+                existing.system_prompt = pb.system_prompt
+                existing.search_strategy = json.dumps(pb.search_strategy.model_dump() if pb.search_strategy else {})
+                existing.output_schema = json.dumps(pb.output_schema)
+                existing.behavior = json.dumps(pb.behavioral_flags)
+                existing.examples = json.dumps(pb.examples)
+                existing.anti_patterns = json.dumps(pb.anti_patterns)
+                existing.quality_rubric = json.dumps(pb.quality_rubric)
+                existing.evaluation_rules = json.dumps(pb.evaluation_rules)
+                existing.templates = json.dumps(template_map.get(name, []))
+                existing.requires_repo = 0 if not requires_repo_map.get(name, True) else 1
+                existing.tags = json.dumps([pb.category, pb.complexity_level])
+                existing.updated_at = now
+                updated_count += 1
+            else:
+                row = PlaybookStoreModel(
+                    id=str(uuid.uuid4()),
+                    name=pb.name,
+                    version=pb.version,
+                    description=pb.description,
+                    when_to_use=pb.when_to_use,
+                    category=pb.category,
+                    complexity=pb.complexity_level,
+                    author="system",
+                    is_builtin=1,
+                    is_published=1,
+                    icon=icon,
+                    color=color,
+                    system_prompt=pb.system_prompt,
+                    search_strategy=json.dumps(pb.search_strategy.model_dump() if pb.search_strategy else {}),
+                    output_schema=json.dumps(pb.output_schema),
+                    behavior=json.dumps(pb.behavioral_flags),
+                    examples=json.dumps(pb.examples),
+                    anti_patterns=json.dumps(pb.anti_patterns),
+                    quality_rubric=json.dumps(pb.quality_rubric),
+                    evaluation_rules=json.dumps(pb.evaluation_rules),
+                    templates=json.dumps(template_map.get(name, [])),
+                    requires_repo=0 if not requires_repo_map.get(name, True) else 1,
+                    tags=json.dumps([pb.category, pb.complexity_level]),
+                    downloads=0,
+                    rating=0.0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                inserted_count += 1
 
         session.commit()
-        print(f"[PLAYBOOK_API] ✓ Seeded {len(registry.list_playbooks())} built-in playbooks")
+        print(f"[PLAYBOOK_API] ✓ Synced built-in playbooks (Updated: {updated_count}, Inserted: {inserted_count})")
     except Exception as e:
         session.rollback()
         print(f"[PLAYBOOK_API] Seed error: {e}")
