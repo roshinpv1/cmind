@@ -302,14 +302,14 @@ export default function ChatInterface() {
     const [repos, setRepos] = useState<Repo[]>([]);
     const [selectedRepo, setSelectedRepo] = useState("");
     const [goal, setGoal] = useState("");
-    const [selectedPlaybook, setSelectedPlaybook] = useState("auto");
+    const [selectedPlaybooks, setSelectedPlaybooks] = useState<string[]>(["auto"]);
     const [currentJobId, setCurrentJobId] = useState<string | null>(null);
     const [jobStatus, setJobStatus] = useState<AgentJob | null>(null);
     const [isPolling, setIsPolling] = useState(false);
     const [playbooks, setPlaybooks] = useState<PlaybookDef[]>([AUTO_PILOT]);
     const logsEndRef = useRef<HTMLDivElement>(null);
 
-    const activePlaybook = playbooks.find(p => p.id === selectedPlaybook) || playbooks[0];
+    const activePlaybook = playbooks.find(p => selectedPlaybooks.includes(p.id)) || playbooks[0];
 
     // Load playbooks from API
     useEffect(() => {
@@ -381,7 +381,7 @@ export default function ChatInterface() {
         setIsPolling(true);
 
         try {
-            const allowedPlaybooks = selectedPlaybook !== "auto" ? [selectedPlaybook] : null;
+            const allowedPlaybooks = selectedPlaybooks.includes("auto") ? null : selectedPlaybooks;
 
             const res = await fetch("/api/v1/agents/autonomous", {
                 method: "POST",
@@ -416,19 +416,35 @@ export default function ChatInterface() {
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                 {/* Strategy Tabs */}
                 <div className="flex items-center gap-1 px-4 py-2.5 overflow-x-auto border-b border-gray-50 bg-gray-50/50">
-                    {playbooks.map((pb: PlaybookDef) => (
-                        <button
-                            key={pb.id}
-                            onClick={() => setSelectedPlaybook(pb.id)}
-                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${selectedPlaybook === pb.id
-                                ? `${pb.bgColor} ${pb.color} shadow-sm ring-1 ring-black/5`
-                                : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-                                }`}
-                        >
-                            {pb.icon}
-                            {pb.label}
-                        </button>
-                    ))}
+                    {playbooks.map((pb: PlaybookDef) => {
+                        const isSelected = selectedPlaybooks.includes(pb.id);
+                        return (
+                            <button
+                                key={pb.id}
+                                onClick={() => {
+                                    if (pb.id === "auto") {
+                                        setSelectedPlaybooks(["auto"]);
+                                    } else {
+                                        setSelectedPlaybooks(prev => {
+                                            const withoutAuto = prev.filter(p => p !== "auto");
+                                            if (withoutAuto.includes(pb.id)) {
+                                                const next = withoutAuto.filter(p => p !== pb.id);
+                                                return next.length === 0 ? ["auto"] : next;
+                                            }
+                                            return [...withoutAuto, pb.id];
+                                        });
+                                    }
+                                }}
+                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${isSelected
+                                    ? `${pb.bgColor} ${pb.color} shadow-sm ring-1 ring-black/5`
+                                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
+                                    }`}
+                            >
+                                {pb.icon}
+                                {pb.label}
+                            </button>
+                        );
+                    })}
                 </div>
 
                 {/* Strategy Description + Repo Selector */}
