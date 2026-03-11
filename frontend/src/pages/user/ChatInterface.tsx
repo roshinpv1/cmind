@@ -307,9 +307,22 @@ export default function ChatInterface() {
     const [jobStatus, setJobStatus] = useState<AgentJob | null>(null);
     const [isPolling, setIsPolling] = useState(false);
     const [playbooks, setPlaybooks] = useState<PlaybookDef[]>([AUTO_PILOT]);
+    const [isPlaybookDropdownOpen, setIsPlaybookDropdownOpen] = useState(false);
     const logsEndRef = useRef<HTMLDivElement>(null);
+    const dropdownRef = useRef<HTMLDivElement>(null);
 
     const activePlaybook = playbooks.find(p => selectedPlaybooks.includes(p.id)) || playbooks[0];
+
+    // Close dropdown on outside click
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsPlaybookDropdownOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
 
     // Load playbooks from API
     useEffect(() => {
@@ -413,38 +426,79 @@ export default function ChatInterface() {
         <div className="max-w-7xl mx-auto h-[calc(100vh-5rem)] flex flex-col gap-4 p-4">
 
             {/* ─── Top Bar: Strategy + Repo ─── */}
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-                {/* Strategy Tabs */}
-                <div className="flex items-center gap-1 px-4 py-2.5 overflow-x-auto border-b border-gray-50 bg-gray-50/50">
-                    {playbooks.map((pb: PlaybookDef) => {
-                        const isSelected = selectedPlaybooks.includes(pb.id);
-                        return (
-                            <button
-                                key={pb.id}
-                                onClick={() => {
-                                    if (pb.id === "auto") {
-                                        setSelectedPlaybooks(["auto"]);
-                                    } else {
-                                        setSelectedPlaybooks(prev => {
-                                            const withoutAuto = prev.filter(p => p !== "auto");
-                                            if (withoutAuto.includes(pb.id)) {
-                                                const next = withoutAuto.filter(p => p !== pb.id);
-                                                return next.length === 0 ? ["auto"] : next;
-                                            }
-                                            return [...withoutAuto, pb.id];
-                                        });
-                                    }
-                                }}
-                                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${isSelected
-                                    ? `${pb.bgColor} ${pb.color} shadow-sm ring-1 ring-black/5`
-                                    : "text-gray-500 hover:text-gray-700 hover:bg-gray-100"
-                                    }`}
-                            >
-                                {pb.icon}
-                                {pb.label}
-                            </button>
-                        );
-                    })}
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-visible z-40 relative">
+                {/* Playbook Selection Dropdown */}
+                <div className="flex items-center gap-3 px-4 py-3 overflow-visible border-b border-gray-50 bg-gray-50/50" ref={dropdownRef}>
+                    <div className="relative">
+                        <button
+                            onClick={() => setIsPlaybookDropdownOpen(!isPlaybookDropdownOpen)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-semibold text-gray-700 shadow-sm hover:bg-gray-50 hover:border-violet-300 transition-colors"
+                        >
+                            <Brain className="w-4 h-4 text-violet-600" />
+                            {selectedPlaybooks.includes("auto")
+                                ? "Playbooks: Auto-Pilot"
+                                : `Playbooks: ${selectedPlaybooks.length} selected`}
+                            <ChevronRight className={`w-3.5 h-3.5 text-gray-400 transition-transform ${isPlaybookDropdownOpen ? "rotate-90" : ""}`} />
+                        </button>
+
+                        {isPlaybookDropdownOpen && (
+                            <div className="absolute top-full left-0 mt-1 w-64 bg-white rounded-xl shadow-lg border border-gray-100 py-1.5 z-50">
+                                <div className="px-3 py-1.5 text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                                    Available Playbooks
+                                </div>
+                                <div className="max-h-[300px] overflow-y-auto">
+                                    {playbooks.map((pb: PlaybookDef) => {
+                                        const isSelected = selectedPlaybooks.includes(pb.id);
+                                        return (
+                                            <button
+                                                key={pb.id}
+                                                onClick={() => {
+                                                    if (pb.id === "auto") {
+                                                        setSelectedPlaybooks(["auto"]);
+                                                    } else {
+                                                        setSelectedPlaybooks(prev => {
+                                                            const withoutAuto = prev.filter(p => p !== "auto");
+                                                            if (withoutAuto.includes(pb.id)) {
+                                                                const next = withoutAuto.filter(p => p !== pb.id);
+                                                                return next.length === 0 ? ["auto"] : next;
+                                                            }
+                                                            return [...withoutAuto, pb.id];
+                                                        });
+                                                    }
+                                                }}
+                                                className={`w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-50 transition-colors ${isSelected ? "bg-violet-50/50" : ""}`}
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <div className={`p-1 rounded ${isSelected ? pb.bgColor : "bg-gray-100"}`}>
+                                                        <div className={isSelected ? pb.color : "text-gray-500"}>
+                                                            {pb.icon}
+                                                        </div>
+                                                    </div>
+                                                    <span className={`text-xs ${isSelected ? "font-semibold text-violet-700" : "font-medium text-gray-700"}`}>
+                                                        {pb.label}
+                                                    </span>
+                                                </div>
+                                                <div className={`w-4 h-4 rounded-full border flex items-center justify-center transition-colors ${isSelected ? "bg-violet-600 border-violet-600" : "border-gray-300"}`}>
+                                                    {isSelected && <CheckCircle2 className="w-3 h-3 text-white" />}
+                                                </div>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                    {/* Visual pills for selected items */}
+                    {!selectedPlaybooks.includes("auto") && (
+                        <div className="flex items-center gap-1.5 flex-wrap flex-1">
+                            {playbooks.filter(p => selectedPlaybooks.includes(p.id)).map(pb => (
+                                <span key={pb.id} className={`flex items-center gap-1 px-2.5 py-1 rounded text-[10px] font-semibold ${pb.bgColor} ${pb.color}`}>
+                                    {pb.icon}
+                                    {pb.label}
+                                </span>
+                            ))}
+                        </div>
+                    )}
                 </div>
 
                 {/* Strategy Description + Repo Selector */}
