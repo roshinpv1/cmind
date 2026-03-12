@@ -1115,7 +1115,7 @@ class PlaybookExecutor:
                 "playbook_name": playbook_name,
                 "user_input": user_input,
                 "iteration": 0,
-                "max_iterations": 5,
+                "max_iterations": getattr(playbook, 'max_iterations', 10),
                 "outputs": {},
                 "error": None,
                 "logs": [f"Running playbook: {playbook_name} (ReAct mode)"]
