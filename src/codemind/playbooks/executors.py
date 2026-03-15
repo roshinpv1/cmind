@@ -19,6 +19,7 @@ import traceback
 import re as _re
 
 from .structured_schemas import get_schema_for_playbook, generate_example_json
+from .privacy import privacy_filter
 
 
 def _repair_json(raw: str) -> dict | None:
@@ -607,6 +608,9 @@ class PlaybookExecutor:
                         f.write(user_msg)
                     
                     # Dynamic output: measure actual prompt, give all remaining to response
+                    sys_prompt = privacy_filter.mask(sys_prompt)
+                    user_msg = privacy_filter.mask(user_msg)
+                    
                     actual_prompt_tokens = estimate_tokens(sys_prompt) + estimate_tokens(user_msg)
                     single_pass_output = max(
                         CONTEXT_WINDOW - actual_prompt_tokens,
@@ -699,6 +703,8 @@ class PlaybookExecutor:
                             "Include ALL relevant findings — do not summarize or abbreviate."
                         )
                         
+                        map_msg = privacy_filter.mask(map_msg)
+                        
                         batch_output = await self.llm.generate(
                             map_msg,
                             system_prompt=sys_prompt,
@@ -742,6 +748,7 @@ class PlaybookExecutor:
                         )
                     
                     reduce_msg = reduce_preamble + partial
+                    reduce_msg = privacy_filter.mask(reduce_msg)
                     
                     # Dynamic reduce output: all remaining tokens after prompt
                     actual_reduce_prompt = estimate_tokens(sys_prompt) + estimate_tokens(reduce_msg)
@@ -1111,7 +1118,7 @@ class PlaybookExecutor:
                 user_content += f"\n\nRepository Info: {json.dumps(context, default=str)}"
             
             initial_state: ReactExecutionState = {
-                "messages": [HumanMessage(content=user_content)],
+                "messages": [HumanMessage(content=privacy_filter.mask(user_content))],
                 "playbook_name": playbook_name,
                 "user_input": user_input,
                 "iteration": 0,
@@ -1219,7 +1226,7 @@ class PlaybookExecutor:
                 }
             
             # Build messages: system + conversation history
-            messages = [SystemMessage(content=system_prompt)]
+            messages = [SystemMessage(content=privacy_filter.mask(system_prompt))]
             messages.extend(state.get("messages", []))
             
             # Get LLM config for token budgets

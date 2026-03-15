@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Search, Loader2 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { authService } from "../../lib/auth";
 
 interface SearchResult {
     catalog_id: string;
@@ -32,7 +33,10 @@ export default function CatalogSearch() {
         try {
             const res = await fetch("/api/v1/catalogs/search", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 body: JSON.stringify({
                     query: query,
                     limit: limit,

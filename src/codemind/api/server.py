@@ -13,9 +13,12 @@ import logging
 import functools
 
 from datetime import UTC, datetime
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
+
+from codemind.api.auth import get_current_user, require_user, create_access_token, sync_user_to_db
 
 from codemind.jobs import JobManager, JobStatus
 from codemind.llm.factory import get_llm_client, get_chat_model
@@ -154,7 +157,6 @@ async def lifespan(app: FastAPI):
     )
     worker_thread = threading.Thread(target=worker.run, daemon=True, name="index-worker")
     worker_thread.start()
-    print("[SERVER] ✅ Index worker started as background thread")
 
     yield
 
@@ -213,8 +215,11 @@ async def debug_routes():
     return {"total": len(routes), "routes": sorted(routes, key=lambda r: r["path"])}
 
 @app.post("/api/v1/index", response_model=IndexResponse)
-async def index_repository(request: IndexRequest):
-    """Start indexing a repository (queues a job for the worker)."""
+async def index_repository_job(
+    request: IndexRequest,
+    user: dict = Depends(require_user)
+):
+    """Start an indexing job for a repository."""
     job_manager: JobManager = app.state.job_manager
     manifest: ManifestManager = app.state.manifest
 
@@ -257,13 +262,14 @@ async def index_repository(request: IndexRequest):
         branch=request.branch,
         repo_id=repo_id,
         org=request.org,
+        user_id=user["user_id"],
     )
 
     return IndexResponse(job_id=job_id, status="pending", repo_id=repo_id)
 
 
 @app.get("/api/v1/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: str):
+async def get_job_status(job_id: str, user: dict = Depends(require_user)):
     """Get job status."""
     job_manager: JobManager = app.state.job_manager
     manifest: ManifestManager = app.state.manifest
@@ -271,6 +277,10 @@ async def get_job_status(job_id: str):
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Ownership check (unless Admin)
+    if user["role"] != "admin" and job.user_id != user["user_id"]:
+        raise HTTPException(status_code=403, detail="Not authorized to view this job")
 
     # Try to get repo_id from manifest
     repo_id = None
@@ -480,11 +490,14 @@ class RepoListItem(BaseModel):
 
 
 @app.get("/api/v1/repos", response_model=list[RepoListItem])
-async def list_repos():
-    """List all indexed repositories."""
+async def list_repos(user: dict = Depends(require_user)):
+    """List indexed repositories visible to the user."""
     import json as _json
     manifest: ManifestManager = app.state.manifest
-    repos = manifest.list_repositories()
+    
+    # Filter by user unless admin
+    user_id = user["user_id"] if user["role"] != "admin" else None
+    repos = manifest.list_repositories(user_id=user_id)
     
     results = []
     seen_repo_ids = set()
@@ -842,7 +855,7 @@ class CatalogSearchRequest(BaseModel):
     query: str
     repo_id: str | None = None
     limit: int = 5
-    min_score: float = 0.8
+    min_score: float = 0.1
 
 
 @app.get("/api/v1/catalogs/list")
@@ -897,6 +910,7 @@ async def list_catalog_entries(status: str | None = None):
                 "search_count": entry.search_count or 0,
                 "view_count": entry.view_count or 0,
                 "popularity_points": entry.popularity_points or 0,
+                "likes_count": entry.likes_count or 0,
             })
     
     return results
@@ -1183,7 +1197,11 @@ async def regenerate_proposal_requirements(repo_id: str):
     }
 
 @app.get("/api/v1/catalogs/proposed")
-async def list_proposed_entries(org: str | None = None):
+@app.get("/api/v1/catalogs/propose")
+async def list_proposed_entries(
+    org: str | None = None,
+    user: dict = Depends(require_user)
+):
     """List all proposed catalog entries."""
     from codemind.storage.database import CatalogStore
     import json as _json
@@ -1194,6 +1212,10 @@ async def list_proposed_entries(org: str | None = None):
     results = []
     with db_inst.get_session() as session:
         query = session.query(CatalogStore).filter(CatalogStore.status.in_(["proposed", "qualified"]))
+        # Visibility filter for proposals: only show to creator (unless Admin)
+        if user["role"] != "admin":
+            query = query.filter(CatalogStore.created_by_user_id == user["user_id"])
+            
         if org:
             query = query.filter(CatalogStore.org == org)
         entries = query.order_by(CatalogStore.updated_at.desc()).all()
@@ -1223,7 +1245,7 @@ async def list_proposed_entries(org: str | None = None):
 
 
 @app.post("/api/v1/catalogs/match-gaps")
-async def match_gaps_to_proposed(request: Request):
+async def match_gaps_to_proposed(request: Request, user: dict = Depends(require_user)):
     """Check if any gaps match existing proposed/qualified catalog entries.
     Returns a mapping of gap_name -> proposed_entry."""
     body = await request.json()
@@ -1238,9 +1260,14 @@ async def match_gaps_to_proposed(request: Request):
     
     matches = {}
     with db.get_session() as session:
-        proposed = session.query(CatalogStore).filter(
+        query = session.query(CatalogStore).filter(
             CatalogStore.status.in_(["proposed", "qualified"])
-        ).all()
+        )
+        # Only match against user's own proposals or public ones (though proposals are usually private)
+        if user["role"] != "admin":
+            query = query.filter(CatalogStore.created_by_user_id == user["user_id"])
+            
+        proposed = query.all()
         
         for gap in gaps:
             if isinstance(gap, dict):
@@ -1443,11 +1470,76 @@ async def delete_catalog_entry(repo_id: str):
     
     return {"message": f"Catalog entry '{entry_name}' deleted successfully", "repo_id": repo_id}
 
+# ---------------------------------------------------------------------------
+# Authentication & SSO Endpoints
+# ---------------------------------------------------------------------------
+
+class SSOLoginRequest(BaseModel):
+    """Mock request for enterprise SSO login."""
+    id_token: str  # In reality, this would be an OIDC ID Token from the provider
+
+@app.post("/api/v1/auth/sso-login")
+async def sso_login(req: SSOLoginRequest):
+    """
+    Simulated Enterprise SSO Callback.
+    In a real app, this would validate the OIDC id_token against the provider (Azure/Okta).
+    """
+    # Simulate decoding a valid ID token from an enterprise provider
+    try:
+        # Static mock payload for demo/dev purposes
+        # In production: payload = oidc_provider.verify_id_token(req.id_token)
+        import json
+        payload = json.loads(req.id_token)
+        
+        db = app.state.job_manager.db
+        with db.get_session() as session:
+            user = sync_user_to_db(payload, session)
+            
+            # Create our own application JWT
+            access_token = create_access_token(
+                data={"sub": user.user_id, "email": user.email, "name": user.full_name, "role": user.role, "dept": user.department}
+            )
+            
+            return {
+                "access_token": access_token, 
+                "token_type": "bearer",
+                "user": {
+                    "user_id": user.user_id,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": user.role
+                }
+            }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid SSO token: {str(e)}")
+
+@app.get("/api/v1/auth/me")
+async def get_my_profile(user: dict = Depends(require_user)):
+    """Fetch current user profile from JWT."""
+    return user
+
 @app.post("/api/v1/catalogs")
-async def create_catalog_entry(request: CatalogCreateRequest):
+async def create_catalog_entry(
+    request: CatalogCreateRequest, 
+    user: dict = Depends(require_user)
+):
     """
     Execute a playbook on a repo and store the result in the catalog.
     """
+    from codemind.storage.database import CatalogStore
+    import json
+    
+    db = app.state.job_manager.db
+    with db.get_session() as session:
+        # Check if already exists
+        entry = session.query(CatalogStore).filter_by(repo_id=request.repo_id).first()
+        if entry:
+             # Update metadata
+             entry.created_by_user_id = user["user_id"]
+             entry.created_by = user["full_name"]
+             session.commit()
+    
+    # ... trigger the job ...
     import uuid
     import json
     from codemind.api.autonomous_agents import playbook_executor
@@ -1577,15 +1669,11 @@ async def create_catalog_entry(request: CatalogCreateRequest):
     }
 
 def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
-    """Transform internal catalog results into structured API response format.
-    
-    The internal format uses a flat text blob in 'chunk_text' for LLM consumption.
-    This function unpacks the metadata JSON and returns clean structured fields.
-    """
+    """Transform internal catalog results into structured API response format."""
     import json
     formatted = []
     for item in raw_results:
-        # Parse the metadata JSON string
+        # Parse the metadata
         metadata = {}
         meta_str = item.get("metadata", "{}")
         if isinstance(meta_str, str):
@@ -1602,7 +1690,7 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
             "score": round(item.get("score", 0.0), 4),
             "category": metadata.get("category", ""),
             "description": metadata.get("summary_high_level", ""),
-            "summary_detailed": "",  # Will be populated from content below
+            "summary_detailed": "", 
             "architecture": metadata.get("architecture", ""),
             "tech_stack": metadata.get("tech_stack", ""),
             "topics": metadata.get("topics", []),
@@ -1616,48 +1704,76 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
             "estimated_cost": metadata.get("estimated_cost", 0),
             "business_functionalities": metadata.get("business_functionalities", []),
             "status": item.get("status", metadata.get("status", "active")),
-            "source_gap": metadata.get("source_gap", "")
+            "source_gap": metadata.get("source_gap", ""),
+            # Defaults for shared metrics
+            "likes_count": 0,
+            "popularity_points": 0,
+            "search_count": 0,
+            "view_count": 0
         }
-        
-        # Coerce None values to safe defaults (metadata.get returns None when key exists but value is None)
-        for k in ["repo_id", "repo_name", "category", "description", "summary_detailed", 
-                   "architecture", "tech_stack", "specification", "repo_url", "branch", "org"]:
-            if entry[k] is None:
-                entry[k] = ""
-        for k in ["topics", "pros", "cons", "business_functionalities"]:
-            if entry[k] is None:
-                entry[k] = []
-        if entry["quality_score"] is None:
-            entry["quality_score"] = 0
-        if entry["estimated_cost"] is None:
-            entry["estimated_cost"] = 0
-        
+
         # Try to get full content from the chunk_text (which has the detailed summary)
         chunk_text = item.get("chunk_text", "")
         if chunk_text:
-            # Extract detailed summary from the text blob
-            for line in chunk_text.split("\n"):
-                if line.startswith("Detailed Summary: "):
-                    entry["summary_detailed"] = line.replace("Detailed Summary: ", "").strip()
-                elif line.startswith("Description: ") and not entry["description"]:
-                    entry["description"] = line.replace("Description: ", "").strip()
-        
+            lines = chunk_text.split("\n")
+            for i, line in enumerate(lines):
+                if "ARCHITECTURE & ANALYSIS:" in line and i + 1 < len(lines):
+                    entry["summary_detailed"] = lines[i+1].strip()
+                elif "DESCRIPTION:" in line and i + 1 < len(lines):
+                    entry["description"] = lines[i+1].strip()
+
+        # Coerce None values to safe defaults
+        for k, v in entry.items():
+            if v is None:
+                if isinstance(v, list): entry[k] = []
+                elif isinstance(v, int): entry[k] = 0
+                else: entry[k] = ""
+
         formatted.append(entry)
+
+    # Fetch latest shared metrics from SQLite (source of truth)
+    try:
+        from codemind.storage.database import CatalogStore
+        db = app.state.job_manager.db
+        repo_ids = [e["repo_id"] for e in formatted if e["repo_id"]]
+        if db and repo_ids:
+            with db.get_session() as session:
+                db_stats = session.query(
+                    CatalogStore.repo_id,
+                    CatalogStore.likes_count,
+                    CatalogStore.popularity_points,
+                    CatalogStore.search_count,
+                    CatalogStore.view_count
+                ).filter(CatalogStore.repo_id.in_(repo_ids)).all()
+                
+                stats_map = {
+                    s.repo_id: {
+                        "likes_count": s.likes_count or 0,
+                        "popularity_points": s.popularity_points or 0,
+                        "search_count": s.search_count or 0,
+                        "view_count": s.view_count or 0
+                    } for s in db_stats
+                }
+                
+                for e in formatted:
+                    stats = stats_map.get(e["repo_id"])
+                    if stats:
+                        e.update(stats)
+    except Exception as e:
+        print(f"[SERVER] Error fetching shared metrics: {e}")
+
     return formatted
 
 
 @app.get("/api/v1/catalogs/search")
-async def search_catalog_get(
-    query: str,
-    repo_id: str | None = None,
-    limit: int = 5,
-    min_score: float = 0.0
+async def search_catalog(
+    query: str, 
+    repo_id: str | None = None, 
+    limit: int = 20, 
+    min_score: float = 0.1,
+    user: dict = Depends(get_current_user)
 ):
-    """Semantic search over catalog entries (GET).
-    
-    Returns structured catalog entries with fields like repo_name, description,
-    architecture, tech_stack, topics, quality_score, pros, cons, etc.
-    """
+    """Semantic search over catalog entries."""
     from codemind.api.autonomous_agents import playbook_executor
     
     if not playbook_executor:
@@ -1667,7 +1783,8 @@ async def search_catalog_get(
         "query": query,
         "repo_id": repo_id,
         "limit": limit,
-        "min_score": min_score
+        "min_score": min_score,
+        "user_id": user["user_id"] if user else None
     }
     
     result = await playbook_executor.tools.search_catalogs(params)
@@ -1678,12 +1795,11 @@ async def search_catalog_get(
 
 
 @app.post("/api/v1/catalogs/search")
-async def search_catalog_post(request: CatalogSearchRequest):
-    """Semantic search over catalog entries (POST).
-    
-    Returns structured catalog entries with fields like repo_name, description,
-    architecture, tech_stack, topics, quality_score, pros, cons, etc.
-    """
+async def search_catalog_post(
+    request: CatalogSearchRequest,
+    user: dict = Depends(get_current_user)
+):
+    """Semantic search over catalog entries (POST version)."""
     from codemind.api.autonomous_agents import playbook_executor
     
     if not playbook_executor:
@@ -1693,7 +1809,8 @@ async def search_catalog_post(request: CatalogSearchRequest):
         "query": request.query,
         "repo_id": request.repo_id,
         "limit": request.limit,
-        "min_score": request.min_score
+        "min_score": request.min_score,
+        "user_id": user["user_id"] if user else None
     }
     
     result = await playbook_executor.tools.search_catalogs(params)
@@ -1703,10 +1820,12 @@ async def search_catalog_post(request: CatalogSearchRequest):
     return _format_catalog_results(result.get("results", []))
 
 
+
 @app.get("/api/v1/catalogs/trending")
 async def get_trending_catalogs(
     sort_by: str = "popularity_points",
     limit: int = 10,
+    user: dict = Depends(get_current_user)
 ):
     """Get trending / most popular catalog entries.
     
@@ -1729,9 +1848,15 @@ async def get_trending_catalogs(
     
     results = []
     with db.get_session() as session:
+        from sqlalchemy import or_
+        user_id = user["user_id"] if user else None
+        
         entries = (
             session.query(CatalogStore)
-            .filter(CatalogStore.status == "active")
+            .filter(or_(
+                CatalogStore.status == "active",
+                CatalogStore.created_by_user_id == user_id
+            ))
             .order_by(sort_col.desc())
             .limit(limit)
             .all()
@@ -1748,15 +1873,24 @@ async def get_trending_catalogs(
                 "repo_id": entry.repo_id,
                 "repo_name": entry.repo_name or entry.repo_id,
                 "org": entry.org or "",
+                "category": meta.get("category", ""),
                 "description": meta.get("summary_high_level", "")[:200],
+                "summary_detailed": meta.get("summary_detailed", "") or meta.get("description", ""),
+                "architecture": meta.get("architecture", ""),
                 "tech_stack": tech_stack,
-                "score": 1.0, # Trending/Popular view isn't semantic search, default to 100% or we could omit
+                "score": 1.0, # Trending/Popular view isn't semantic search, default to 100%
                 "quality_score": entry.quality_score or meta.get("quality_score", 0),
                 "search_count": entry.search_count or 0,
                 "view_count": entry.view_count or 0,
                 "popularity_points": entry.popularity_points or 0,
+                "likes_count": entry.likes_count or 0,
                 "repo_url": entry.git_url or meta.get("repo_url", ""),
                 "topics": meta.get("topics", []),
+                "specification": meta.get("specification", ""),
+                "pros": meta.get("pros", []),
+                "cons": meta.get("cons", []),
+                "estimated_cost": entry.estimated_cost if hasattr(entry, 'estimated_cost') else meta.get("estimated_cost", 0),
+                "business_functionalities": meta.get("business_functionalities", []),
             })
     
     return results
@@ -1815,6 +1949,41 @@ async def track_catalog_interaction(repo_id: str):
         session.commit()
     
     return {"status": "ok", "repo_id": repo_id}
+
+
+@app.post("/api/v1/catalogs/{repo_id}/like")
+async def like_catalog(repo_id: str, user: dict = Depends(require_user)):
+    """Record an explicit like on a catalog item.
+    
+    Increments likes_count by 1 and popularity_points by 10.
+    Frontend can call this when a user clicks the like button.
+    """
+    from codemind.storage.database import CatalogStore
+
+    db = app.state.job_manager.db
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+
+    with db.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Catalog entry not found")
+
+        entry.likes_count = (entry.likes_count or 0) + 1
+        entry.popularity_points = (entry.popularity_points or 0) + 10
+        # Audit: Track user who liked
+        entry.created_by_user_id = user["user_id"] 
+        session.commit()
+
+        likes = entry.likes_count or 0
+        popularity = entry.popularity_points or 0
+
+    return {
+        "status": "ok",
+        "repo_id": repo_id,
+        "likes_count": likes,
+        "popularity_points": popularity,
+    }
 
 
 # ---------------------------------------------------------------------------

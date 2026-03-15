@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { authService } from "../../lib/auth";
 
 interface Repo {
     id: string;
@@ -326,7 +327,7 @@ export default function ChatInterface() {
 
     // Load playbooks from API
     useEffect(() => {
-        fetch("/api/v1/playbooks")
+        fetch("/api/v1/playbooks", { headers: { ...authService.getAuthHeader() } })
             .then(r => r.json())
             .then((data: any[]) => {
                 const mapped = [AUTO_PILOT, ...data.map(apiToPlaybookDef)];
@@ -337,7 +338,7 @@ export default function ChatInterface() {
 
     // Load repositories
     useEffect(() => {
-        fetch("/api/v1/repos")
+        fetch("/api/v1/repos", { headers: { ...authService.getAuthHeader() } })
             .then(res => res.json())
             .then((data: any[]) => {
                 const mapped: Repo[] = data
@@ -362,14 +363,14 @@ export default function ChatInterface() {
         if (!currentJobId || !isPolling) return;
         const interval = setInterval(async () => {
             try {
-                const res = await fetch(`/api/v1/agents/autonomous/${currentJobId}/status`);
+                const res = await fetch(`/api/v1/agents/autonomous/${currentJobId}/status`, { headers: { ...authService.getAuthHeader() } });
                 if (res.ok) {
                     const data = await res.json();
                     setJobStatus(data);
                     if (data.status === "completed" || data.status === "failed") {
                         setIsPolling(false);
                         if (data.status === "completed") {
-                            const resultRes = await fetch(`/api/v1/agents/autonomous/${currentJobId}/result`);
+                            const resultRes = await fetch(`/api/v1/agents/autonomous/${currentJobId}/result`, { headers: { ...authService.getAuthHeader() } });
                             const resultData = await resultRes.json();
                             setJobStatus(prev => prev ? { ...prev, result: resultData } : resultData);
                         }
@@ -398,7 +399,10 @@ export default function ChatInterface() {
 
             const res = await fetch("/api/v1/agents/autonomous", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 body: JSON.stringify({
                     goal: goal,
                     repo_id: activePlaybook.requiresRepo ? selectedRepo : undefined,

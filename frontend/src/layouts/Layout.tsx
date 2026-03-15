@@ -8,9 +8,12 @@ import {
     BookOpen,
     Menu,
     X,
-    Puzzle
+    Puzzle,
+    LogOut,
+    User as UserIcon
 } from "lucide-react";
 import { useState } from "react";
+import { authService } from "../lib/auth";
 
 export function AdminLayout({ children }: { children: React.ReactNode }) {
     const location = useLocation();
@@ -39,8 +42,24 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                 "fixed inset-y-0 left-0 z-40 w-64 bg-white border-r border-gray-200 transform transition-transform duration-200 ease-in-out lg:translate-x-0 lg:static lg:block",
                 isOpen ? "translate-x-0" : "-translate-x-full"
             )}>
-                <div className="h-16 flex items-center px-6 border-b border-gray-200">
+                <div className="h-16 flex items-center px-6 border-b border-gray-200 justify-between">
                     <span className="text-xl font-bold text-primary">Discovery Agent</span>
+                </div>
+                {/* User Info */}
+                <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+                    <div className="flex items-center gap-3 px-2">
+                        <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
+                            <UserIcon className="w-4 h-4 text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                            <p className="text-xs font-bold text-gray-900 truncate">
+                                {authService.getUser()?.full_name || "User"}
+                            </p>
+                            <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">
+                                {authService.getUser()?.role || "Member"}
+                            </p>
+                        </div>
+                    </div>
                 </div>
                 <nav className="p-4 space-y-1">
                     {navigation.map((item) => {
@@ -69,6 +88,15 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                             <Search className="w-5 h-5 mr-3" />
                             Catalog Search
                         </Link>
+                    </div>
+                    <div className="pt-4 mt-auto border-t border-gray-200 p-4">
+                        <button
+                            onClick={() => authService.logout()}
+                            className="w-full flex items-center px-4 py-3 text-sm font-medium text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
+                        >
+                            <LogOut className="w-5 h-5 mr-3" />
+                            Sign Out
+                        </button>
                     </div>
                 </nav>
             </div>
@@ -102,9 +130,27 @@ export function UserLayout({ children }: { children: React.ReactNode }) {
                             </Link>
                         </nav>
                     </div>
-                    <Link to="/admin" className="text-sm text-gray-500 hover:text-gray-900">
-                        Admin Portal
-                    </Link>
+                    <div className="flex items-center gap-6">
+                        <Link to="/admin" className="text-sm font-bold text-gray-500 hover:text-gray-900">
+                            Admin Portal
+                        </Link>
+                        <div className="flex items-center gap-3 pl-6 border-l border-gray-100">
+                            <div className="hidden sm:block text-right">
+                                <p className="text-xs font-bold text-gray-900">
+                                    {authService.getUser()?.full_name}
+                                </p>
+                                <button 
+                                    onClick={() => authService.logout()}
+                                    className="text-[10px] font-black uppercase tracking-widest text-gray-400 hover:text-rose-500 transition-colors"
+                                >
+                                    Log Out
+                                </button>
+                            </div>
+                            <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center">
+                                <UserIcon className="w-4 h-4 text-primary" />
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </header>
             <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">

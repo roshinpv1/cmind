@@ -38,6 +38,7 @@ class IndexingState:
     commit_hash: str | None = None  # Git commit hash if using git detection
     metadata: dict = field(default_factory=dict)
     org: str | None = None  # Organization owning this component
+    user_id: str | None = None  # User who initiated the indexing
     repo_url: str | None = None  # Git remote URL (when cloned)
     cd_repo_url: str | None = None  # Companion CD repo URL (if found)
 
@@ -618,7 +619,8 @@ class IndexingWorkflow:
                     state.repo_path, 
                     repo_id=state.repo_id,
                     branch=branch,
-                    org=getattr(state, 'org', None)
+                    org=getattr(state, 'org', None),
+                    user_id=getattr(state, 'user_id', None)
                 )
                 repo = self.manifest.get_repository(state.repo_path)
                 print(f"[MANIFEST] ✅ Created repository entry for {state.repo_id}")

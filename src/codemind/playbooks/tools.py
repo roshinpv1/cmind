@@ -342,17 +342,17 @@ class PlaybookTools:
         for query in queries:
             q_emb = self.embedder.encode_query(query)
             # Use a high enough candidate limit to ensure we find diverse results
-            candidate_chunks = self.lance.search_catalogs(
+            candidate_chunks = await self.lance.search_catalogs(
                 q_emb, 
                 repo_id=repo_id, 
-                limit=limit * 5, 
+                limit=limit * 5,
                 columns=["repo_id", "repo_name", "chunk_text", "metadata"]
             )
             
             for item in candidate_chunks:
                 rid = item['repo_id']
-                score = max(0.0, 1.0 - item.get("_distance", 1.0))
-                
+                dist = item.get("_distance", 1.0)
+                score = max(0.0, 1.0 - dist)
                 if score < min_score:
                     continue
                     
@@ -380,15 +380,28 @@ class PlaybookTools:
             metadata = {}
             if self.db:
                 try:
-                    with self.db.get_session() as session:
-                        cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
-                        if cat_entry:
-                            full_content = cat_entry.content
-                            metadata = cat_entry.metadata_json or {}
-                        else:
-                            full_content = item.get("chunk_text") or item.get("result", "")
+                    from sqlalchemy import create_engine
+                    from sqlalchemy.orm import sessionmaker, Session
+                    
+                    # Handle both Database wrapper and raw Engine
+                    session = None
+                    if hasattr(self.db, "get_session"):
+                        session = self.db.get_session()
+                    elif hasattr(self.db, "connect"):
+                        # It's likely an Engine
+                        session = sessionmaker(bind=self.db)()
+                    
+                    if session:
+                        with session:
+                            cat_entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
+                            if cat_entry:
+                                full_content = cat_entry.content
+                                metadata = cat_entry.metadata_json or {}
+                            else:
+                                full_content = item.get("chunk_text") or item.get("result", "")
+                    else:
+                        full_content = item.get("chunk_text") or item.get("result", "")
                 except Exception as e:
-                    print(f"[ERROR] SQLite fetch failed for {rid}: {e}")
                     full_content = item.get("chunk_text") or item.get("result", "")
             else:
                 full_content = item.get("chunk_text") or item.get("result", "")
@@ -408,17 +421,8 @@ class PlaybookTools:
 
             # Identity & Metadata
             if metadata.get("repo_url"): parts.append(f"Repository URL: {metadata['repo_url']}")
-            if metadata.get("branch"): parts.append(f"Branch: {metadata['branch']}")
             if metadata.get("org"): parts.append(f"Organization: {metadata['org']}")
             if metadata.get("category"): parts.append(f"Category: {metadata['category']}")
-
-            # Summaries
-            desc = content_obj.get("description", "")
-            if desc: parts.append(f"Description: {desc}")
-            high_level = metadata.get("summary_high_level", "")
-            if high_level: parts.append(f"High-Level Summary: {high_level}")
-            detailed = content_obj.get("summary_detailed", "")
-            if detailed: parts.append(f"Detailed Summary: {detailed}")
 
             # Tech Detail
             if metadata.get("architecture"): parts.append(f"Architecture: {metadata['architecture']}")
@@ -535,18 +539,11 @@ class PlaybookTools:
         return results
 
     async def search_catalogs(self, params: dict) -> dict:
-        """Search across repository catalogs.
-        
-        Args:
-            params: {
-                query: str | list[str],
-                repo_id: str (optional),
-                limit: int (optional),
-                min_score: float (optional)
-            }
-        """
+        """Search across all catalogs with optional repository filter."""
+        print(f"[TOOLS] search_catalogs called with params: {params}")
         try:
-            query = params.get("query")
+            from ..storage.database import CatalogStore
+            query = params.get("query", "")
             if not query and "queries" in params:
                 query = params["queries"]
             

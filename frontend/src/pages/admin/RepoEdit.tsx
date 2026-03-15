@@ -14,6 +14,7 @@ import {
     CheckCircle,
     AlertCircle
 } from "lucide-react";
+import { authService } from "../../lib/auth";
 
 interface RepoDetail {
     repo_id: string;
@@ -67,7 +68,7 @@ export default function RepoEdit() {
 
     useEffect(() => {
         if (!repoId) return;
-        fetch(`/api/v1/repos/${encodeURIComponent(repoId)}`)
+        fetch(`/api/v1/repos/${encodeURIComponent(repoId)}`, { headers: { ...authService.getAuthHeader() } })
             .then((res) => {
                 if (!res.ok) throw new Error("Repository not found");
                 return res.json();
@@ -125,7 +126,10 @@ export default function RepoEdit() {
         try {
             const res = await fetch(`/api/v1/repos/${encodeURIComponent(repoId)}`, {
                 method: "PUT",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 body: JSON.stringify(payload),
             });
             if (!res.ok) {
@@ -135,7 +139,7 @@ export default function RepoEdit() {
             const result = await res.json();
             setSuccess(`Updated: ${result.fields_updated.join(", ")}`);
             // Refresh repo data
-            const refreshRes = await fetch(`/api/v1/repos/${encodeURIComponent(repoId)}`);
+            const refreshRes = await fetch(`/api/v1/repos/${encodeURIComponent(repoId)}`, { headers: { ...authService.getAuthHeader() } });
             if (refreshRes.ok) {
                 const freshData = await refreshRes.json();
                 setRepo(freshData);

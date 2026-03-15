@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
+import { authService } from "../../lib/auth";
 import {
     Search, ArrowRight, Brain, Code2, Compass,
     BarChart3, Wrench, Scale, Layers, Package, Sparkles,
     Plus, Copy, ChevronDown,
-    BookOpen, Zap
+    BookOpen, Zap, Globe, Lock, Trash
 } from "lucide-react";
 
 interface PlaybookItem {
@@ -25,6 +26,8 @@ interface PlaybookItem {
     anti_patterns: string[];
     quality_rubric: any[];
     evaluation_rules: string[];
+    likes_count: number;
+    author_user_id?: string;
 }
 
 const ICON_MAP: Record<string, any> = {
@@ -50,9 +53,13 @@ export default function PlaybookStore() {
     const [search, setSearch] = useState("");
     const [category, setCategory] = useState("All");
     const [expandedId, setExpandedId] = useState<string | null>(null);
+    const [likingId, setLikingId] = useState<string | null>(null);
+    const currentUser = authService.getUser();
 
     useEffect(() => {
-        fetch("/api/v1/playbooks")
+        fetch("/api/v1/playbooks", {
+            headers: { ...authService.getAuthHeader() }
+        })
             .then(r => r.json())
             .then(data => setPlaybooks(data))
             .catch(err => console.error("Failed to load playbooks", err));
@@ -67,7 +74,10 @@ export default function PlaybookStore() {
 
     const handleClone = async (id: string) => {
         try {
-            const res = await fetch(`/api/v1/playbooks/${id}/clone`, { method: "POST" });
+            const res = await fetch(`/api/v1/playbooks/${id}/clone`, { 
+                method: "POST",
+                headers: { ...authService.getAuthHeader() }
+            });
             if (res.ok) {
                 const cloned = await res.json();
                 setPlaybooks(prev => [...prev, cloned]);
@@ -75,6 +85,74 @@ export default function PlaybookStore() {
             }
         } catch (err) {
             console.error("Clone failed", err);
+        }
+    };
+
+    const handleLike = async (id: string) => {
+        try {
+            setLikingId(id);
+            const res = await fetch(`/api/v1/playbooks/${id}/like`, { 
+                method: "POST",
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (res.ok) {
+                const updated = await res.json();
+                setPlaybooks(prev =>
+                    prev.map(pb => (pb.id === id ? { ...pb, likes_count: updated.likes_count ?? pb.likes_count } : pb)),
+                );
+            }
+        } catch (err) {
+            console.error("Like failed", err);
+        } finally {
+            setLikingId(prev => (prev === id ? null : prev));
+        }
+    };
+
+    const handleTogglePublish = async (id: string, currentlyPublished: boolean) => {
+        try {
+            const endpoint = currentlyPublished ? "unpublish" : "publish";
+            const res = await fetch(`/api/v1/playbooks/${id}/${endpoint}`, {
+                method: "POST",
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (res.ok) {
+                setPlaybooks(prev =>
+                    prev.map(pb => (pb.id === id ? { ...pb, is_published: !currentlyPublished } : pb)),
+                );
+            }
+        } catch (err) {
+            console.error("Toggle publish failed", err);
+        }
+    };
+
+    const handleBulkDelete = async () => {
+        if (!confirm("Are you sure you want to delete all your custom playbooks? This cannot be undone.")) return;
+        try {
+            const res = await fetch("/api/v1/playbooks/custom/all", {
+                method: "DELETE",
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (res.ok) {
+                alert("Custom playbooks deleted.");
+                setPlaybooks(prev => prev.filter(pb => pb.is_builtin || pb.author_user_id !== currentUser?.user_id));
+            }
+        } catch (err) {
+            console.error("Bulk delete failed", err);
+        }
+    };
+
+    const handleDelete = async (id: string, name: string) => {
+        if (!confirm(`Are you sure you want to delete playbook "${name}"?`)) return;
+        try {
+            const res = await fetch(`/api/v1/playbooks/${id}`, {
+                method: "DELETE",
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (res.ok) {
+                setPlaybooks(prev => prev.filter(pb => pb.id !== id));
+            }
+        } catch (err) {
+            console.error("Delete failed", err);
         }
     };
 
@@ -99,13 +177,22 @@ export default function PlaybookStore() {
                         </h1>
                         <p className="text-sm text-gray-500 mt-1">Discover, install, and manage AI analysis playbooks</p>
                     </div>
-                    <a
-                        href="/admin/playbook-composer"
-                        className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-xl text-sm font-semibold hover:from-violet-700 hover:to-indigo-700 transition-all shadow-lg shadow-violet-200"
-                    >
-                        <Plus className="w-4 h-4" />
-                        Create Playbook
-                    </a>
+                    <div className="flex items-center gap-3">
+                        <button
+                            onClick={handleBulkDelete}
+                            className="flex items-center gap-2 px-4 py-2.5 bg-red-50 text-red-600 rounded-xl text-sm font-semibold hover:bg-red-100 transition-all border border-red-100"
+                        >
+                            <Trash className="w-4 h-4" />
+                            Delete All Custom
+                        </button>
+                        <a
+                            href="/admin/playbook-composer"
+                            className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-xl text-sm font-semibold hover:from-violet-700 hover:to-indigo-700 transition-all shadow-lg shadow-violet-200"
+                        >
+                            <Plus className="w-4 h-4" />
+                            Create Playbook
+                        </a>
+                    </div>
                 </div>
             </div>
 
@@ -180,9 +267,20 @@ export default function PlaybookStore() {
                                                 {pb.is_builtin && (
                                                     <span className="text-[10px] font-medium text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded-md">Built-in</span>
                                                 )}
+                                                {!pb.is_builtin && pb.is_published && (
+                                                    <span className="text-[10px] font-medium text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md flex items-center gap-0.5"><Globe className="w-3 h-3"/> Public</span>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
+                                    <button
+                                        onClick={() => handleLike(pb.id)}
+                                        disabled={likingId === pb.id}
+                                        className="ml-auto inline-flex items-center gap-1 px-2 py-1 rounded-full text-[10px] font-semibold text-rose-600 bg-rose-50 hover:bg-rose-100 border border-rose-100 disabled:opacity-50"
+                                    >
+                                        <span className="w-3 h-3 rounded-full bg-rose-500" />
+                                        {pb.likes_count ?? 0} Likes
+                                    </button>
                                 </div>
 
                                 <p className="text-xs text-gray-600 leading-relaxed line-clamp-2 mb-3">{pb.description}</p>
@@ -261,6 +359,28 @@ export default function PlaybookStore() {
                                     <Copy className="w-3 h-3" />
                                     Clone & Edit
                                 </button>
+                                {!pb.is_builtin && currentUser?.user_id === pb.author_user_id && (
+                                    <>
+                                        <button
+                                            onClick={() => handleTogglePublish(pb.id, pb.is_published)}
+                                            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
+                                                pb.is_published
+                                                    ? "text-emerald-600 hover:bg-emerald-50"
+                                                    : "text-gray-500 hover:text-indigo-600 hover:bg-indigo-50"
+                                            }`}
+                                        >
+                                            {pb.is_published ? <Globe className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                                            {pb.is_published ? "Public" : "Private"}
+                                        </button>
+                                        <button
+                                            onClick={() => handleDelete(pb.id, pb.name)}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                                            title="Delete Playbook"
+                                        >
+                                            <Trash className="w-3 h-3" />
+                                        </button>
+                                    </>
+                                )}
                                 <a
                                     href={`/reasoning-lab?playbook=${pb.name}`}
                                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-gray-600 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-all ml-auto"

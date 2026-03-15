@@ -20,6 +20,8 @@ import {
     Eye,
     Pencil,
 } from "lucide-react";
+import { authService } from "../../lib/auth";
+
 
 const API = "";
 
@@ -113,7 +115,9 @@ export default function ProposalCreate() {
         setError("");
         try {
             // GET /catalogs/{repo_id} returns a list of content entries
-            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(existingRepoId)}`);
+            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(existingRepoId)}`, {
+                headers: { ...authService.getAuthHeader() }
+            });
             if (!res.ok) throw new Error("Failed to load proposal");
             const entries = await res.json();
 
@@ -128,7 +132,9 @@ export default function ProposalCreate() {
             setOrg(data.org || "");
 
             // Requirements are stored on the CatalogStore row, fetch from list endpoint
-            const listRes = await fetch(`/api/v1/catalogs/list`);
+            const listRes = await fetch(`/api/v1/catalogs/list`, {
+                headers: { ...authService.getAuthHeader() }
+            });
             if (listRes.ok) {
                 const allEntries = await listRes.json();
                 const match = allEntries.find((e: any) => e.repo_id === existingRepoId);
@@ -162,6 +168,7 @@ export default function ProposalCreate() {
             if (savedId && saved) {
                 const res = await fetch(`${API}/api/v1/catalogs/${encodeURIComponent(savedId)}/regenerate`, {
                     method: "POST",
+                    headers: { ...authService.getAuthHeader() }
                 });
                 if (!res.ok) {
                     const err = await res.json().catch(() => ({ detail: "Regeneration failed" }));
@@ -179,14 +186,17 @@ export default function ProposalCreate() {
                 architecture_layer: layer || architectureLayer,
                 user_query: userQuery,
                 org: org || undefined,
-                created_by: createdBy || undefined,
+                created_by: createdBy || undefined, // Still allow manual override if needed
             };
             if (buildCostUsd) body.build_cost_usd = parseInt(buildCostUsd);
             if (devWeeks) body.dev_weeks = parseInt(devWeeks);
 
             const res = await fetch(`${API}/api/v1/catalogs/propose`, {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 body: JSON.stringify(body),
             });
 
@@ -218,7 +228,10 @@ export default function ProposalCreate() {
                 `${API}/api/v1/catalogs/${encodeURIComponent(savedId)}/requirements`,
                 {
                     method: "PUT",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { 
+                        "Content-Type": "application/json",
+                        ...authService.getAuthHeader()
+                    },
                     body: JSON.stringify({ requirements }),
                 }
             );
@@ -348,7 +361,10 @@ export default function ProposalCreate() {
                                         `/api/v1/catalogs/${encodeURIComponent(existingRepoId)}/contribute`,
                                         {
                                             method: "POST",
-                                            headers: { "Content-Type": "application/json" },
+                                            headers: { 
+                                                "Content-Type": "application/json",
+                                                ...authService.getAuthHeader()
+                                            },
                                             body: JSON.stringify({ uid: contribUid.trim(), org: contribOrg.trim() }),
                                         }
                                     );
@@ -753,7 +769,10 @@ export default function ProposalCreate() {
                                                 `/api/v1/catalogs/${encodeURIComponent(savedId)}/promote`,
                                                 {
                                                     method: "PUT",
-                                                    headers: { "Content-Type": "application/json" },
+                                                    headers: { 
+                                                        "Content-Type": "application/json",
+                                                        ...authService.getAuthHeader()
+                                                    },
                                                     body: JSON.stringify({ git_url: gitUrl, git_branch: gitBranch || "main" }),
                                                 }
                                             );

@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { GitGraph, Loader2 } from "lucide-react";
+import { authService } from "../../lib/auth";
+
 
 export default function RepoIndex() {
     const [url, setUrl] = useState("");
@@ -21,7 +23,10 @@ export default function RepoIndex() {
         try {
             const res = await fetch("/api/v1/index", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 // Adjust payload based on actual API
                 body: JSON.stringify({ repo_url: url, branch: branch || "main", org: org || undefined })
             });

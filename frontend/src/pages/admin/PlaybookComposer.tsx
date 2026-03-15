@@ -5,6 +5,7 @@ import {
     Brain, Code2, Compass, BarChart3, Wrench, Scale, Layers,
     Package, Search, Sparkles, BookOpen, Zap, Globe, Check
 } from "lucide-react";
+import { authService } from "../../lib/auth";
 
 const ICON_LIST = [
     { name: "Brain", comp: Brain },
@@ -81,7 +82,9 @@ export default function PlaybookComposer() {
     // Load existing playbook for editing
     useEffect(() => {
         if (id) {
-            fetch(`/api/v1/playbooks/${id}`)
+            fetch(`/api/v1/playbooks/${id}`, {
+                headers: { ...authService.getAuthHeader() }
+            })
                 .then(r => r.json())
                 .then(data => {
                     setForm({
@@ -122,13 +125,19 @@ export default function PlaybookComposer() {
             if (isEditing && playbookId) {
                 res = await fetch(`/api/v1/playbooks/${playbookId}`, {
                     method: "PUT",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { 
+                        "Content-Type": "application/json",
+                        ...authService.getAuthHeader()
+                    },
                     body: JSON.stringify(body),
                 });
             } else {
                 res = await fetch("/api/v1/playbooks", {
                     method: "POST",
-                    headers: { "Content-Type": "application/json" },
+                    headers: { 
+                        "Content-Type": "application/json",
+                        ...authService.getAuthHeader()
+                    },
                     body: JSON.stringify(body),
                 });
             }

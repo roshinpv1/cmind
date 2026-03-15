@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { authService } from "../../lib/auth";
 import {
     Search,
     Loader2,
@@ -29,6 +30,7 @@ import {
     GitFork,
     MessageSquareCode,
     Scale,
+    Heart,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -56,6 +58,7 @@ interface CatalogResult {
     search_count?: number;
     view_count?: number;
     popularity_points?: number;
+    likes_count?: number;
 }
 
 function QualityBadge({ score }: { score: number }) {
@@ -130,6 +133,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         search_count: rawItem.search_count ?? 0,
         view_count: rawItem.view_count ?? 0,
         popularity_points: rawItem.popularity_points ?? 0,
+        likes_count: rawItem.likes_count ?? 0,
     };
 
     // Parse specification JSON
@@ -148,6 +152,32 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         // Not valid JSON string. If it's actually an array passed as string, we try an eval fallback or just leave null
         specObj = null;
     }
+
+    const [isLiked, setIsLiked] = useState(false);
+    const [localLikes, setLocalLikes] = useState(item.likes_count);
+
+    const handleLike = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (isLiked) return; // Prevent double likes in session
+
+        setIsLiked(true);
+        setLocalLikes(prev => prev + 1);
+
+        try {
+            const res = await fetch(`/api/v1/catalogs/${item.repo_id}/like`, { 
+                method: "POST",
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (!res.ok) {
+                // Rollback on failure
+                setIsLiked(false);
+                setLocalLikes(prev => prev - 1);
+            }
+        } catch (err) {
+            setIsLiked(false);
+            setLocalLikes(prev => prev - 1);
+        }
+    };
 
     return (
         <div className="group bg-white rounded-2xl border border-gray-100 shadow-sm hover:shadow-xl hover:border-gray-200 transition-all duration-300 overflow-hidden">
@@ -205,9 +235,25 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                             )}
                         </div>
                     </div>
-                    <div className="shrink-0 text-right space-y-2">
-                        <QualityBadge score={item.quality_score} />
-                        <ScoreBar score={item.score} />
+                    <div className="shrink-0 text-right space-y-2 flex flex-col items-end">
+                        <div className="flex items-center gap-2">
+                            <button
+                                onClick={handleLike}
+                                className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold transition-all border ${
+                                    isLiked 
+                                    ? "bg-rose-500 text-white border-rose-600 scale-105" 
+                                    : "bg-white text-gray-500 border-gray-100 hover:border-rose-200 hover:text-rose-500 hover:bg-rose-50/30"
+                                }`}
+                            >
+                                <Heart className={`h-3.5 w-3.5 ${isLiked ? "fill-current" : ""}`} />
+                                {localLikes > 0 && <span>{localLikes}</span>}
+                                {isLiked ? "Liked" : "Like"}
+                            </button>
+                            <QualityBadge score={item.quality_score} />
+                        </div>
+                        <div className="w-32">
+                            <ScoreBar score={item.score} />
+                        </div>
                         {(rawItem.status === "proposed" || rawItem.status === "qualified") && (
                             <div className="flex flex-col items-end gap-1.5 mt-2">
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-700 ring-1 ring-amber-200">
@@ -468,7 +514,7 @@ export default function AgentCatalogSearch() {
 
     // Filters
     const [limit, setLimit] = useState(5);
-    const [minScore, setMinScore] = useState(0.5);
+    const [minScore, setMinScore] = useState(0.3);
 
     // Discovery Polling Hook
     useEffect(() => {
@@ -601,7 +647,9 @@ export default function AgentCatalogSearch() {
         setQuery(sortBy === "popularity_points" ? "🔥 Trending Components" : "⭐ Most Popular Components");
 
         try {
-            const res = await fetch(`/api/v1/catalogs/trending?sort_by=${sortBy}&limit=${limit}`);
+            const res = await fetch(`/api/v1/catalogs/trending?sort_by=${sortBy}&limit=${limit}`, {
+                headers: { ...authService.getAuthHeader() }
+            });
             if (res.ok) {
                 const data = await res.json();
                 setResults(data);
@@ -663,7 +711,10 @@ export default function AgentCatalogSearch() {
         try {
             const res = await fetch("/api/v1/catalogs/search", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: {
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader()
+                },
                 body: JSON.stringify({
                     query,
                     limit,

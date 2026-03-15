@@ -41,6 +41,7 @@ class JobModel(Base):
     status: Mapped[JobStatus] = mapped_column(
         SQLEnum(JobStatus), default=JobStatus.PENDING, index=True
     )
+    user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True) # Initiator
     stage: Mapped[str | None] = mapped_column(String, nullable=True)
     progress: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -59,6 +60,7 @@ class JobManager:
         self.db = get_database(db_path)
         self.db.init_db()
 
+
     def create_job(
         self,
         repo_path: str,
@@ -66,6 +68,7 @@ class JobManager:
         branch: str = "main",
         repo_id: str | None = None,
         org: str | None = None,
+        user_id: str | None = None,
     ) -> str:
         """Create new indexing job."""
         job_id = str(uuid.uuid4())
@@ -78,6 +81,7 @@ class JobManager:
                 branch=branch,
                 repo_id=repo_id,
                 org=org,
+                user_id=user_id,
                 status=JobStatus.PENDING,
             )
             session.add(job)
@@ -122,7 +126,10 @@ class JobManager:
             session.commit()
 
     def list_jobs(
-        self, repo_path: str | None = None, status: JobStatus | None = None
+        self, 
+        repo_path: str | None = None, 
+        status: JobStatus | None = None,
+        user_id: str | None = None
     ) -> list[JobModel]:
         """List jobs with optional filters."""
         with self.db.get_session() as session:
@@ -132,5 +139,7 @@ class JobManager:
                 query = query.filter_by(repo_path=repo_path)
             if status:
                 query = query.filter_by(status=status)
+            if user_id:
+                query = query.filter_by(user_id=user_id)
 
             return query.order_by(JobModel.created_at.desc()).all()

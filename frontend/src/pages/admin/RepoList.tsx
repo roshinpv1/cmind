@@ -7,6 +7,8 @@ import {
     Plus,
     Pencil
 } from "lucide-react";
+import { authService } from "../../lib/auth";
+
 
 interface Repo {
     repo_id: string;
@@ -27,7 +29,9 @@ export default function RepoList() {
     const [error, setError] = useState("");
 
     useEffect(() => {
-        fetch("/api/v1/repos")
+        fetch("/api/v1/repos", {
+            headers: { ...authService.getAuthHeader() }
+        })
             .then((res) => {
                 if (!res.ok) throw new Error("Failed to fetch repos");
                 return res.json();

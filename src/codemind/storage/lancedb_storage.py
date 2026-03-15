@@ -353,13 +353,13 @@ class LanceDBStorage:
             
         return query.limit(100).to_list()
 
-    def search_catalogs(
-        self,
-        query_embedding: list[float],
+    async def search_catalogs(
+        self, 
+        query_embedding: list[float], 
+        table_name: str = "catalogs", 
         repo_id: str | list[str] | None = None,
-        limit: int = 10,
-        table_name: str = "catalogs",
-        columns: list[str] | None = None,
+        limit: int = 5,
+        columns: list[str] | None = None
     ) -> list[dict]:
         """
         Semantic search over catalog entries with 50% similarity threshold.
@@ -385,17 +385,23 @@ class LanceDBStorage:
                 query = query.where(f"repo_id = '{repo_id}'")
             
         if columns:
-            query = query.select(columns)
+            # Always ensure _distance is included if we are projecting
+            proj_columns = columns.copy()
+            if "_distance" not in proj_columns:
+                proj_columns.append("_distance")
+            query = query.select(proj_columns)
 
         # Post-filter for 50% similarity (distance < 0.5 for cosine)
-        results = query.to_list()
-        
-        # Log results for debugging
-        print(f"[LANCEDB] search_catalogs found {len(results)} raw results")
-        for r in results[:3]:
-            print(f"  - dist: {r.get('_distance')}, repo: {r.get('repo_id')}")
+        try:
+            results = query.to_list()
+        except Exception as e:
+            # Handle potential schema or dimension mismatch
+            print(f"[LANCE] Search failed: {e}")
+            return []
             
         return results
+
+
 
     def close(self):
         """Close database connection."""

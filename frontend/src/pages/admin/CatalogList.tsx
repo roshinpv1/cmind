@@ -15,6 +15,8 @@ import {
     Trash2,
     Loader2,
 } from "lucide-react";
+import { authService } from "../../lib/auth";
+
 
 interface CatalogEntry {
     repo_id: string;
@@ -95,7 +97,9 @@ export default function CatalogList() {
     const fetchCatalogs = (status?: string) => {
         setLoading(true);
         const url = status ? `/api/v1/catalogs/list?status=${status}` : `/api/v1/catalogs/list`;
-        fetch(url)
+        fetch(url, {
+            headers: { ...authService.getAuthHeader() }
+        })
             .then((res) => {
                 if (!res.ok) throw new Error("Failed to fetch catalogs");
                 return res.json();
@@ -123,7 +127,10 @@ export default function CatalogList() {
     const deleteCatalog = async (repoId: string, name: string) => {
         if (!window.confirm(`Are you sure you want to delete "${name}"? This cannot be undone.`)) return;
         try {
-            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(repoId)}`, { method: "DELETE" });
+            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(repoId)}`, { 
+                method: "DELETE",
+                headers: { ...authService.getAuthHeader() }
+            });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: "Delete failed" }));
                 alert(err.detail || "Delete failed");
@@ -142,6 +149,7 @@ export default function CatalogList() {
         try {
             const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(repoId)}/regenerate`, {
                 method: "POST",
+                headers: { ...authService.getAuthHeader() }
             });
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: "Regeneration failed" }));

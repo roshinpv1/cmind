@@ -11,28 +11,40 @@ import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
 import PlaybookStore from "./pages/user/PlaybookStore";
 import PlaybookComposer from "./pages/admin/PlaybookComposer";
+import Login from "./pages/Login";
+import { authService } from "./lib/auth";
+
+const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
+  if (!authService.isAuthenticated()) {
+    return <Navigate to="/login" replace />;
+  }
+  return <>{children}</>;
+};
 
 function App() {
   return (
     <Router>
       <Routes>
+        {/* Auth Route */}
+        <Route path="/login" element={<Login />} />
+
         {/* Main Entry Points */}
         <Route path="/" element={<Navigate to="/catalog-search" replace />} />
-        <Route path="/catalog-search" element={<UserLayout><AgentCatalogSearch /></UserLayout>} />
-        <Route path="/reasoning-lab" element={<UserLayout><ChatInterface /></UserLayout>} />
-        <Route path="/playbook-store" element={<UserLayout><PlaybookStore /></UserLayout>} />
+        <Route path="/catalog-search" element={<ProtectedRoute><UserLayout><AgentCatalogSearch /></UserLayout></ProtectedRoute>} />
+        <Route path="/reasoning-lab" element={<ProtectedRoute><UserLayout><ChatInterface /></UserLayout></ProtectedRoute>} />
+        <Route path="/playbook-store" element={<ProtectedRoute><UserLayout><PlaybookStore /></UserLayout></ProtectedRoute>} />
 
         {/* Admin Routes */}
-        <Route path="/admin" element={<AdminLayout><Dashboard /></AdminLayout>} />
-        <Route path="/admin/dashboard" element={<AdminLayout><Dashboard /></AdminLayout>} />
-        <Route path="/admin/repos" element={<AdminLayout><RepoList /></AdminLayout>} />
-        <Route path="/admin/repos/:repoId/edit" element={<AdminLayout><RepoEdit /></AdminLayout>} />
-        <Route path="/admin/index" element={<AdminLayout><RepoIndex /></AdminLayout>} />
-        <Route path="/admin/catalogs" element={<AdminLayout><CatalogList /></AdminLayout>} />
-        <Route path="/admin/catalog/create" element={<AdminLayout><CatalogCreate /></AdminLayout>} />
-        <Route path="/admin/catalogs/propose" element={<AdminLayout><ProposalCreate /></AdminLayout>} />
-        <Route path="/admin/playbook-composer" element={<AdminLayout><PlaybookComposer /></AdminLayout>} />
-        <Route path="/admin/playbook-composer/:id" element={<AdminLayout><PlaybookComposer /></AdminLayout>} />
+        <Route path="/admin" element={<ProtectedRoute><AdminLayout><Dashboard /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/dashboard" element={<ProtectedRoute><AdminLayout><Dashboard /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/repos" element={<ProtectedRoute><AdminLayout><RepoList /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/repos/:repoId/edit" element={<ProtectedRoute><AdminLayout><RepoEdit /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/index" element={<ProtectedRoute><AdminLayout><RepoIndex /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/catalogs" element={<ProtectedRoute><AdminLayout><CatalogList /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/catalog/create" element={<ProtectedRoute><AdminLayout><CatalogCreate /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/catalogs/propose" element={<ProtectedRoute><AdminLayout><ProposalCreate /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/playbook-composer" element={<ProtectedRoute><AdminLayout><PlaybookComposer /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/playbook-composer/:id" element={<ProtectedRoute><AdminLayout><PlaybookComposer /></AdminLayout></ProtectedRoute>} />
 
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { Play, Loader2 } from "lucide-react";
+import { authService } from "../../lib/auth";
 
 interface Repo {
     repo_id: string;
@@ -18,7 +19,7 @@ export default function CatalogCreate() {
     
 
     useEffect(() => {
-        fetch("/api/v1/repos")
+        fetch("/api/v1/repos", { headers: { ...authService.getAuthHeader() } })
             .then((res) => res.json())
             .then((data) => {
                 setRepos(data);
@@ -36,7 +37,10 @@ export default function CatalogCreate() {
         try {
             const res = await fetch("/api/v1/catalogs", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { 
+                    "Content-Type": "application/json",
+                    ...authService.getAuthHeader() 
+                },
                 body: JSON.stringify({
                     repo_id: selectedRepo,
                     playbook_name: playbook,

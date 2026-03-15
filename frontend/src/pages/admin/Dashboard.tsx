@@ -21,6 +21,7 @@ import {
     FolderOpen,
 } from "lucide-react";
 import { Link } from "react-router-dom";
+import { authService } from "../../lib/auth";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface DashboardStats {
@@ -174,8 +175,8 @@ export default function Dashboard() {
         try {
             // Fetch real data from APIs
             const [catalogRes, repoRes] = await Promise.all([
-                fetch("/api/v1/catalogs/list"),
-                fetch("/api/v1/repos"),
+                fetch("/api/v1/catalogs/list", { headers: { ...authService.getAuthHeader() } }),
+                fetch("/api/v1/repos", { headers: { ...authService.getAuthHeader() } }),
             ]);
 
             const catalogs = catalogRes.ok ? await catalogRes.json() : [];

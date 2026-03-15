@@ -23,6 +23,7 @@ class RepositoryManifest(Base):
     repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
     branch: Mapped[str | None] = mapped_column(String, nullable=True)  # New field for uniqueness
     org: Mapped[str | None] = mapped_column(String, nullable=True)  # Organization owning this component
+    created_by_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True) # Linked to UserRecord.user_id
     language: Mapped[str | None] = mapped_column(String, nullable=True)  # Primary language
     framework: Mapped[str | None] = mapped_column(String, nullable=True)  # Primary framework
     size: Mapped[int] = mapped_column(Integer, default=0)  # Total repo size in bytes

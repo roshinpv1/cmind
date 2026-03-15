@@ -64,6 +64,20 @@ class CommitSnapshot(Base):
     indexed_at: Mapped[str] = mapped_column(String)  # ISO datetime
     files_changed: Mapped[int] = mapped_column(Integer, default=0)
 
+class UserRecord(Base):
+    """Enterprise user profile (synced from SSO)."""
+
+    __tablename__ = "users"
+
+    user_id: Mapped[str] = mapped_column(String, primary_key=True)  # SSO sub/id
+    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    full_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    role: Mapped[str] = mapped_column(String, default="user")  # admin|user
+    department: Mapped[str | None] = mapped_column(String, nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    last_login: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[int] = mapped_column(Integer, default=0)
+
 class CatalogStore(Base):
     """
     Store full catalog entries for retrieval.
@@ -81,7 +95,8 @@ class CatalogStore(Base):
     
     # Proposal lifecycle
     status: Mapped[str] = mapped_column(String, default="active", index=True)  # proposed | qualified | active
-    created_by: Mapped[str | None] = mapped_column(String, nullable=True)  # Who created the proposal
+    created_by: Mapped[str | None] = mapped_column(String, nullable=True)  # Legacy string name
+    created_by_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True) # Linked to UserRecord.user_id
     source_gap: Mapped[str | None] = mapped_column(String, nullable=True)  # Original gap name from analysis
     source_analysis_id: Mapped[str | None] = mapped_column(String, nullable=True)  # Links to analysis job
     requirements: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # Auto-generated requirements
@@ -93,6 +108,7 @@ class CatalogStore(Base):
     search_count: Mapped[int] = mapped_column(Integer, default=0)  # Times appeared in search results
     view_count: Mapped[int] = mapped_column(Integer, default=0)  # Times explicitly viewed/clicked
     popularity_points: Mapped[int] = mapped_column(Integer, default=0)  # Weighted score: search=+1, view=+5
+    likes_count: Mapped[int] = mapped_column(Integer, default=0)
     
     created_at: Mapped[int] = mapped_column(Integer, default=0) # timestamp
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
@@ -112,7 +128,8 @@ class PlaybookStoreModel(Base):
     when_to_use: Mapped[str | None] = mapped_column(Text, nullable=True)
     category: Mapped[str] = mapped_column(String, default="analysis")  # analysis|generation|evaluation|exploration
     complexity: Mapped[str] = mapped_column(String, default="medium")
-    author: Mapped[str] = mapped_column(String, default="user")
+    author: Mapped[str] = mapped_column(String, default="user") # Legacy string name
+    author_user_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True) # Linked to UserRecord.user_id
     is_builtin: Mapped[int] = mapped_column(Integer, default=0)
     is_published: Mapped[int] = mapped_column(Integer, default=0)
     tags: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON array
@@ -134,6 +151,7 @@ class PlaybookStoreModel(Base):
     # Marketplace metadata
     downloads: Mapped[int] = mapped_column(Integer, default=0)
     rating: Mapped[float | None] = mapped_column(nullable=True)
+    likes_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
 

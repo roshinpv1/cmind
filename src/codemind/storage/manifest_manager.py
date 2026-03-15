@@ -105,6 +105,7 @@ class ManifestManager:
         org: str | None = None,
         embedding_model: str = "all-MiniLM-L6-v2",
         embedding_version: int = 1,
+        user_id: str | None = None,
     ) -> RepositoryManifest:
         """
         Create new repository manifest.
@@ -136,21 +137,28 @@ class ManifestManager:
                 last_indexed_at=datetime.now(UTC),
                 embedding_model=embedding_model,
                 embedding_version=embedding_version,
+                created_by_user_id=user_id,
             )
             session.add(repo)
             session.commit()
             session.refresh(repo)
             return repo
 
-    def list_repositories(self) -> list[RepositoryManifest]:
+    def list_repositories(self, user_id: str | None = None) -> list[RepositoryManifest]:
         """
-        List all repository manifests.
+        List repository manifests.
+        
+        Args:
+            user_id: Optional user ID to filter by. If None, returns all (for Admin).
 
         Returns:
             List of repository manifests
         """
         with self.db.get_session() as session:
-            return session.query(RepositoryManifest).all()
+            query = session.query(RepositoryManifest)
+            if user_id:
+                query = query.filter(RepositoryManifest.created_by_user_id == user_id)
+            return query.all()
 
     def update_repository(
         self,
