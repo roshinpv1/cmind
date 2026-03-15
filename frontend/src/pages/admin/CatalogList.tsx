@@ -156,13 +156,6 @@ export default function CatalogList() {
         }
     };
 
-    const counts = {
-        "": entries.length,
-        active: entries.filter(e => (e.status || "active") === "active").length,
-        proposed: entries.filter(e => e.status === "proposed").length,
-        qualified: entries.filter(e => e.status === "qualified").length,
-    };
-
     if (error) return <div className="p-8 text-center text-red-500">Error: {error}</div>;
 
     return (
@@ -195,7 +188,6 @@ export default function CatalogList() {
             <div className="flex items-center gap-1 bg-gray-50 p-1 rounded-xl border border-gray-100">
                 {STATUS_TABS.map((tab) => {
                     const isActive = statusFilter === tab.key;
-                    const count = !statusFilter ? undefined : (counts as any)[tab.key];
                     return (
                         <button
                             key={tab.key}

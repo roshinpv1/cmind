@@ -53,6 +53,9 @@ interface CatalogResult {
     reasoning?: string; // Appears during Discovery Agent mode
     status?: string;
     source_gap?: string;
+    search_count?: number;
+    view_count?: number;
+    popularity_points?: number;
 }
 
 function QualityBadge({ score }: { score: number }) {
@@ -124,6 +127,9 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         estimated_cost: rawItem.estimated_cost ?? 0,
         business_functionalities: (rawItem.business_functionalities ?? []).map(safeStr),
         reasoning: safeStr(rawItem.reasoning ?? ""),
+        search_count: rawItem.search_count ?? 0,
+        view_count: rawItem.view_count ?? 0,
+        popularity_points: rawItem.popularity_points ?? 0,
     };
 
     // Parse specification JSON
@@ -162,6 +168,18 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                                 >
                                     <ExternalLink className="h-4 w-4" />
                                 </a>
+                            )}
+                            {item.popularity_points > 0 && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-orange-50 text-orange-700 ring-1 ring-orange-200 shadow-sm shrink-0 ml-2">
+                                    <Sparkles className="h-3 w-3" />
+                                    {item.popularity_points} Popularity
+                                </span>
+                            )}
+                            {item.search_count > 0 && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-50 text-blue-700 ring-1 ring-blue-200 shadow-sm shrink-0 ml-1">
+                                    <Search className="h-3 w-3" />
+                                    {item.search_count} Searches
+                                </span>
                             )}
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
@@ -568,6 +586,37 @@ export default function AgentCatalogSearch() {
         }
     };
 
+    const handleTrendingSearch = async (sortBy: "popularity_points" | "search_count") => {
+        setLoading(true);
+        setHasSearched(true);
+        setResults([]);
+        setDiscoveryJobId(null);
+        setDiscoveryLogs([]);
+        setDiscoveryResult(null);
+        setBvrJobId(null);
+        setBvrLoading(false);
+        setBvrLogs([]);
+        setBvrResult(null);
+        setSearchMode("catalog");
+        setQuery(sortBy === "popularity_points" ? "🔥 Trending Components" : "⭐ Most Popular Components");
+
+        try {
+            const res = await fetch(`/api/v1/catalogs/trending?sort_by=${sortBy}&limit=${limit}`);
+            if (res.ok) {
+                const data = await res.json();
+                setResults(data);
+            } else {
+                console.error("Trending fetch failed:", res.statusText);
+                setResults([]);
+            }
+        } catch (err) {
+            console.error("Trending fetch error:", err);
+            setResults([]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!query.trim()) return;
@@ -787,24 +836,53 @@ export default function AgentCatalogSearch() {
                         </div>
                     )}
 
-                    {/* Quick Suggestions */}
+                    {/* Quick Suggestions & Trending */}
                     {!hasSearched && (
-                        <div className="flex items-center justify-center gap-2 flex-wrap pt-2">
-                            <span className="text-xs text-gray-400 mr-1">Try:</span>
-                            {[
-                                "agent orchestration framework",
-                                "vector search implementation",
-                                "REST API gateway",
-                                "ML pipeline",
-                            ].map((suggestion) => (
+                        <div className="flex flex-col items-center justify-center pt-6 space-y-4">
+                            <div className="flex items-center gap-4">
                                 <button
-                                    key={suggestion}
-                                    onClick={() => handleSuggestion(suggestion)}
-                                    className="px-3 py-1.5 text-xs font-medium text-gray-500 bg-white border border-gray-100 rounded-full hover:border-primary/30 hover:text-primary transition-all shadow-sm"
+                                    onClick={() => handleTrendingSearch("popularity_points")}
+                                    className="group flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-orange-50 to-red-50 border border-orange-200 rounded-xl hover:border-orange-400 hover:shadow-md transition-all shrink-0"
                                 >
-                                    {suggestion}
+                                    <div className="p-1.5 bg-white rounded-lg group-hover:scale-110 transition-transform shadow-sm">
+                                        <Sparkles className="h-4 w-4 text-orange-500" />
+                                    </div>
+                                    <div className="text-left">
+                                        <div className="text-xs font-black uppercase tracking-wider text-orange-600">Trending Now</div>
+                                        <div className="text-[10px] text-orange-400 font-medium leading-tight">Fastest growing</div>
+                                    </div>
                                 </button>
-                            ))}
+                                <button
+                                    onClick={() => handleTrendingSearch("search_count")}
+                                    className="group flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl hover:border-blue-400 hover:shadow-md transition-all shrink-0"
+                                >
+                                    <div className="p-1.5 bg-white rounded-lg group-hover:scale-110 transition-transform shadow-sm">
+                                        <Star className="h-4 w-4 text-blue-500" />
+                                    </div>
+                                    <div className="text-left">
+                                        <div className="text-xs font-black uppercase tracking-wider text-blue-600">Most Popular</div>
+                                        <div className="text-[10px] text-blue-400 font-medium leading-tight">Most frequently searched</div>
+                                    </div>
+                                </button>
+                            </div>
+
+                            <div className="flex items-center justify-center gap-2 flex-wrap pt-2">
+                                <span className="text-xs text-gray-400 mr-1">Or try:</span>
+                                {[
+                                    "agent orchestration framework",
+                                    "vector search implementation",
+                                    "REST API gateway",
+                                    "ML pipeline",
+                                ].map((suggestion) => (
+                                    <button
+                                        key={suggestion}
+                                        onClick={() => handleSuggestion(suggestion)}
+                                        className="px-3 py-1.5 text-xs font-medium text-gray-500 bg-white border border-gray-100 rounded-full hover:border-primary/30 hover:text-primary transition-all shadow-sm"
+                                    >
+                                        {suggestion}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
                     )}
                 </div>

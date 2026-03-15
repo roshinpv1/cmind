@@ -1750,7 +1750,8 @@ async def get_trending_catalogs(
                 "org": entry.org or "",
                 "description": meta.get("summary_high_level", "")[:200],
                 "tech_stack": tech_stack,
-                "quality_score": entry.quality_score or 0,
+                "score": 1.0, # Trending/Popular view isn't semantic search, default to 100% or we could omit
+                "quality_score": entry.quality_score or meta.get("quality_score", 0),
                 "search_count": entry.search_count or 0,
                 "view_count": entry.view_count or 0,
                 "popularity_points": entry.popularity_points or 0,

@@ -31,7 +31,7 @@ export default function RepoIndex() {
                 throw new Error(data.detail || "Indexing failed");
             }
 
-            const data = await res.json();
+            await res.json();
             // Usually returns job_id. We can redirect to list or show success.
             navigate("/admin/repos");
         } catch (err: any) {

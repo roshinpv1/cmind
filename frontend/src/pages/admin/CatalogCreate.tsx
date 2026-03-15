@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Play, Loader2, FileCode } from "lucide-react";
+
+import { Play, Loader2 } from "lucide-react";
 
 interface Repo {
     repo_id: string;
@@ -15,7 +15,7 @@ export default function CatalogCreate() {
     const [loading, setLoading] = useState(false);
     const [fetchingRepos, setFetchingRepos] = useState(true);
     const [error, setError] = useState("");
-    const navigate = useNavigate();
+    
 
     useEffect(() => {
         fetch("/api/v1/repos")
