@@ -14,6 +14,7 @@ from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column
 
 from codemind.storage.database import Base, Database
+from codemind.storage.db_factory import get_database
 
 
 class JobStatus(str, Enum):
@@ -55,7 +56,7 @@ class JobManager:
 
     def __init__(self, db_path: str = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")):
         """Initialize job manager."""
-        self.db = Database(db_path)
+        self.db = get_database(db_path)
         self.db.init_db()
 
     def create_job(

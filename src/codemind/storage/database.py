@@ -89,6 +89,11 @@ class CatalogStore(Base):
     git_branch: Mapped[str | None] = mapped_column(String, nullable=True)  # Git branch
     quality_score: Mapped[int] = mapped_column(Integer, default=0)  # 0-100, computed during qualification
     
+    # Popularity tracking
+    search_count: Mapped[int] = mapped_column(Integer, default=0)  # Times appeared in search results
+    view_count: Mapped[int] = mapped_column(Integer, default=0)  # Times explicitly viewed/clicked
+    popularity_points: Mapped[int] = mapped_column(Integer, default=0)  # Weighted score: search=+1, view=+5
+    
     created_at: Mapped[int] = mapped_column(Integer, default=0) # timestamp
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
 

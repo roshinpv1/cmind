@@ -894,6 +894,9 @@ async def list_catalog_entries(status: str | None = None):
                 "created_at": entry.created_at,
                 "updated_at": entry.updated_at,
                 "contributors": meta.get("contributors", []),
+                "search_count": entry.search_count or 0,
+                "view_count": entry.view_count or 0,
+                "popularity_points": entry.popularity_points or 0,
             })
     
     return results
@@ -1700,6 +1703,64 @@ async def search_catalog_post(request: CatalogSearchRequest):
     return _format_catalog_results(result.get("results", []))
 
 
+@app.get("/api/v1/catalogs/trending")
+async def get_trending_catalogs(
+    sort_by: str = "popularity_points",
+    limit: int = 10,
+):
+    """Get trending / most popular catalog entries.
+    
+    Args:
+        sort_by: One of 'popularity_points', 'search_count', 'view_count'.
+        limit: Max items to return (default 10).
+    """
+    from codemind.storage.database import CatalogStore
+    import json as _json
+    
+    ALLOWED_SORT = {"popularity_points", "search_count", "view_count"}
+    if sort_by not in ALLOWED_SORT:
+        raise HTTPException(status_code=400, detail=f"sort_by must be one of {ALLOWED_SORT}")
+    
+    db = app.state.job_manager.db
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    sort_col = getattr(CatalogStore, sort_by)
+    
+    results = []
+    with db.get_session() as session:
+        entries = (
+            session.query(CatalogStore)
+            .filter(CatalogStore.status == "active")
+            .order_by(sort_col.desc())
+            .limit(limit)
+            .all()
+        )
+        for entry in entries:
+            meta = {}
+            if entry.metadata_json:
+                meta = entry.metadata_json if isinstance(entry.metadata_json, dict) else _json.loads(entry.metadata_json)
+            
+            raw_ts = meta.get("tech_stack", "")
+            tech_stack = ", ".join(raw_ts) if isinstance(raw_ts, list) else str(raw_ts) if raw_ts else ""
+            
+            results.append({
+                "repo_id": entry.repo_id,
+                "repo_name": entry.repo_name or entry.repo_id,
+                "org": entry.org or "",
+                "description": meta.get("summary_high_level", "")[:200],
+                "tech_stack": tech_stack,
+                "quality_score": entry.quality_score or 0,
+                "search_count": entry.search_count or 0,
+                "view_count": entry.view_count or 0,
+                "popularity_points": entry.popularity_points or 0,
+                "repo_url": entry.git_url or meta.get("repo_url", ""),
+                "topics": meta.get("topics", []),
+            })
+    
+    return results
+
+
 @app.get("/api/v1/catalogs/{repo_id}")
 async def get_catalog_entries(repo_id: str):
     """Get catalog entries for a repository."""
@@ -1728,6 +1789,31 @@ async def get_catalog_entries(repo_id: str):
     except Exception as e:
         print(f"[ERROR] Failed to get catalog entries: {e}")
         return []
+
+
+@app.post("/api/v1/catalogs/{repo_id}/interact")
+async def track_catalog_interaction(repo_id: str):
+    """Record a user view/click on a catalog item.
+    
+    Increments view_count by 1 and popularity_points by 5.
+    Used by the frontend when a user opens a catalog detail view.
+    """
+    from codemind.storage.database import CatalogStore
+    
+    db = app.state.job_manager.db
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    with db.get_session() as session:
+        entry = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
+        if not entry:
+            raise HTTPException(status_code=404, detail="Catalog entry not found")
+        
+        entry.view_count = (entry.view_count or 0) + 1
+        entry.popularity_points = (entry.popularity_points or 0) + 5
+        session.commit()
+    
+    return {"status": "ok", "repo_id": repo_id}
 
 
 # ---------------------------------------------------------------------------

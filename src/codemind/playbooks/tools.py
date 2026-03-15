@@ -514,6 +514,23 @@ class PlaybookTools:
         # Re-sort by score and limit
         results.sort(key=lambda x: x["score"], reverse=True)
         results = results[:limit]
+
+        # ── Track search popularity ──────────────────────────────────
+        # Increment search_count (+1) and popularity_points (+1) for
+        # every catalog item that appeared in these results.
+        if self.db and results:
+            try:
+                returned_rids = [r["repo_id"] for r in results if r.get("repo_id")]
+                with self.db.get_session() as session:
+                    for rid in returned_rids:
+                        entry = session.query(CatalogStore).filter_by(repo_id=rid).first()
+                        if entry:
+                            entry.search_count = (entry.search_count or 0) + 1
+                            entry.popularity_points = (entry.popularity_points or 0) + 1
+                    session.commit()
+            except Exception as e:
+                print(f"[TOOLS] Popularity tracking failed (non-fatal): {e}")
+        # ─────────────────────────────────────────────────────────────
             
         return results
 

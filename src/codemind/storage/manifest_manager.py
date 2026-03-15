@@ -12,6 +12,7 @@ from pathlib import Path
 from codemind.indexer.models import FileChange
 
 from .database import CommitSnapshot, Database, IndexRun, SymbolRecord
+from .db_factory import get_database
 from .models import RepositoryManifest
 
 
@@ -25,7 +26,7 @@ class ManifestManager:
         Args:
             db_path: Path to SQLite database
         """
-        self.db = Database(db_path)
+        self.db = get_database(db_path)
         self.db.init_db()
 
     def _compute_repo_id(self, repo_path: str) -> str:

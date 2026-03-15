@@ -16,6 +16,8 @@ import uuid
 import asyncio
 from datetime import datetime
 
+from ..storage.db_factory import get_database
+
 router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
 
 # Global state
@@ -92,7 +94,7 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
         manifest_mgr: ManifestManager instance (optional)
         db: Database instance (optional)
     """
-    global planner_agent, playbook_executor, playbook_selector, manifest_manager
+    global planner_agent, playbook_executor, playbook_selector, manifest_manager, _db
     
     from ..playbooks import PlaybookRegistry, PlaybookExecutor, PlaybookTools
     from ..agents import PlannerAgent, PlaybookSelector
@@ -100,6 +102,7 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
     print("[AUTONOMOUS] Initializing autonomous agent system...")
     
     manifest_manager = manifest_mgr
+    _db = db if db else get_database()
 
     # Initialize playbook system
     registry = PlaybookRegistry()
