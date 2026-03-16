@@ -157,7 +157,11 @@ class ManifestManager:
         with self.db.get_session() as session:
             query = session.query(RepositoryManifest)
             if user_id:
-                query = query.filter(RepositoryManifest.created_by_user_id == user_id)
+                # Include repos created by this user OR old repos with no creator
+                query = query.filter(
+                    (RepositoryManifest.created_by_user_id == user_id) |
+                    (RepositoryManifest.created_by_user_id.is_(None))
+                )
             return query.all()
 
     def update_repository(

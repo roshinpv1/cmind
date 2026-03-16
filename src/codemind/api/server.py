@@ -1263,9 +1263,12 @@ async def match_gaps_to_proposed(request: Request, user: dict = Depends(require_
         query = session.query(CatalogStore).filter(
             CatalogStore.status.in_(["proposed", "qualified"])
         )
-        # Only match against user's own proposals or public ones (though proposals are usually private)
+        # Regular users can only see their own proposals, but everyone can see qualified ones
         if user["role"] != "admin":
-            query = query.filter(CatalogStore.created_by_user_id == user["user_id"])
+            query = query.filter(
+                (CatalogStore.created_by_user_id == user["user_id"]) |
+                (CatalogStore.status == "qualified")
+            )
             
         proposed = query.all()
         
