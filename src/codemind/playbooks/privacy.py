@@ -28,11 +28,10 @@ class RedactionService:
             ("AWS_KEY", r"(?i)(AKIA[0-9A-Z]{16})|(aws_access_key_id\s*=\s*[a-zA-Z0-9]{20})"),
             ("JWT_TOKEN", r"eyJ[a-zA-Z0-9_=]+\.[a-zA-Z0-9_=]+\.[a-zA-Z0-9_\-\+=]+"),
             ("PRIVATE_KEY", r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"),
-
-            # --- Connection String Passwords ---
-            # Matches password in JDBC/URI style: ://user:PASSWORD@host
-            ("CONNECTION_PASSWORD", r"(?<=:\/\/[^:]{1,40}:)[^@\s]{4,}(?=@)"),
         ])
+
+        # Connection string password: ://user:PASSWORD@host  (uses capturing group, not lookbehind)
+        self.conn_password_regex = r"(:\/\/[^:]+:)([^@\s]{4,})(@)"
         
         # API Keys require slightly more nuanced matching to keep context
         self.api_key_regex = r"(?i)((api_key|apikey|secret_key|secretkey|access_token|bearer_token|auth_token|private_key|client_secret)\s*[:=]\s*['\"]?)([a-zA-Z0-9_\-\.]{16,})(['\"]?)"
@@ -46,11 +45,19 @@ class RedactionService:
             
         masked_text = text
         
-        # 1. Standard pattern matching (order matters — IP before Email)
+        # 1. Connection string password matching FIRST (before email regex can consume them)
+        # e.g., 'postgres://user:secret@host' -> 'postgres://user:<CONNECTION_PASSWORD>@host'
+        masked_text = re.sub(
+            self.conn_password_regex,
+            r"\1<CONNECTION_PASSWORD>\3",
+            masked_text
+        )
+        
+        # 2. Standard pattern matching (order matters — IP before Email)
         for entity_name, pattern in self.patterns.items():
             masked_text = re.sub(pattern, f"<{entity_name}>", masked_text)
             
-        # 2. Specific key matching (preserves the prefix so context is retained)
+        # 3. Specific key matching (preserves the prefix so context is retained)
         # e.g., 'api_key: abcdef...' -> 'api_key: <API_KEY>'
         masked_text = re.sub(
             self.api_key_regex, 
