@@ -29,6 +29,8 @@ class RedactionService:
         # Each tuple: (entity_tag, compiled_regex)
         self._patterns = [
             # ── Network & Infrastructure ──────────────────────────
+            # International phone BEFORE IP to prevent "+1.555.123.4567" being consumed as IP
+            ("PHONE_INTL",   re.compile(r"\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b")),
             ("IP_ADDRESS",   re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")),
             ("MAC_ADDRESS",  re.compile(r"\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")),
 
@@ -36,13 +38,9 @@ class RedactionService:
             # Email: TLD must be ≥2 alpha chars so "user@10.0.1.5" is NOT matched
             ("EMAIL_ADDRESS", re.compile(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})*")),
             ("PHONE_NUMBER", re.compile(r"\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")),
-            # International phone: +<country><number>
-            ("PHONE_INTL",   re.compile(r"\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{3,4}[-.\s]?\d{3,4}\b")),
             ("SSN",          re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
             ("CREDIT_CARD",  re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b")),
-            # US Passport: 9-digit number
-            ("PASSPORT_US",  re.compile(r"\b[A-Z]?\d{8,9}\b")),
-            # Date of Birth patterns: MM/DD/YYYY, DD-MM-YYYY, YYYY-MM-DD
+            # Date of Birth patterns: MM/DD/YYYY, DD-MM-YYYY  
             ("DATE_OF_BIRTH", re.compile(r"\b(?:0[1-9]|1[0-2])[/\-](?:0[1-9]|[12]\d|3[01])[/\-](?:19|20)\d{2}\b")),
             # IBAN (International Bank Account Number)
             ("IBAN",         re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}(?:[A-Z0-9]{0,18})\b")),
@@ -51,7 +49,7 @@ class RedactionService:
             ("AWS_ACCESS_KEY", re.compile(r"(?:^|[^A-Z0-9])(?P<key>AKIA[0-9A-Z]{16})(?:$|[^A-Z0-9])")),
             ("AWS_SECRET_KEY", re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*['\"]?([a-zA-Z0-9/+=]{40})['\"]?")),
             ("AWS_KEY_CONFIG", re.compile(r"(?i)aws_access_key_id\s*=\s*[a-zA-Z0-9]{20}")),
-            # Azure Storage Key (Base64, 88 chars)
+            # Azure Storage Key (Base64, 88 chars) — allows = or : with optional space
             ("AZURE_STORAGE_KEY", re.compile(r"(?i)(AccountKey|storage[_-]?key)\s*[=:]\s*['\"]?([a-zA-Z0-9+/]{86}==)['\"]?")),
             # Azure Connection String
             ("AZURE_CONN_STR", re.compile(r"(?i)DefaultEndpointsProtocol=https?;AccountName=[^;]+;AccountKey=[a-zA-Z0-9+/]{86}==(?:;[^;]*)?")),
@@ -66,8 +64,8 @@ class RedactionService:
             ("GITLAB_TOKEN", re.compile(r"\b(glpat-[a-zA-Z0-9\-]{20,})\b")),
             # Slack tokens
             ("SLACK_TOKEN",  re.compile(r"\b(xox[bpras]-[a-zA-Z0-9\-]{10,})\b")),
-            # Slack Webhook URL
-            ("SLACK_WEBHOOK", re.compile(r"https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+")),
+            # Slack Webhook URL — must match BEFORE generic token patterns can consume segments
+            ("SLACK_WEBHOOK", re.compile(r"https://hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[a-zA-Z0-9]+")),
             # Stripe API Key
             ("STRIPE_KEY",   re.compile(r"\b(sk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,}|sk_test_[a-zA-Z0-9]{24,}|pk_test_[a-zA-Z0-9]{24,})\b")),
             # Twilio API Key

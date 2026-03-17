@@ -22,6 +22,52 @@ from .structured_schemas import get_schema_for_playbook, generate_example_json
 from .privacy import privacy_filter
 
 
+def _log_llm_error(error: Exception, *, playbook_name: str = "",
+                   messages: list = None, system_prompt: str = "",
+                   context: str = ""):
+    """Dump failed LLM request to /tmp/llm_errors/ for debugging.
+    
+    Creates a timestamped JSON file with the full request context:
+    error, playbook, messages, system prompt, and any extra context.
+    """
+    import os, datetime
+    error_dir = "/tmp/llm_errors"
+    os.makedirs(error_dir, exist_ok=True)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename = f"{error_dir}/llm_error_{ts}.json"
+
+    # Serialize messages safely
+    serialized_msgs = []
+    if messages:
+        for msg in messages:
+            try:
+                serialized_msgs.append({
+                    "type": type(msg).__name__,
+                    "content": str(msg.content)[:5000]  # Cap at 5K chars per message
+                })
+            except Exception:
+                serialized_msgs.append({"type": "unknown", "content": "<serialization error>"})
+
+    payload = {
+        "timestamp": ts,
+        "error_type": type(error).__name__,
+        "error_message": str(error),
+        "playbook": playbook_name,
+        "context": context,
+        "system_prompt": system_prompt[:3000] if system_prompt else "",
+        "messages": serialized_msgs,
+        "traceback": traceback.format_exc()
+    }
+
+    try:
+        with open(filename, "w") as f:
+            json.dump(payload, f, indent=2, default=str)
+        print(f"[EXECUTOR] ⚠️ LLM error logged to {filename}")
+    except Exception as log_err:
+        print(f"[EXECUTOR] ⚠️ Failed to log LLM error: {log_err}")
+
+
 def _repair_json(raw: str) -> dict | None:
     """Attempt to fix common LLM JSON errors and return parsed dict, or None."""
     s = raw
@@ -770,6 +816,9 @@ class PlaybookExecutor:
                     )
             
             except Exception as e:
+                _log_llm_error(e, playbook_name=playbook.name,
+                               system_prompt=sys_prompt,
+                               context=f"Linear mode, chunks={len(state.get('code_chunks', []))}")
                 state["error"] = f"LLM generation error: {str(e)}"
                 state["llm_output"] = ""
                 state["logs"].append(f"Generation failed: {str(e)}")
@@ -1161,6 +1210,8 @@ class PlaybookExecutor:
         except Exception as e:
             print(f"[EXECUTOR] ReAct execution failed: {e}", flush=True)
             traceback.print_exc()
+            _log_llm_error(e, playbook_name=playbook_name,
+                           context="ReAct outer execution")
             return {
                 "success": False,
                 "outputs": {},
@@ -1258,6 +1309,10 @@ class PlaybookExecutor:
             
             except Exception as e:
                 print(f"[EXECUTOR] ReAct agent error: {e}")
+                _log_llm_error(e, playbook_name=state.get("playbook_name", ""),
+                               messages=messages,
+                               system_prompt=system_prompt,
+                               context=f"ReAct agent_node, iteration={iteration+1}")
                 return {
                     "messages": [AIMessage(content=f"Error during analysis: {e}. Providing best answer from data gathered.")],
                     "iteration": iteration + 1,
