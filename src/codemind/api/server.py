@@ -495,9 +495,8 @@ async def list_repos(user: dict = Depends(require_user)):
     import json as _json
     manifest: ManifestManager = app.state.manifest
     
-    # Filter by user unless admin
-    user_id = user["user_id"] if user["role"] != "admin" else None
-    repos = manifest.list_repositories(user_id=user_id)
+    # All indexed repos are visible to all authenticated users (enterprise discovery model)
+    repos = manifest.list_repositories()
     
     results = []
     seen_repo_ids = set()
