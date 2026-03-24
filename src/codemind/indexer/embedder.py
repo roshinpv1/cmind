@@ -107,7 +107,7 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.token_manager = ApigeeTokenManager()
-        self.base_url = os.environ.get("ENTERPRISE_BASE_URL")
+        self.base_url = os.environ.get("EMBEDDINGS_BASE_URL")
         
         # Apigee specific headers/config
         self.wf_client_id = os.environ.get("WF_CLIENT_ID")
@@ -277,6 +277,11 @@ class EmbeddingGenerator:
             "Represent this sentence for searching relevant passages: "
         )
         self.version = version
+
+        # API-level batch constraints (Apigee / Remote)
+        self.max_batch_items = int(os.getenv("EMBEDDING_MAX_BATCH_ITEMS", "250"))
+        self.max_total_tokens = int(os.getenv("EMBEDDING_MAX_TOTAL_TOKENS", "20000"))
+        self._is_api_provider = self.provider_type in ("apigee", "remote")
         
         logger.info(f"[EMBEDDING] Initializing {self.provider_type} provider for {self.model_name}")
         
@@ -290,10 +295,53 @@ class EmbeddingGenerator:
             # Fallback: use remote if API URL is set and provider type is unrecognized
             logger.info(f"[EMBEDDING] Unknown provider '{self.provider_type}', using remote (EMBEDDING_API_URL is set)")
             self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
+            self._is_api_provider = True
         else:
             self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
             
         self.embedding_dim = self.provider.get_embedding_dim()
+
+    def _pack_batches(self, texts: list[str]) -> list[list[str]]:
+        """Pack texts into batches respecting item count AND total token limits.
+        
+        For API providers (Apigee/Remote): dynamically packs by counting tokens
+        to ensure no batch exceeds EMBEDDING_MAX_BATCH_ITEMS or
+        EMBEDDING_MAX_TOTAL_TOKENS.
+        
+        For local providers: falls back to simple static-size slicing since
+        sentence-transformers handles its own internal limits.
+        """
+        if not self._is_api_provider:
+            # Local provider: simple static batching
+            return [texts[i : i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
+
+        # API provider: dynamic token-packed batching
+        from codemind.llm.token_counter import count_tokens
+
+        batches: list[list[str]] = []
+        current_batch: list[str] = []
+        current_tokens = 0
+
+        for text in texts:
+            text_tokens = count_tokens(text)
+
+            # If adding this text would exceed limits, flush current batch
+            if current_batch and (
+                len(current_batch) >= self.max_batch_items
+                or current_tokens + text_tokens > self.max_total_tokens
+            ):
+                batches.append(current_batch)
+                current_batch = []
+                current_tokens = 0
+
+            current_batch.append(text)
+            current_tokens += text_tokens
+
+        # Flush remaining
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
 
     def generate_embeddings(
         self, chunks: list[CodeChunk], existing_hashes: set[str] | None = None
@@ -309,19 +357,22 @@ class EmbeddingGenerator:
         # BGE: no prefix needed for documents
         texts = [chunk.text for chunk in new_chunks]
 
+        # Pack into batches respecting API constraints
+        batches = self._pack_batches(texts)
+
         all_embeddings = []
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
-            
+        processed = 0
+        for batch_idx, batch in enumerate(batches):
             try:
                 batch_emb = self.provider.encode_batch(batch)
                 all_embeddings.extend(batch_emb)
+                processed += len(batch)
                 
                 # Log progress every 10 batches or if it's the last one
-                if (i // self.batch_size) % 10 == 0 or (i + self.batch_size >= len(texts)):
-                    logger.info(f"[EMBEDDING] Processed {min(i + self.batch_size, len(texts))}/{len(texts)} chunks ({(min(i + self.batch_size, len(texts))/len(texts))*100:.1f}%)")
+                if batch_idx % 10 == 0 or batch_idx == len(batches) - 1:
+                    logger.info(f"[EMBEDDING] Processed {processed}/{len(texts)} chunks ({(processed/len(texts))*100:.1f}%)")
             except Exception as e:
-                logger.error(f"[EMBEDDING] Batch failed: {e}")
+                logger.error(f"[EMBEDDING] Batch {batch_idx} failed ({len(batch)} items): {e}")
                 raise
 
         return list(zip(new_chunks, all_embeddings, strict=False))

@@ -38,7 +38,7 @@ class ASTChunker:
         import os
         if max_chunk_chars is None:
             max_tokens = int(os.getenv("EMBEDDING_MAX_TOKENS", "512"))
-            max_chunk_chars = max_tokens * 4  # ~4 chars per token
+            max_chunk_chars = max_tokens * 4  # ~4 chars/token; token-verified trim-back handles dense outliers
         self.max_chunk_chars = max_chunk_chars
         self.max_tokens = int(os.getenv("EMBEDDING_MAX_TOKENS", "512"))
         self.overlap_lines = overlap_lines
@@ -295,12 +295,11 @@ class ASTChunker:
                 char_count += added
                 end += 1
 
-            # Phase 2: Build the actual chunk text once
+            # Phase 2: Token-verified trim-back — only fires for dense code
             chunk_text = "\n".join(lines[i:end])
-
-            # Char-based boundary is sufficient — max_chunk_chars = max_tokens * 4
-            # is a conservative approximation. Tiktoken is NOT used here because
-            # encode() can hang on certain patterns (repeated chars, minified code).
+            while end > i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                end -= 1
+                chunk_text = "\n".join(lines[i:end])
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
@@ -365,6 +364,11 @@ class ASTChunker:
 
             chunk_text = "\n".join(lines[i:end])
 
+            # Token-verified trim-back — only fires for dense code
+            while end > i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                end -= 1
+                chunk_text = "\n".join(lines[i:end])
+
             # Handle single lines that exceed max_chunk_chars — truncate
             if len(chunk_text) > self.max_chunk_chars and end == i + 1:
                 chunk_text = chunk_text[:self.max_chunk_chars]
@@ -410,6 +414,11 @@ class ASTChunker:
                 end += 1
 
             chunk_text = "\n".join(lines[i:end])
+
+            # Token-verified trim-back — only fires for dense code
+            while end > i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                end -= 1
+                chunk_text = "\n".join(lines[i:end])
 
             # Handle single lines that exceed max_chunk_chars — truncate
             if len(chunk_text) > self.max_chunk_chars and end == i + 1:
