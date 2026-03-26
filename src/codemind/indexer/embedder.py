@@ -170,19 +170,17 @@ class ApigeeEmbeddingProvider(EmbeddingProvider):
     def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
         """Synchronous wrapper for async call."""
         try:
-            return asyncio.run(self._get_embeddings_async(texts))
-        except RuntimeError:
-            # If we are already in an event loop (e.g. jupyter), asyncio.run fails.
-            # But here we are likely in a thread pool (background task) which might NOT have a loop.
-            # Or if we are in main thread loop...
-            # If we are in a running loop, we should use that loop?
-            # Creating a new loop is safer for threaded usage.
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    return pool.submit(
+                        asyncio.run, self._get_embeddings_async(texts)
+                    ).result()
+            else:
                 return loop.run_until_complete(self._get_embeddings_async(texts))
-            finally:
-                loop.close()
+        except RuntimeError:
+            return asyncio.run(self._get_embeddings_async(texts))
 
 
 class RemoteEmbeddingProvider(EmbeddingProvider):
