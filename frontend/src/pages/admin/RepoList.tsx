@@ -75,9 +75,15 @@ export default function RepoList() {
                                             </div>
                                         </div>
                                         <div className="ml-4 truncate">
-                                            <div className="flex text-sm font-medium text-primary truncate">
+                                            <div className="flex items-center gap-2 text-sm font-medium text-primary truncate">
                                                 {repo.name}
-                                                <span className="ml-2 px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                                                {repo.branch && (
+                                                    <span className="px-2 py-0.5 inline-flex text-[10px] leading-4 font-semibold rounded bg-gray-100 text-gray-600 items-center justify-center">
+                                                        <GitBranch className="w-3 h-3 mr-1" />
+                                                        {repo.branch}
+                                                    </span>
+                                                )}
+                                                <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
                                                     {repo.status}
                                                 </span>
                                             </div>

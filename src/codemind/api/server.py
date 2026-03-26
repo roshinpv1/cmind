@@ -226,6 +226,16 @@ async def index_repository_job(
     # Determine identifier for job tracking
     identifier = request.repo_url or request.repo_path
 
+    # Validate repository and branch existence before continuing
+    from codemind.utils.git_utils import GitRepoManager
+    git_manager = GitRepoManager()
+    is_valid, err_msg = git_manager.validate_repository_and_branch(
+        repo_url=identifier, 
+        branch=request.branch or "main"
+    )
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=f"Validation failed: {err_msg}")
+
     # Try to find existing repo ID to ensure stability
     repo_id = None
     

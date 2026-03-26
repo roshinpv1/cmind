@@ -6,6 +6,7 @@ import { authService } from "../../lib/auth";
 interface Repo {
     repo_id: string;
     name: string;
+    branch?: string;
 }
 
 export default function CatalogCreate() {
@@ -87,7 +88,7 @@ export default function CatalogCreate() {
                             >
                                 {repos.map((r) => (
                                     <option key={r.repo_id} value={r.repo_id}>
-                                        {r.name}
+                                        {r.name}{r.branch ? ` (${r.branch})` : ""}
                                     </option>
                                 ))}
                             </select>

@@ -238,6 +238,45 @@ class GitRepoManager:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._cred_provider = GitCredentialProvider()
 
+    def validate_repository_and_branch(self, repo_url: str, branch: str = "main", token: str | None = None) -> tuple[bool, str]:
+        """Validate that a repository or local path exists and contains the specified branch.
+        
+        Returns:
+            (is_valid, error_message)
+        """
+        if self._is_local_path(repo_url):
+            try:
+                discovered = pygit2.discover_repository(str(repo_url))
+                if not discovered:
+                    return False, f"Not a valid local git repository: {repo_url}"
+                repo = pygit2.Repository(discovered)
+                try:
+                    repo.lookup_branch(branch, pygit2.GIT_BRANCH_LOCAL)
+                    return True, ""
+                except KeyError:
+                    return False, f"Branch '{branch}' does not exist locally in {repo_url}"
+            except Exception as e:
+                return False, f"Local repository validation failed: {str(e)}"
+
+        # Remote repository validation (without fully cloning)
+        auth = self._cred_provider.resolve(repo_url, token=token)
+        callbacks = auth.callbacks
+        
+        import tempfile
+        try:
+            with tempfile.TemporaryDirectory() as tempd:
+                repo = pygit2.init_repository(tempd, bare=True)
+                remote = repo.remotes.create("origin", repo_url)
+                remote.connect(callbacks=callbacks)
+                refs = remote.ls()
+                expected_ref = f"refs/heads/{branch}"
+                for ref in refs:
+                    if ref["name"] == expected_ref:
+                        return True, ""
+                return False, f"Branch '{branch}' not found on remote repository."
+        except Exception as e:
+            return False, f"Remote repository validation failed: {str(self._classify_error(e, repo_url))}"
+
     def ensure_repo(
         self, repo_url: str, branch: str = "main", token: str | None = None,
     ) -> tuple[Path, str, str]:

@@ -214,6 +214,12 @@ async def execute_autonomous(request: AutonomousRequest):
             status_code=503,
             detail="Autonomous agent system not initialized"
         )
+        
+    if request.repo_id and manifest_manager:
+        repo_ids = request.repo_id if isinstance(request.repo_id, list) else [request.repo_id]
+        for r_id in repo_ids:
+            if not manifest_manager.get_repository_by_id(r_id):
+                raise HTTPException(status_code=404, detail=f"Repository not found or not indexed: {r_id}")
     
     job_id = str(uuid.uuid4())
     
@@ -336,22 +342,29 @@ async def execute_playbook(request: PlaybookRequest):
     # Fetch Repository Metadata if available
     repo_metadata = {}
     if request.repo_id and manifest_manager:
-        repo = manifest_manager.get_repository_by_id(request.repo_id)
-        if repo:
-            repo_metadata = {
-                "repo_id": repo.repo_id,
-                "name": repo.repo_path.split("/")[-2] if len(repo.repo_path.split("/")) > 2 else "unknown",
-                "path": repo.repo_path,
-                "org": getattr(repo, 'org', None) or "",
-                "first_author": repo.first_author,
-                "total_commits": repo.total_commits,
-                "last_pr_title": repo.last_pr_title,
-                "last_pr_user": repo.last_pr_user,
-                "last_pr_merged_at": repo.last_pr_merged_at,
-                "last_indexed": repo.last_indexed_at.isoformat(),
-                "repo_url": repo.repo_url,
-                "branch": repo.branch
-            }
+        repo_ids = request.repo_id if isinstance(request.repo_id, list) else [request.repo_id]
+        
+        # Validate that all requested repositories exist
+        for r_id in repo_ids:
+            if not manifest_manager.get_repository_by_id(r_id):
+                raise HTTPException(status_code=404, detail=f"Repository not found or not indexed: {r_id}")
+        
+        # Use the first repository for playbook context metadata
+        repo = manifest_manager.get_repository_by_id(repo_ids[0])
+        repo_metadata = {
+            "repo_id": repo.repo_id,
+            "name": repo.repo_path.split("/")[-2] if len(repo.repo_path.split("/")) > 2 else "unknown",
+            "path": repo.repo_path,
+            "org": getattr(repo, 'org', None) or "",
+            "first_author": repo.first_author,
+            "total_commits": repo.total_commits,
+            "last_pr_title": repo.last_pr_title,
+            "last_pr_user": repo.last_pr_user,
+            "last_pr_merged_at": repo.last_pr_merged_at,
+            "last_indexed": repo.last_indexed_at.isoformat(),
+            "repo_url": repo.repo_url,
+            "branch": repo.branch
+        }
 
     # Construct input for the playbook
     # We map 'prompt' to both 'query' and 'goal' to cover different playbook expectations
