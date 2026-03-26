@@ -268,7 +268,7 @@ class GitRepoManager:
                 repo = pygit2.init_repository(tempd, bare=True)
                 remote = repo.remotes.create("origin", repo_url)
                 remote.connect(callbacks=callbacks)
-                refs = remote.ls()
+                refs = remote.ls_remotes()
                 expected_ref = f"refs/heads/{branch}"
                 for ref in refs:
                     if ref["name"] == expected_ref:

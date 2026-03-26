@@ -136,25 +136,12 @@ class PlannerAgent:
             self.registry, self.executor, allowed_playbooks
         )
         
-        # If playbooks are constrained, only include relevant data tools
+        # If playbooks are constrained, we strictly enforce it by only providing the specified 
+        # playbook meta-tools. The planner relies on the playbooks' internal executors (which 
+        # have full data tool access) to perform any necessary codebase/catalog operations.
         if allowed_playbooks:
-            relevant = set()
-            PLAYBOOK_TOOLS = {
-                "search_catalogs": {"search_catalogs"},
-                "generate_catalog": {"search_codebase", "save_catalog_entry"},
-                "code_analyzer": {"search_codebase", "read_file", "search_symbol",
-                                 "get_callers", "get_callees", "get_dependencies", "list_files"},
-                "explore_codebase": {"search_codebase", "read_file", "search_symbol",
-                                 "get_callers", "get_callees", "get_dependencies", "list_files"},
-                "design_solution": {"search_catalogs"},
-                "evaluate_build_vs_reuse": {"search_catalogs"},
-            }
-            for pb in allowed_playbooks:
-                relevant |= PLAYBOOK_TOOLS.get(pb, set())
+            data_tools = []
             
-            if relevant:
-                data_tools = [t for t in data_tools if t.name in relevant]
-        
         return data_tools + playbook_tools
     
     def _build_workflow(self, tools):
