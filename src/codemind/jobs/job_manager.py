@@ -55,8 +55,12 @@ class JobModel(Base):
 class JobManager:
     """Manages indexing jobs."""
 
-    def __init__(self, db_path: str = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")):
-        """Initialize job manager."""
+    def __init__(self, db_path: str | None = None):
+        """Initialize job manager connected to SQLite."""
+        if db_path is None:
+            import os
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
         self.db = get_database(db_path)
         self.db.init_db()
 

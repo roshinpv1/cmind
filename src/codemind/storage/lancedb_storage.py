@@ -18,14 +18,14 @@ from codemind.indexer.chunker import CodeChunk
 class LanceDBStorage:
     """Append-only vector storage using LanceDB with configurable embedding dimensions."""
 
-    def __init__(self, db_path: str | Path = os.getenv("CODEMIND_LANCEDB_PATH", "data/lancedb"), embedding_dim: int | None = None):
+    def __init__(self, db_path: str | Path | None = None, embedding_dim: int | None = None):
         """
         Initialize LanceDB storage.
-
-        Args:
-            db_path: Path to LanceDB directory
-            embedding_dim: Embedding vector dimension (default: from EMBEDDING_DIMENSION env or 768)
         """
+        if db_path is None:
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_LANCEDB_PATH", os.path.join(base_default, "lancedb"))
+            
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = lancedb.connect(str(self.db_path))
@@ -168,6 +168,39 @@ class LanceDBStorage:
             else:
                 raise
 
+    def delete_chunks_by_file(
+        self, repo_id: str, file_paths: list[str], table_name: str = "code_chunks"
+    ) -> int:
+        """
+        Delete all chunks for specific files. Use during delta indexing
+        to purge old chunks before appending new ones.
+
+        Args:
+            repo_id: Repository ID
+            file_paths: List of file paths to purge
+            table_name: Table name
+            
+        Returns:
+            Number of removed rows (approximate)
+        """
+        if not file_paths or table_name not in self.db.table_names():
+            return 0
+            
+        try:
+            table = self.db.open_table(table_name)
+            # Escape single quotes in paths just in case
+            safe_paths = [p.replace("'", "''") for p in file_paths]
+            paths_str = ", ".join(f"'{p}'" for p in safe_paths)
+            
+            # We can't easily get the number of deleted rows from table.delete, 
+            # so we just execute it and return 1 for success
+            table.delete(f"repo_id = '{repo_id}' AND file_path IN ({paths_str})")
+            print(f"[LANCEDB] ✅ Purged old chunks for {len(file_paths)} files")
+            return len(file_paths)
+        except Exception as e:
+            print(f"[LANCEDB] ⚠️ Error deleting chunks: {e}")
+            return 0
+
     def get_chunk_hashes(
         self, repo_id: str, embedding_version: int, table_name: str = "code_chunks"
     ) -> set[str]:
@@ -255,30 +288,30 @@ class LanceDBStorage:
 
         return filtered_results
 
-    def get_all_chunks(
+    def get_chunk_hashes(
         self, repo_id: str | None = None, table_name: str = "code_chunks"
-    ) -> list[dict]:
+    ) -> set[str]:
         """
-        Get all chunks, optionally filtered by repo.
+        Get all chunk hashes efficiently using column projection.
 
         Args:
             repo_id: Optional repository ID to filter
             table_name: Table name
 
         Returns:
-            List of chunk dictionaries
+            Set of chunk hashes
         """
         if table_name not in self.db.table_names():
-            return []
+            return set()
 
         table = self.db.open_table(table_name)
 
         if repo_id:
-            results = table.search().where(f"repo_id = '{repo_id}'").limit(100000).to_list()
+            results = table.search().where(f"repo_id = '{repo_id}'").select(["chunk_hash"]).limit(100000).to_list()
         else:
-            results = table.search().limit(100000).to_list()
+            results = table.search().select(["chunk_hash"]).limit(100000).to_list()
 
-        return results
+        return {row["chunk_hash"] for row in results}
 
     def add_chunks(
         self,

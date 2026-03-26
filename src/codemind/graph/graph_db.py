@@ -88,7 +88,8 @@ class KuzuGraphAdapter:
                      Defaults to CODEMIND_KUZU_PATH env or 'data/kuzu'.
         """
         if db_path is None:
-            db_path = os.getenv("CODEMIND_KUZU_PATH", "data/kuzu")
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_KUZU_PATH", os.path.join(base_default, "kuzu"))
         
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -186,6 +187,35 @@ class KuzuGraphAdapter:
             'SET r.name = $name, r.path = $path',
             {"id": node_id, "name": repo_id, "path": repo_path}
         )
+
+    def delete_file_nodes(self, repo_id: str, file_paths: list[str]) -> int:
+        """Delete File, Class, and Function nodes for specific file paths."""
+        if not file_paths:
+            return 0
+            
+        try:
+            # Delete functions, classes, and the file node itself using DETACH DELETE
+            # This safely removes connected edges first
+            self._execute(
+                'MATCH (n:Function) WHERE n.repo_id = $rid AND n.file_path IN $paths '
+                'DETACH DELETE n',
+                {"rid": repo_id, "paths": file_paths}
+            )
+            self._execute(
+                'MATCH (c:Class) WHERE c.repo_id = $rid AND c.file_path IN $paths '
+                'DETACH DELETE c',
+                {"rid": repo_id, "paths": file_paths}
+            )
+            self._execute(
+                'MATCH (f:File) WHERE f.repo_id = $rid AND f.path IN $paths '
+                'DETACH DELETE f',
+                {"rid": repo_id, "paths": file_paths}
+            )
+            print(f"[KUZU] ✅ Purged old graph nodes for {len(file_paths)} files")
+            return len(file_paths)
+        except Exception as e:
+            print(f"[KUZU] ⚠️ Error deleting graph nodes: {e}")
+            return 0
 
     def add_file(self, repo_id: str, file_path: str, language: str = ""):
         """Add or update a file node and link to repository."""
@@ -346,6 +376,11 @@ class GraphBuilder:
         """Initialize builder. graph_db may be None."""
         self.graph = graph_db
         self.is_noop = graph_db is None
+
+    def delete_file_nodes(self, repo_id: str, file_paths: list[str]) -> None:
+        if self.is_noop: return
+        print(f"[GRAPH] Deleting graph nodes for {len(file_paths)} files")
+        self.graph.delete_file_nodes(repo_id, file_paths)
 
     def build_repository_node(self, repo_id: str, repo_path: str) -> None:
         if self.is_noop: return

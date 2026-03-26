@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
 
     worker = IndexWorker(
         poll_interval=int(os.getenv("WORKER_POLL_INTERVAL", "5")),
-        db_path=os.getenv("CODEMIND_DB_PATH", "data/codemind.db"),
+        db_path=os.getenv("CODEMIND_DB_PATH", os.path.join(os.getenv("CODEMIND_BASE_PATH", "./tmp/"), "codemind.db")),
         graph_db=app.state.graph_db,  # Share Kuzu instance
     )
     worker_thread = threading.Thread(target=worker.run, daemon=True, name="index-worker")
@@ -239,15 +239,15 @@ async def index_repository_job(
             print(f"[SERVER] Found existing repo ID {repo_id} for URL {request.repo_url}")
 
     if not repo_id and request.repo_path:
-        existing_repo = manifest.get_repository(request.repo_path)
+        existing_repo = manifest.get_repository(request.repo_path, branch=request.branch or "main")
         if existing_repo:
             repo_id = existing_repo.repo_id
-            print(f"[SERVER] Found existing repo ID {repo_id} for path {request.repo_path}")
+            print(f"[SERVER] Found existing repo ID {repo_id} for path {request.repo_path} branch {request.branch or 'main'}")
 
     # If still no ID, compute/generate one
     if not repo_id:
         if request.repo_path:
-            repo_id = manifest._compute_repo_id(request.repo_path)
+            repo_id = manifest._compute_repo_id(request.repo_path, request.branch or "main")
         else:
             # For Git URLs, use a temporary ID based on URL
             from codemind.utils.git_utils import GitRepoManager

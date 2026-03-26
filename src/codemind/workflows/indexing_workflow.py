@@ -86,6 +86,7 @@ class IndexingWorkflow:
 
     def run(self, state: IndexingState) -> IndexingState:
         """Execute full indexing workflow."""
+        self._ast_cache = {}  # Initialize AST cache for this run
         try:
             print(f"[WORKFLOW] ========== STARTING INDEXING WORKFLOW ==========")
             print(f"[WORKFLOW] Repo: {state.repo_id}")
@@ -118,19 +119,11 @@ class IndexingWorkflow:
             self._report_progress("extracting_ast", 20)
 
             self._report_progress("chunking", 25)
-            state = self.chunk_files(state)  # FIXED: was chunk_code
+            state = self.chunk_and_embed_files(state)
             if state.error:
-                print(f"[WORKFLOW] ❌ chunk_files failed: {state.error}")
+                print(f"[WORKFLOW] ❌ chunk_and_embed_files failed: {state.error}")
                 return state
-            print(f"[WORKFLOW] ✅ chunk_files complete — {state.chunks_created} chunks")
-            self._report_progress("chunking", 35)
-
-            self._report_progress("embedding", 40)
-            state = self.generate_embeddings(state)
-            if state.error:
-                print(f"[WORKFLOW] ❌ generate_embeddings failed: {state.error}")
-                return state
-            print(f"[WORKFLOW] ✅ generate_embeddings complete — {state.embeddings_generated} embeddings")
+            print(f"[WORKFLOW] ✅ chunk_and_embed_files complete — {state.chunks_created} chunks, {state.embeddings_generated} embeddings")
             self._report_progress("embedding", 65)
 
             self._report_progress("building_graph", 70)
@@ -158,6 +151,7 @@ class IndexingWorkflow:
                 state.error = None  # Clear so job isn't marked FAILED
             state.stage = "completed"
             self._report_progress("completed", 100)
+            self._ast_cache.clear()  # Free memory
 
             # Complete index run with stats
             try:
@@ -175,6 +169,8 @@ class IndexingWorkflow:
         except Exception as e:
             state.error = str(e)
             state.stage = "failed"
+            if hasattr(self, "_ast_cache"):
+                self._ast_cache.clear()
             # Record failed index run
             try:
                 self.manifest.complete_index_run(
@@ -187,6 +183,17 @@ class IndexingWorkflow:
                 pass
 
         return state
+
+    def _get_ast(self, file_path: Path, language: str):
+        """Helper to get AST with in-memory caching for the duration of the workflow."""
+        path_str = str(file_path)
+        if hasattr(self, "_ast_cache") and path_str in self._ast_cache:
+            return self._ast_cache[path_str]
+        
+        result = self.ast_extractor.extract(file_path, language)
+        if hasattr(self, "_ast_cache"):
+            self._ast_cache[path_str] = result
+        return result
 
     def detect_changes(self, state: IndexingState) -> IndexingState:
         """Node: Detect changed files."""
@@ -206,6 +213,21 @@ class IndexingWorkflow:
             state.changed_files = changes.changed_files
             state.deleted_files = changes.deleted_files
             state.commit_hash = changes.commit_hash  # Store git commit if available
+            
+            # --- PURGE OLD DATA FOR DELTA INDEXING ---
+            # Compile list of all file paths that were modified or deleted
+            files_to_purge = [f.path for f in state.changed_files] + state.deleted_files
+            if files_to_purge:
+                print(f"[WORKFLOW] Purging old indexed data for {len(files_to_purge)} modified/deleted files...")
+                try:
+                    self.storage.delete_chunks_by_file(state.repo_id, files_to_purge)
+                    if getattr(self, "graph", None):
+                        self.graph.delete_file_nodes(state.repo_id, files_to_purge)
+                    if getattr(self, "manifest", None):
+                        self.manifest.delete_symbols_by_file(state.repo_id, files_to_purge)
+                except Exception as purge_err:
+                    print(f"[WORKFLOW] ⚠️ Non-fatal error purging old data: {purge_err}")
+            # -----------------------------------------
             
             # Extract metadata if it's a git repo
             if changes.detection_method == "git":
@@ -239,28 +261,24 @@ class IndexingWorkflow:
 
         return state
 
-    def chunk_files(self, state: IndexingState) -> IndexingState:
-        """Node: Chunk files in parallel using ThreadPoolExecutor."""
+    def chunk_and_embed_files(self, state: IndexingState) -> IndexingState:
+        """Node: Chunk files and generate embeddings in streams to limit memory."""
         import os
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
         PER_FILE_TIMEOUT = 30  # seconds — skip files that take longer
         MAX_FILE_SIZE = 500 * 1024  # 500 KB
         MAX_WORKERS = min(os.cpu_count() or 4, 8)  # Cap at 8 to avoid over-subscribing
+        FILE_BATCH_SIZE = 250  # Process 250 files at a time
 
         try:
-            state.stage = "chunking"
+            state.stage = "chunking_and_embedding"
             total = len(state.changed_files)
-            print(f"[CHUNKING] Starting parallel chunking for repo: {state.repo_id}")
-            print(f"[CHUNKING] Changed files: {total}, workers: {MAX_WORKERS}")
+            print(f"[STREAM] Starting streamed chunking & embedding for {total} files...")
 
-            all_chunks = []
-            skipped = 0
-            errored = 0
-            timed_out = 0
-
-            # Pre-filter files: only chunkable files under size limit
+            # Pre-filter files
             chunkable = []
+            skipped = 0
             for file_change in state.changed_files:
                 file_path = Path(state.repo_path) / file_change.path
                 if not file_path.exists():
@@ -275,111 +293,71 @@ class IndexingWorkflow:
                     pass
                 chunkable.append((file_change, file_path))
 
-            print(f"[CHUNKING] Chunkable files: {len(chunkable)} (skipped {skipped} large)")
-
-            # Process files in parallel
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-                # Submit all chunking tasks
-                futures = {}
-                for file_change, file_path in chunkable:
-                    future = pool.submit(self.chunker.chunk_file, str(file_path))
-                    futures[future] = file_change
-
-                # Collect results as they complete
-                done_count = 0
-                from concurrent.futures import as_completed
-                for future in as_completed(futures, timeout=PER_FILE_TIMEOUT * len(futures) + 60):
-                    file_change = futures[future]
-                    done_count += 1
-                    try:
-                        chunks = future.result(timeout=PER_FILE_TIMEOUT)
-                        if chunks:
-                            all_chunks.extend(chunks)
-                    except FuturesTimeout:
-                        timed_out += 1
-                        print(f"[CHUNKING] ⏰ TIMEOUT ({PER_FILE_TIMEOUT}s) on: {file_change.path}")
-                    except Exception as e:
-                        errored += 1
-                        print(f"[CHUNKING] ⚠️ Error chunking {file_change.path}: {type(e).__name__}: {e}")
-
-                    # Progress log every 50 files or at the end
-                    if done_count % 50 == 0 or done_count == len(chunkable):
-                        pct = int(done_count / max(len(chunkable), 1) * 100)
-                        print(f"[CHUNKING] Progress: {done_count}/{len(chunkable)} files ({pct}%), {len(all_chunks)} chunks so far")
-
-            print(f"[CHUNKING] Created {len(all_chunks)} chunks total (skipped={skipped} large, errors={errored}, timeouts={timed_out})")
-            state.chunks_created = len(all_chunks)
-
-            # Store chunks in state for embedding
-            state.all_chunks = all_chunks
-            print(f"[CHUNKING] ✅ Chunking complete")
-
-        except Exception as e:
-            print(f"[CHUNKING] ❌ Error: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            state.error = f"Chunking failed: {e}"
-
-        return state
-
-    def generate_embeddings(self, state: IndexingState) -> IndexingState:
-        """Node: Generate embeddings in batches to limit memory."""
-        EMBED_BATCH_SIZE = 500  # Process and write 500 chunks at a time
-
-        try:
-            state.stage = "embedding"
-            print(f"[EMBEDDING] ========== STARTING EMBEDDING STEP ==========")
-            print(f"[EMBEDDING] Repo ID: {state.repo_id}")
-
-            if not hasattr(state, "all_chunks") or not state.all_chunks:
-                print(f"[EMBEDDING] ⚠️  No chunks found in state - skipping embedding")
-                return state
-
-            total_chunks = len(state.all_chunks)
-            print(f"[EMBEDDING] Processing {total_chunks} chunks in batches of {EMBED_BATCH_SIZE}...")
+            print(f"[STREAM] Chunkable files: {len(chunkable)} (skipped {skipped} large)")
 
             # Get existing chunks from LanceDB to avoid re-embedding
             existing_hashes = set()
             try:
-                existing_data = self.storage.get_all_chunks(state.repo_id)
-                existing_hashes = {row["chunk_hash"] for row in existing_data}
-                del existing_data  # Free immediately
-            except Exception:
-                pass
+                # Optimized DB projection to only fetch 1 string per chunk instead of 3MB objects
+                existing_hashes = self.storage.get_chunk_hashes(state.repo_id)
+            except Exception as e:
+                print(f"[STREAM] ⚠️ Could not fetch existing hashes: {e}")
 
-            total_embedded = 0
+            total_chunks_created = 0
+            total_embeddings_generated = 0
+            errored = 0
+            timed_out = 0
 
-            # Process in batches to limit peak memory
-            for batch_start in range(0, total_chunks, EMBED_BATCH_SIZE):
-                batch_end = min(batch_start + EMBED_BATCH_SIZE, total_chunks)
-                batch_chunks = state.all_chunks[batch_start:batch_end]
+            # Process in micro-batches
+            for i in range(0, len(chunkable), FILE_BATCH_SIZE):
+                file_batch = chunkable[i:i + FILE_BATCH_SIZE]
+                batch_chunks = []
 
-                # Generate embeddings for this batch
-                new_with_emb = self.embedder.generate_embeddings(batch_chunks, existing_hashes)
+                # Chunk this specific mini-batch in parallel
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                    futures = {}
+                    for file_change, file_path in file_batch:
+                        future = pool.submit(self.chunker.chunk_file, str(file_path))
+                        futures[future] = file_change
 
-                # Write to LanceDB immediately
-                if new_with_emb:
-                    self.storage.append_chunks(state.repo_id, new_with_emb)
-                    total_embedded += len(new_with_emb)
+                    from concurrent.futures import as_completed
+                    for future in as_completed(futures, timeout=PER_FILE_TIMEOUT * len(futures) + 60):
+                        file_change = futures[future]
+                        try:
+                            res = future.result(timeout=PER_FILE_TIMEOUT)
+                            if res:
+                                batch_chunks.extend(res)
+                        except FuturesTimeout:
+                            timed_out += 1
+                        except Exception as e:
+                            errored += 1
 
-                pct = int(batch_end / total_chunks * 100)
-                print(f"[EMBEDDING] Batch {batch_start}-{batch_end}/{total_chunks} ({pct}%) — {len(new_with_emb)} new embeddings written")
-
-                # Free batch memory
-                del new_with_emb
+                total_chunks_created += len(batch_chunks)
+                
+                # Directly embed and dump to DB, allowing cyclic reclamation of the array buffer
+                if batch_chunks:
+                    try:
+                        new_with_emb = self.embedder.generate_embeddings(batch_chunks, existing_hashes)
+                        if new_with_emb:
+                            self.storage.append_chunks(state.repo_id, new_with_emb)
+                            total_embeddings_generated += len(new_with_emb)
+                    except Exception as e:
+                        print(f"[STREAM] ❌ Error embedding batch: {type(e).__name__}: {e}")
+                
+                # Nuke variables to avoid memory hoarding
                 del batch_chunks
+                
+                pct = int((i + len(file_batch)) / max(len(chunkable), 1) * 100)
+                print(f"[STREAM] Progress: {i + len(file_batch)}/{len(chunkable)} files ({pct}%) -> {total_chunks_created} total chunks queued, {total_embeddings_generated} records dumped.")
 
-            state.embeddings_generated = total_embedded
-            print(f"[EMBEDDING] ✅ Done: {total_embedded} embeddings stored")
-
-            # Free chunk text from memory — no longer needed
-            state.all_chunks = None
+            state.chunks_created = total_chunks_created
+            state.embeddings_generated = total_embeddings_generated
 
         except Exception as e:
-            print(f"[EMBEDDING] ❌ Error during embedding: {type(e).__name__}: {e}")
+            print(f"[STREAM] ❌ Global Error: {type(e).__name__}: {e}")
             import traceback
             traceback.print_exc()
-            state.error = f"Embedding failed: {e}"
+            state.error = f"Chunk/Embed pipeline collapse: {e}"
 
         return state
 
@@ -416,7 +394,7 @@ class IndexingWorkflow:
                 if language:
                     try:
                         # Cooperative internal timeout will handle stalls
-                        result = self.ast_extractor.extract(file_path, language)
+                        result = self._get_ast(file_path, language)
 
                         if result and result.symbols:
                             # Add class nodes
@@ -481,7 +459,7 @@ class IndexingWorkflow:
 
                 try:
                     # Cooperative internal timeout will handle stalls
-                    result = self.ast_extractor.extract(file_path, language)
+                    result = self._get_ast(file_path, language)
 
                     if result and result.symbols:
                         # Index symbols
@@ -665,7 +643,9 @@ class IndexingWorkflow:
                     continue
                     
                 try:
-                    result = self.ast_extractor.extract(file_path, language)
+                    result = self._get_ast(file_path, language)
+                    if not result:
+                        continue
                     for sym in result.symbols:
                         import hashlib
                         symbol_id = hashlib.sha256(

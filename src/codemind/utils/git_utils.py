@@ -229,7 +229,11 @@ class GitRepoManager:
     - Classified error messages (timeout, auth, not-found, SSL)
     """
 
-    def __init__(self, cache_dir: str = os.getenv("CODEMIND_REPOS_PATH", "data/repos")):
+    def __init__(self, cache_dir: str | None = None):
+        if cache_dir is None:
+            import os
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            cache_dir = os.getenv("CODEMIND_REPOS_PATH", os.path.join(base_default, "repos"))
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self._cred_provider = GitCredentialProvider()

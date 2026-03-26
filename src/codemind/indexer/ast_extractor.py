@@ -200,7 +200,8 @@ class ASTExtractor:
 
     def __init__(self):
         """Initialize AST extractor. Parsers are loaded lazily."""
-        self._parsers: dict[str, Parser] = {}
+        import threading
+        self._local = threading.local()
         self._failed_languages: set[str] = set()
 
     # -- Public API ---------------------------------------------------------
@@ -272,11 +273,14 @@ class ASTExtractor:
     # -- Parser management --------------------------------------------------
 
     def _get_parser(self, language: str) -> Parser | None:
-        """Get or create parser for language (lazy)."""
+        """Get or create parser for language (lazy per-thread)."""
         if language in self._failed_languages:
             return None
 
-        if language not in self._parsers:
+        if not hasattr(self._local, "parsers"):
+            self._local.parsers = {}
+
+        if language not in self._local.parsers:
             try:
                 module_name = _MODULE_MAP.get(language, f"tree_sitter_{language}")
                 lang_mod = importlib.import_module(module_name)
@@ -294,12 +298,12 @@ class ASTExtractor:
                         return None
 
                 parser = Parser(lang_obj)
-                self._parsers[language] = parser
+                self._local.parsers[language] = parser
             except (ImportError, AttributeError, Exception):
                 self._failed_languages.add(language)
                 return None
 
-        return self._parsers.get(language)
+        return self._local.parsers.get(language)
 
     # -- Generic symbol extraction ------------------------------------------
 

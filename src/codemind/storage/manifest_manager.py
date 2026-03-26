@@ -19,35 +19,42 @@ from .models import RepositoryManifest
 class ManifestManager:
     """Manager for repository manifest operations."""
 
-    def __init__(self, db_path: str | Path = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")):
+    def __init__(self, db_path: str | Path | None = None):
         """
         Initialize manifest manager.
 
         Args:
             db_path: Path to SQLite database
         """
+        if db_path is None:
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
+            
         self.db = get_database(db_path)
         self.db.init_db()
 
-    def _compute_repo_id(self, repo_path: str) -> str:
+    def _compute_repo_id(self, repo_path: str, branch: str = "main") -> str:
         """
-        Compute unique repository ID from path.
+        Compute unique repository ID from path and branch.
 
         Args:
             repo_path: Path to repository
+            branch: Branch name to ensure isolation across branches
 
         Returns:
-            Unique repository ID (hash of absolute path)
+            Unique repository ID (hash of absolute path + branch)
         """
         abs_path = Path(repo_path).resolve()
-        return hashlib.sha256(str(abs_path).encode()).hexdigest()[:16]
+        unique_string = f"{abs_path}::{branch}"
+        return hashlib.sha256(unique_string.encode()).hexdigest()[:16]
 
-    def get_repository(self, repo_path: str) -> RepositoryManifest | None:
+    def get_repository(self, repo_path: str, branch: str = "main") -> RepositoryManifest | None:
         """
-        Get repository manifest by path.
+        Get repository manifest by path and branch.
 
         Args:
             repo_path: Path to repository
+            branch: Repository branch
 
         Returns:
             Repository manifest or None if not found
@@ -55,7 +62,7 @@ class ManifestManager:
         with self.db.get_session() as session:
             return (
                 session.query(RepositoryManifest)
-                .filter_by(repo_path=str(Path(repo_path).resolve()))
+                .filter_by(repo_path=str(Path(repo_path).resolve()), branch=branch)
                 .first()
             )
 
@@ -318,11 +325,30 @@ class ManifestManager:
 
     # ── Symbol Operations ────────────────────────────────────────────────
 
+    def delete_symbols_by_file(self, repo_id: str, file_paths: list[str]) -> int:
+        """
+        Delete all symbols originating from specific files.
+        Use during delta indexing to purge old signatures before generating new ones.
+        """
+        if not file_paths:
+            return 0
+            
+        with self.db.get_session() as session:
+            deleted = session.query(SymbolRecord).filter(
+                SymbolRecord.repo_id == repo_id,
+                SymbolRecord.file_path.in_(file_paths)
+            ).delete(synchronize_session=False)
+            
+            if deleted:
+                session.commit()
+                print(f"[MANIFEST] ✅ Purged {deleted} old symbols for {len(file_paths)} files")
+            return deleted
+
     def upsert_symbols(self, repo_id: str, symbols: list[dict]) -> int:
         """Batch upsert symbols for a repository.
         
-        Deletes all existing symbols for the repo and inserts the fresh set.
-        This is safe because symbols are re-extracted from source every indexing run.
+        Deletes existing symbols for the affected files to avoid UNIQUE conflicts
+        without wiping out symbols for unchanged files.
         
         Args:
             repo_id: Repository ID
@@ -347,10 +373,15 @@ class ManifestManager:
             print(f"[MANIFEST] Deduplicated {len(symbols)} → {len(unique_symbols)} symbols (removed {len(symbols) - len(unique_symbols)} duplicates)")
 
         with self.db.get_session() as session:
-            # Delete existing symbols for this repo to avoid UNIQUE conflicts
-            deleted = session.query(SymbolRecord).filter_by(repo_id=repo_id).delete()
-            if deleted:
-                print(f"[MANIFEST] Deleted {deleted} existing symbols for repo {repo_id}")
+            # Drop old symbols only for exactly the files we are updating
+            affected_files = {sym.get("file_path") for sym in unique_symbols if sym.get("file_path")}
+            if affected_files:
+                deleted = session.query(SymbolRecord).filter(
+                    SymbolRecord.repo_id == repo_id,
+                    SymbolRecord.file_path.in_(list(affected_files))
+                ).delete(synchronize_session=False)
+                if deleted:
+                    print(f"[MANIFEST] Deleted {deleted} existing symbols for {len(affected_files)} affected files")
 
             for sym in unique_symbols:
                 record = SymbolRecord(

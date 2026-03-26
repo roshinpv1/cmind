@@ -53,11 +53,16 @@ class IndexWorker:
     def __init__(
         self,
         poll_interval: int = 5,
-        db_path: str = "data/codemind.db",
+        db_path: str | None = None,
         graph_db: "KuzuGraphAdapter | None" = None,
     ):
         self.poll_interval = poll_interval
-
+        
+        if db_path is None:
+            import os
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
+            
         # Shared infrastructure — same paths as the API server
         self.job_manager = JobManager(db_path=db_path)
         self.manifest = ManifestManager(db_path=db_path)
@@ -314,9 +319,11 @@ class IndexWorker:
 
 def main():
     """Entry point: ``python -m codemind.worker.index_worker``."""
+    import os
     poll = int(os.getenv("WORKER_POLL_INTERVAL", "5"))
-    db = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")
-
+    base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+    db = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
+    print(f"[CLI] Starting local worker targeting {db} ...")
     worker = IndexWorker(poll_interval=poll, db_path=db)
     worker.run()
 

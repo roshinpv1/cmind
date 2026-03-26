@@ -9,9 +9,14 @@ import re
 
 from .graph_db import KuzuGraphAdapter
 
-# Pattern to strip data/repos/{name}/{branch}/ prefix from LanceDB file paths
-# e.g. "data/repos/promptshield/main/backend/main.py" → "backend/main.py"
-_REPO_PATH_PREFIX = re.compile(r'^data/repos/[^/]+/[^/]+/')
+import os
+import re
+
+# Pattern to strip dynamic system paths prefix from LanceDB file paths
+_BASE = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+_REPOS_PATH = os.getenv("CODEMIND_REPOS_PATH", os.path.join(_BASE, "repos"))
+_REPOS_PREFIX = _REPOS_PATH.replace('\\', '/').rstrip('/') + '/'
+_REPO_PATH_PREFIX = re.compile(rf'^{re.escape(_REPOS_PREFIX)}[^/]+/[^/]+/')
 
 
 class GraphQueryService:

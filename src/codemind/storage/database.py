@@ -158,13 +158,18 @@ class PlaybookStoreModel(Base):
 class Database:
     """Database connection manager."""
 
-    def __init__(self, db_path: str | Path = "data/codemind.db"):
+    def __init__(self, db_path: str | Path | None = None):
         """
         Initialize database connection.
 
         Args:
             db_path: Path to SQLite database file
         """
+        if db_path is None:
+            import os
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
+
         # Ensure data directory exists
         db_path = Path(db_path)
         db_path.parent.mkdir(parents=True, exist_ok=True)

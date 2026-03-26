@@ -20,5 +20,6 @@ def get_database(db_path: str = None):
     else:
         # Default SQLite backend
         if db_path is None:
-            db_path = os.getenv("CODEMIND_DB_PATH", "data/codemind.db")
+            base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+            db_path = os.getenv("CODEMIND_DB_PATH", os.path.join(base_default, "codemind.db"))
         return Database(db_path)
