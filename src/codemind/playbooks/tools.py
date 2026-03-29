@@ -375,7 +375,7 @@ class PlaybookTools:
         queries: list[str], 
         repo_id: str | list[str] | None = None, 
         limit: int = 10,
-        min_score: float = 0.0
+        min_score: float = 0.5
     ) -> list[dict]:
         """
         Internal high-quality catalog search:
@@ -599,7 +599,7 @@ class PlaybookTools:
             queries = [query] if isinstance(query, str) else query
             repo_id = params.get("repo_id")
             limit = params.get("limit", 10)
-            min_score = params.get("min_score", 0.0)
+            min_score = params.get("min_score", 0.5)
             
             if not self.embedder:
                 return {"error": "No embedder available", "results": [], "count": 0}

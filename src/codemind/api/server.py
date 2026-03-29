@@ -864,7 +864,7 @@ class CatalogSearchRequest(BaseModel):
     query: str
     repo_id: str | None = None
     limit: int = 5
-    min_score: float = 0.1
+    min_score: float = 0.5
 
 
 @app.get("/api/v1/catalogs/list")
@@ -1782,7 +1782,7 @@ async def search_catalog(
     query: str, 
     repo_id: str | None = None, 
     limit: int = 20, 
-    min_score: float = 0.1,
+    min_score: float = 0.5,
     user: dict = Depends(get_current_user)
 ):
     """Semantic search over catalog entries."""
