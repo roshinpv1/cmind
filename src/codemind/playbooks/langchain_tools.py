@@ -45,6 +45,12 @@ class ReadFileInput(BaseModel):
     end_line: Optional[int] = Field(default=None, description="End line (1-indexed)")
 
 
+class GetFileOutlineInput(BaseModel):
+    """Input for getting the structural outline of a file."""
+    file_path: str = Field(description="Path to the file to outline")
+    repo_id: str = Field(description="Repository identifier")
+
+
 class SearchSymbolInput(BaseModel):
     """Input for finding a symbol by name."""
     name: str = Field(description="Symbol name to search for")
@@ -163,6 +169,17 @@ def create_langchain_tools(playbook_tools) -> list:
         result = await playbook_tools.read_file(params)
         return json.dumps(result, default=str)
     
+    @tool(args_schema=GetFileOutlineInput)
+    async def get_file_outline(
+        file_path: str,
+        repo_id: str
+    ) -> str:
+        """Get structural outline (AST) of a file showing classes, methods, and functions.
+        Use this BEFORE reading a large file to locate exact line numbers of functions."""
+        params = {"file_path": file_path, "repo_id": repo_id}
+        result = await playbook_tools.get_file_outline(params)
+        return json.dumps(result, default=str)
+    
     @tool(args_schema=SearchSymbolInput)
     async def search_symbol(
         name: str,
@@ -243,6 +260,7 @@ def create_langchain_tools(playbook_tools) -> list:
     return [
         search_codebase,
         read_file,
+        get_file_outline,
         search_symbol,
         get_callers,
         get_callees,

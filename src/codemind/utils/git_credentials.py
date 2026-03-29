@@ -173,7 +173,7 @@ class GitCredentialProvider:
 
     def _try_gitsaas_jwt(self, repo_url: str) -> AuthResult | None:
         """Try GitHub App installation token."""
-        app_id = os.getenv("GITSAAS_APP_ID")
+        app_id = os.getenv("GITSAAS_APP_ID") or os.getenv("APP_INSTALLATION_ID")
         private_key = os.getenv("GITSAAS_PRIVATE_KEY")
         installation_id = os.getenv("GITSAAS_INSTALLATION_ID")
 

@@ -232,6 +232,52 @@ class PlaybookTools:
         except Exception as e:
             return {"error": str(e), "content": ""}
 
+    async def get_file_outline(self, params: dict) -> dict:
+        """Get structural outline (AST) of a file showing classes, methods, and functions.
+        
+        Args:
+            params: {
+                repo_id: str,
+                file_path: str
+            }
+        """
+        try:
+            repo_id = params["repo_id"]
+            file_path = params["file_path"]
+            
+            # Use the Kuzu graph to get the extracted Tree-Sitter AST context
+            outline = self.graph.get_file_context(repo_id, file_path)
+            
+            # Format nicely for the LLM
+            lines = [f"File Outline: {outline['file_path']}", "=" * 40]
+            
+            if framework_imports := outline.get("imports"):
+                lines.append(f"Imports: {', '.join(framework_imports[:10])}" + ("..." if len(framework_imports) > 10 else ""))
+                
+            if classes := outline.get("classes"):
+                lines.append("\nClasses:")
+                for c in classes:
+                    lines.append(f"  class {c['name']} (Lines {c['start_line']}-{c.get('end_line', '?')})")
+                    # List its methods
+                    methods = [m for m in outline.get("methods", []) if m["class"] == c["name"]]
+                    for m in methods:
+                        lines.append(f"    - method {m['name']} (Lines {m['start_line']}-{m.get('end_line', '?')})")
+            
+            if functions := outline.get("functions"):
+                lines.append("\nTop-level Functions:")
+                for f in functions:
+                    lines.append(f"  func {f['name']} (Lines {f['start_line']}-{f.get('end_line', '?')})")
+                    
+            if not classes and not functions:
+                lines.append("\n(No classes or functions detected. Might be a script, config, or UI template.)")
+                
+            return {
+                "success": True, 
+                "outline": "\n".join(lines)
+            }
+        except Exception as e:
+            return {"error": str(e), "outline": ""}
+
     async def search_symbol(self, params: dict) -> dict:
         """Find a symbol (class/function) by name.
         

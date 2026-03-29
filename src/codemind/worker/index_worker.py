@@ -230,6 +230,12 @@ class IndexWorker:
         branch = job.get("branch", "main")
         repo_id = job.get("repo_id")
 
+        # Gracefully handle if the URL was passed in the 'repo_path' field instead
+        if repo_path and (repo_path.startswith("http://") or repo_path.startswith("https://") or repo_path.startswith("git@")):
+            if not repo_url:
+                repo_url = repo_path
+            repo_path = None
+
         if repo_url:
             from codemind.utils.git_utils import GitRepoManager
 

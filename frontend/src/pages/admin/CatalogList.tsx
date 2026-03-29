@@ -14,6 +14,7 @@ import {
     Users,
     Trash2,
     Loader2,
+    X,
 } from "lucide-react";
 import { authService } from "../../lib/auth";
 
@@ -93,6 +94,30 @@ export default function CatalogList() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
     const [statusFilter, setStatusFilter] = useState("");
+    
+    // Modal state
+    const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
+    const [detailedCatalog, setDetailedCatalog] = useState<any | null>(null);
+    const [loadingDetails, setLoadingDetails] = useState(false);
+
+    const openCatalogDetails = async (repoId: string) => {
+        setSelectedRepoId(repoId);
+        setDetailedCatalog(null);
+        setLoadingDetails(true);
+        try {
+            const res = await fetch(`/api/v1/catalogs/${encodeURIComponent(repoId)}`, {
+                headers: { ...authService.getAuthHeader() }
+            });
+            if (!res.ok) throw new Error("Failed to fetch full catalog details");
+            const data = await res.json();
+            setDetailedCatalog(data);
+        } catch (err) {
+            alert("Failed to load catalog details");
+            setSelectedRepoId(null);
+        } finally {
+            setLoadingDetails(false);
+        }
+    };
 
     const fetchCatalogs = (status?: string) => {
         setLoading(true);
@@ -248,7 +273,10 @@ export default function CatalogList() {
                                                         )}
                                                     </div>
                                                     <div className="min-w-0">
-                                                        <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
+                                                        <div 
+                                                            className="text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline cursor-pointer truncate max-w-[200px]"
+                                                            onClick={() => openCatalogDetails(entry.repo_id)}
+                                                        >
                                                             {entry.repo_name}
                                                         </div>
                                                         {entry.source_gap && (
@@ -398,6 +426,83 @@ export default function CatalogList() {
                         </div>
                     )}
                 </>
+            )}
+
+            {/* Catalog Details Modal */}
+            {selectedRepoId && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 transition-opacity">
+                    <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+                        {/* Modal Header */}
+                        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between bg-white/80 backdrop-blur-sm sticky top-0 z-10">
+                            <h3 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-indigo-600 flex items-center gap-2">
+                                <BookOpen className="w-6 h-6 text-blue-600" />
+                                Catalog Explorer
+                            </h3>
+                            <button
+                                onClick={() => setSelectedRepoId(null)}
+                                className="p-2 text-gray-400 hover:text-gray-900 hover:bg-gray-100 rounded-full transition-all active:scale-95"
+                            >
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        {/* Modal Content */}
+                        <div className="p-6 overflow-y-auto flex-1 bg-gray-50/50">
+                            {loadingDetails ? (
+                                <div className="flex flex-col items-center justify-center h-64 text-gray-500 space-y-4">
+                                    <Loader2 className="w-10 h-10 animate-spin text-blue-500" />
+                                    <p className="font-medium animate-pulse">Scanning component geometry...</p>
+                                </div>
+                            ) : detailedCatalog ? (
+                                <div className="space-y-8 animate-in fade-in slide-in-from-bottom-2 duration-300">
+                                    {/* High level Metadata Cards */}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Description</h4>
+                                            <p className="text-sm text-gray-900 font-medium leading-relaxed">
+                                                {detailedCatalog.description || "No description provided."}
+                                            </p>
+                                        </div>
+                                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Taxonomy</h4>
+                                            <p className="text-sm text-gray-900 font-medium">{safeStr(detailedCatalog.category) || "Uncategorized"}</p>
+                                            
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-4 mb-1">Tech Stack</h4>
+                                            <p className="text-sm text-blue-600 font-medium">{safeStr(detailedCatalog.tech_stack) || "Unknown"}</p>
+                                        </div>
+                                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow lg:col-span-1 md:col-span-2">
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Semantic Keywords</h4>
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {detailedCatalog.topics?.length ? detailedCatalog.topics.map((t: string, i: number) => (
+                                                    <span key={i} className="inline-flex items-center px-2.5 py-1 rounded-md text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100/50">
+                                                        {t}
+                                                    </span>
+                                                )) : <span className="text-sm text-gray-400">No tags extracted</span>}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    {/* Component Manifest Raw Data */}
+                                    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                                        <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center gap-2">
+                                            <h4 className="text-xs font-bold text-gray-700 uppercase tracking-wider">Raw Payload Data</h4>
+                                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800">JSON</span>
+                                        </div>
+                                        <div className="bg-slate-900 p-5 overflow-x-auto max-h-[500px]">
+                                            <pre className="text-[13px] text-emerald-400 font-mono leading-relaxed">
+                                                {JSON.stringify(detailedCatalog, null, 2)}
+                                            </pre>
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="text-center p-12 text-gray-500 bg-white rounded-xl border border-dashed border-gray-200">
+                                    Failed to parse component catalog map.
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );
