@@ -680,34 +680,57 @@ class PlaybookExecutor:
                     print(output)
                     print("-" * 40)
                     
-                    # Retry logic: if LLM returns suspiciously short output for json_response
-                    # playbooks, it likely echoed empty defaults. Retry with higher temperature
-                    # to break the deterministic pattern.
-                    if (playbook.output_type == "json_response" 
-                            and len(output) < 300 
-                            and code_context.strip()):
+                    # Retry logic: Explicit Schema Validation Loop
+                    if playbook.output_type == "json_response" and output_schema:
+                        import re
+                        import json
+                        
                         for retry in range(2):
-                            print(f"[EXECUTOR] ⚠️ Output too short ({len(output)} chars), retry {retry + 1}/2 with temp=0.7")
-                            # Generic nudge using actual schema field names
-                            field_names = list(output_schema.model_fields.keys()) if output_schema else []
-                            fields_str = ", ".join(field_names[:10]) if field_names else "all required fields"
+                            validation_error = None
+                            
+                            # 1. Fallback heuristic for suspiciously empty data
+                            if len(output) < 300 and code_context.strip():
+                                validation_error = "Response is suspiciously short. You likely returned empty fields instead of extracting real data from the codebase."
+                            else:
+                                # 2. Extract and Validate against Pydantic schema
+                                json_match = re.search(r'```json\s*({.*?})\s*```', output, re.DOTALL)
+                                if not json_match:
+                                    json_match = re.search(r'({[\s\S]*})', output)
+                                
+                                if not json_match:
+                                    validation_error = "Could not find a valid JSON object in your response. Ensure you use ```json wrappers."
+                                else:
+                                    try:
+                                        parsed_data = json.loads(json_match.group(1))
+                                        output_schema.model_validate(parsed_data)
+                                    except json.JSONDecodeError as je:
+                                        validation_error = f"Invalid JSON syntax: {je}"
+                                    except Exception as ve:
+                                        # Captures detailed Pydantic ValidationError
+                                        validation_error = f"Schema Validation Error:\n{str(ve)}"
+                            
+                            if not validation_error:
+                                break  # Output is perfect, break out of retry loop
+                                
+                            print(f"[EXECUTOR] ⚠️ Validation failed on try {retry + 1}: {str(validation_error)[:200]}...")
+                            state["logs"].append(f"  Retry {retry + 1} triggered by validation error")
+                            
+                            # Inject the exact error back to the LLM
                             nudge = (
-                                "IMPORTANT: Your previous response had empty fields. This is WRONG.\n"
-                                "The RETRIEVED CODE section above contains data that you MUST reference.\n"
-                                f"You MUST fill in these fields with REAL data: {fields_str}.\n"
-                                "Do NOT return empty objects, zero values, empty arrays, or empty strings.\n\n"
+                                "IMPORTANT: Your previous response was INVALID and failed schema validation.\n"
+                                f"Error Details:\n{validation_error}\n\n"
+                                "You MUST fix this error and output a complete, valid JSON object matching the required structure.\n"
+                                "Rely strictly on the RETRIEVED CODE section to fill in missing data. Do NOT return empty defaults.\n\n"
                             )
+                            
                             retry_output = await self.llm.generate(
                                 nudge + user_msg,
                                 system_prompt=sys_prompt,
                                 max_tokens=single_pass_output,
                                 temperature=0.7
                             )
-                            print(f"[EXECUTOR] Retry {retry + 1} output: {len(retry_output)} chars")
-                            if len(retry_output) > len(output):
-                                output = retry_output
-                            if len(output) >= 300:
-                                break
+                            print(f"[EXECUTOR] Retry {retry + 1} generated {len(retry_output)} chars")
+                            output = retry_output
                     
                     state["llm_output"] = output
                     state["logs"].append(f"  Generated {len(output)} chars in single pass (max_tokens={single_pass_output})")
