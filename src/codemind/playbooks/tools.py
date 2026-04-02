@@ -8,6 +8,7 @@ Playbooks define HOW to process the retrieved code via their system prompts.
 from datetime import UTC, datetime
 import traceback
 from codemind.storage.database import CatalogStore
+from codemind.storage.models import RepositoryManifest
 
 
 class PlaybookTools:
@@ -37,6 +38,35 @@ class PlaybookTools:
         self.graph = graph_service
         self.embedder = embedder
         self.db = db
+
+    async def _get_default_latest_repos(self) -> list[str]:
+        """Fetch the most recently indexed repo_id for each repository."""
+        if not self.db:
+            return []
+            
+        session = getattr(self.db, "get_session", lambda: None)()
+        if not session:
+            return []
+            
+        try:
+            # Query all manifests. This works consistently across MongoBackend/DatabaseManager
+            manifests = session.query(RepositoryManifest).all()
+            
+            latest_by_repo = {}
+            for m in manifests:
+                # Group by URL if available, otherwise fallback to local path
+                key = m.repo_url if m.repo_url else m.repo_path
+                current_latest = latest_by_repo.get(key)
+                if not current_latest or m.last_indexed_at > current_latest.last_indexed_at:
+                    latest_by_repo[key] = m
+                    
+            return [m.repo_id for m in latest_by_repo.values()]
+        except Exception as e:
+            print(f"[TOOLS] Error fetching default repos: {e}")
+            return []
+        finally:
+            if hasattr(session, 'close'):
+                session.close()
     
     async def search_codebase(self, params: dict) -> dict:
         """
@@ -62,7 +92,10 @@ class PlaybookTools:
             }
         """
         try:
-            repo_id = params["repo_id"]
+            repo_id = params.get("repo_id")
+            if not repo_id:
+                repo_id = await self._get_default_latest_repos()
+                
             queries = params.get("queries", [])
             limit = params.get("limit", 10)
             mode = params.get("mode", "semantic")
@@ -165,6 +198,10 @@ class PlaybookTools:
             # Sort by score and limit
             all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             final_results = all_results[:limit]
+            
+            # Final safeguard to ensure embeddings never leak to the LLM
+            for r in final_results:
+                r.pop("embedding", None)
             
             return {
                 "success": True,
@@ -289,7 +326,10 @@ class PlaybookTools:
             }
         """
         try:
-            repo_id = params["repo_id"]
+            repo_id = params.get("repo_id")
+            if not repo_id:
+                repo_id = await self._get_default_latest_repos()
+                
             name = params["name"]
             symbol_type = params.get("symbol_type")
 

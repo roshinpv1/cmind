@@ -98,6 +98,8 @@ class TestCodeMindE2E:
             self.__class__.local_repo_id = None
         if not hasattr(self, "remote_repo_id"):
             self.__class__.remote_repo_id = None
+        if not hasattr(self, "remote_repo_id_branch"):
+            self.__class__.remote_repo_id_branch = None
         if not hasattr(self, "session"):
             import json
             s = requests.Session()
@@ -147,6 +149,25 @@ class TestCodeMindE2E:
         repo_id = job_result.get("repo_id")
         self.__class__.remote_repo_id = repo_id
 
+    def test_02b_index_remote_repo_branch(self):
+        """1c. Trigger indexing on a remote Git URL for a different branch."""
+        test_url = "https://github.com/octocat/Hello-World"
+        response = self.session.post(f"{BASE_URL}/api/v1/index", json={
+            "repo_url": test_url,
+            "branch": "test"
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert "job_id" in data
+        
+        job_result = wait_for_job(self.session, data["job_id"])
+        repo_id = job_result.get("repo_id")
+        self.__class__.remote_repo_id_branch = repo_id
+        
+        assert self.remote_repo_id is not None
+        assert self.remote_repo_id_branch is not None
+        assert self.remote_repo_id != self.remote_repo_id_branch, "Multi-branch generated overlapping repo_ids"
+
     def test_03_verify_manifests(self):
         """2. Check SQLite manifesting records exist for both environments."""
         response = self.session.get(f"{BASE_URL}/api/v1/repos")
@@ -156,6 +177,7 @@ class TestCodeMindE2E:
         
         assert self.local_repo_id in repo_ids, "Local folder repository ID missing from manifest"
         assert self.remote_repo_id in repo_ids, "Remote Github repository ID missing from manifest"
+        assert self.remote_repo_id_branch in repo_ids, "Remote branch repository ID missing from manifest"
 
     def test_04_semantic_search(self):
         """3a. Query LanceDB semantic search engine against local DB."""

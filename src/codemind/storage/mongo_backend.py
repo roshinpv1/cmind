@@ -243,7 +243,7 @@ class MongoDatabase:
         
         # repository_manifests indexes
         self.db.repository_manifests.create_index("repo_id", unique=True)
-        self.db.repository_manifests.create_index("repo_path", unique=True)
+        self.db.repository_manifests.create_index("repo_path")
         
         # index_runs indexes
         self.db.index_runs.create_index("run_id", unique=True)

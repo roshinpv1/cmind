@@ -276,6 +276,11 @@ class LanceDBStorage:
 
         # Post-filter by distance threshold (derived from playbook min_score)
         results = query.to_list()
+        
+        # Strip massive embedding vectors to prevent LLM OOM/Timeout
+        for r in results:
+            r.pop("embedding", None)
+
         filtered_results = [r for r in results if r.get("_distance", 1.0) < distance_threshold]
 
         # Safety filter for tiny chunks (handles legacy data)

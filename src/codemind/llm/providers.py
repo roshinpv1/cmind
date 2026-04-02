@@ -78,13 +78,12 @@ class LocalDriver(LLMDriver):
                     "messages": messages,
                     "temperature": temperature,
                     "max_tokens": min(max_tokens, self.config.max_tokens),
-                    "repeat_penalty": 1.2,
                 }
             )
             if response.status_code != 200:
                 error_body = response.text[:500]
                 print(f"[LLM] Error {response.status_code}: {error_body}")
-                response.raise_for_status()
+                raise Exception(f"HTTP {response.status_code} - {error_body}")
             data = response.json()
             output = data["choices"][0]["message"]["content"]
             

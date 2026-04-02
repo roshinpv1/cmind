@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 class SearchCodebaseInput(BaseModel):
     """Input for searching the indexed codebase."""
     queries: list[str] = Field(description="Search queries to try (semantic)")
-    repo_id: str = Field(description="Repository identifier")
+    repo_id: Optional[str] = Field(default=None, description="Repository identifier (omit to search globally across latest branches)")
     limit: int = Field(default=10, description="Max results to return")
     mode: str = Field(default="hybrid", description="Search mode: 'semantic' or 'hybrid'")
     file_types: Optional[list[str]] = Field(default=None, description="File extensions to filter, e.g. ['.py', '.js']")
@@ -54,7 +54,7 @@ class GetFileOutlineInput(BaseModel):
 class SearchSymbolInput(BaseModel):
     """Input for finding a symbol by name."""
     name: str = Field(description="Symbol name to search for")
-    repo_id: str = Field(description="Repository identifier")
+    repo_id: Optional[str] = Field(default=None, description="Repository identifier (omit to search globally across latest branches)")
     symbol_type: Optional[str] = Field(default=None, description="'Class' or 'Function'")
 
 
@@ -135,7 +135,7 @@ def create_langchain_tools(playbook_tools) -> list:
     @tool(args_schema=SearchCodebaseInput)
     async def search_codebase(
         queries: list[str],
-        repo_id: str,
+        repo_id: Optional[str] = None,
         limit: int = 10,
         mode: str = "hybrid",
         file_types: Optional[list[str]] = None,
@@ -183,7 +183,7 @@ def create_langchain_tools(playbook_tools) -> list:
     @tool(args_schema=SearchSymbolInput)
     async def search_symbol(
         name: str,
-        repo_id: str,
+        repo_id: Optional[str] = None,
         symbol_type: Optional[str] = None,
     ) -> str:
         """Find a class or function by name. Returns file locations and definitions."""

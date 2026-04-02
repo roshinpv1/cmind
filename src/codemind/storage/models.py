@@ -18,7 +18,7 @@ class RepositoryManifest(Base):
     __tablename__ = "repository_manifests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    repo_path: Mapped[str] = mapped_column(String, unique=True, index=True)
+    repo_path: Mapped[str] = mapped_column(String, index=True)
     repo_id: Mapped[str] = mapped_column(String, unique=True, index=True)
     repo_url: Mapped[str | None] = mapped_column(String, nullable=True)
     branch: Mapped[str | None] = mapped_column(String, nullable=True)  # New field for uniqueness

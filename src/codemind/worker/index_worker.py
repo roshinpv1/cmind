@@ -176,6 +176,7 @@ class IndexWorker:
                 repo_path=actual_repo_path,
                 repo_id=actual_repo_id,
                 job_id=job_id,
+                branch=job.get("branch", "main"),
                 org=job.get("org"),
                 repo_url=resolved.get("repo_url"),
                 cd_repo_url=resolved.get("cd_repo_url"),
@@ -260,7 +261,7 @@ class IndexWorker:
         # Local path
         return {
             "repo_path": repo_path,
-            "repo_id": repo_id or self.manifest._compute_repo_id(repo_path),
+            "repo_id": repo_id or self.manifest._compute_repo_id(repo_path, branch),
             "repo_url": None,
             "cd_repo_url": None,
         }

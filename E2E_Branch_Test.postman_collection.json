@@ -1,0 +1,107 @@
+{
+	"info": {
+		"name": "E2E Branch Indexing Test",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Index Main Branch",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"var data = pm.response.json();",
+							"pm.test('Status is 200', function() { pm.response.to.have.status(200); });",
+							"pm.test('Has job_id', function() { pm.expect(data).to.have.property('job_id'); });",
+							"pm.test('Has repo_id', function() { pm.expect(data).to.have.property('repo_id'); });",
+							"pm.environment.set('repo_id_main', data.repo_id);",
+							"pm.environment.set('job_id_main', data.job_id);"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [{"key": "Content-Type", "value": "application/json"}],
+				"url": "{{baseUrl}}/api/v1/index",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"repo_url\": \"https://github.com/psf/requests.git\", \"branch\": \"main\"}"
+				}
+			}
+		},
+		{
+			"name": "Index V2.31.0 Branch",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"var data = pm.response.json();",
+							"pm.test('Status is 200', function() { pm.response.to.have.status(200); });",
+							"pm.environment.set('repo_id_dev', data.repo_id);",
+							"pm.environment.set('job_id_dev', data.job_id);",
+							"pm.test('Repo IDs are logically unique per branch', function() {",
+							"    pm.expect(data.repo_id).to.not.equal(pm.environment.get('repo_id_main'));",
+							"});"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [{"key": "Content-Type", "value": "application/json"}],
+				"url": "{{baseUrl}}/api/v1/index",
+				"body": {
+					"mode": "raw",
+					"raw": "{\"repo_url\": \"https://github.com/psf/requests.git\", \"branch\": \"v2.31.0\"}"
+				}
+			}
+		},
+		{
+			"name": "Check Main Job Status",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"var data = pm.response.json();",
+							"pm.test('Status is 200', function() { pm.response.to.have.status(200); });",
+							"pm.test('Job is tracked', function() { pm.expect(data.id).to.equal(pm.environment.get('job_id_main')); });"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"url": "{{baseUrl}}/api/v1/jobs/{{job_id_main}}"
+			}
+		},
+		{
+			"name": "Check Dev Job Status",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"var data = pm.response.json();",
+							"pm.test('Status is 200', function() { pm.response.to.have.status(200); });",
+							"pm.test('Job is tracked', function() { pm.expect(data.id).to.equal(pm.environment.get('job_id_dev')); });"
+						]
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"url": "{{baseUrl}}/api/v1/jobs/{{job_id_dev}}"
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:8000"
+		}
+	]
+}

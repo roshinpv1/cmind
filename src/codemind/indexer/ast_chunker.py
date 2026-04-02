@@ -301,6 +301,11 @@ class ASTChunker:
                 end -= 1
                 chunk_text = "\n".join(lines[i:end])
 
+            # Handle massive 1-line symbols natively
+            if end == i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                from codemind.llm.token_counter import truncate_to_tokens
+                chunk_text = truncate_to_tokens(chunk_text, self.max_tokens)
+
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
                 chunks.append(CodeChunk(
@@ -369,9 +374,10 @@ class ASTChunker:
                 end -= 1
                 chunk_text = "\n".join(lines[i:end])
 
-            # Handle single lines that exceed max_chunk_chars — truncate
-            if len(chunk_text) > self.max_chunk_chars and end == i + 1:
-                chunk_text = chunk_text[:self.max_chunk_chars]
+            # Handle dense single lines — exact token truncation
+            if end == i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                from codemind.llm.token_counter import truncate_to_tokens
+                chunk_text = truncate_to_tokens(chunk_text, self.max_tokens)
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)
@@ -420,9 +426,10 @@ class ASTChunker:
                 end -= 1
                 chunk_text = "\n".join(lines[i:end])
 
-            # Handle single lines that exceed max_chunk_chars — truncate
-            if len(chunk_text) > self.max_chunk_chars and end == i + 1:
-                chunk_text = chunk_text[:self.max_chunk_chars]
+            # Handle dense single lines — exact token truncation
+            if end == i + 1 and self._token_count(chunk_text) > self.max_tokens:
+                from codemind.llm.token_counter import truncate_to_tokens
+                chunk_text = truncate_to_tokens(chunk_text, self.max_tokens)
 
             if len(chunk_text.strip()) >= self.min_chunk_chars:
                 chunk_hash = self._hash(chunk_text)

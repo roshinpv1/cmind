@@ -289,7 +289,7 @@ class GitRepoManager:
             if not discovered:
                 raise GitRepoNotFoundError(f"Not a git repo: {repo_url}")
             repo = pygit2.Repository(discovered)
-            return Path(repo_url), self._get_repo_id(repo_url), str(repo.head.target)
+            return Path(repo_url), self._get_repo_id(repo_url, branch), str(repo.head.target)
 
         # Resolve credentials via provider
         auth = self._cred_provider.resolve(repo_url, token=token)
@@ -304,7 +304,7 @@ class GitRepoManager:
             self._clone_new(repo_url, branch, local_path, callbacks, auth.token)
 
         repo = pygit2.Repository(str(local_path))
-        return local_path, self._get_repo_id(repo_url), str(repo.head.target)
+        return local_path, self._get_repo_id(repo_url, branch), str(repo.head.target)
 
     # --- Clone / Update ---
 
@@ -472,8 +472,9 @@ class GitRepoManager:
         name = repo_url.rstrip("/").split("/")[-1]
         return name[:-4] if name.endswith(".git") else name
 
-    def _get_repo_id(self, repo_identifier):
-        return hashlib.sha256(repo_identifier.encode()).hexdigest()[:16]
+    def _get_repo_id(self, repo_identifier, branch: str = "main"):
+        unique_string = f"{repo_identifier}::{branch}"
+        return hashlib.sha256(unique_string.encode()).hexdigest()[:16]
 
     def cleanup_cache(self):
         if self.cache_dir.exists():

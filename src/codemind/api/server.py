@@ -262,7 +262,7 @@ async def index_repository_job(
             # For Git URLs, use a temporary ID based on URL
             from codemind.utils.git_utils import GitRepoManager
             git_manager = GitRepoManager()
-            repo_id = git_manager._get_repo_id(request.repo_url)
+            repo_id = git_manager._get_repo_id(request.repo_url, request.branch or "main")
         print(f"[SERVER] Generated new repo ID {repo_id}")
 
     # Create job with all parameters — the worker will pick this up
@@ -295,7 +295,7 @@ async def get_job_status(job_id: str, user: dict = Depends(require_user)):
     # Try to get repo_id from manifest
     repo_id = None
     if job.repo_path:
-        repo = manifest.get_repository(job.repo_path)
+        repo = manifest.get_repository(job.repo_path, branch=job.branch or "main")
         if repo:
             repo_id = repo.repo_id
         else:

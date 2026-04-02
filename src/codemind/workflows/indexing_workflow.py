@@ -27,6 +27,7 @@ class IndexingState:
     repo_path: str
     repo_id: str
     job_id: str
+    branch: str = "main"
     stage: str = "init"
     error: str | None = None
     files_changed: int = 0
