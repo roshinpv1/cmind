@@ -112,6 +112,11 @@ function safeStr(v: any): string {
 function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
     const [expanded, setExpanded] = useState(false);
 
+    let metadataParsed: any = {};
+    try {
+        metadataParsed = JSON.parse((rawItem as any).metadata || "{}");
+    } catch(e) {}
+
     // Normalize null/undefined fields to safe defaults — use safeStr to guard against objects from LLM
     const item = {
         ...rawItem,
@@ -129,7 +134,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
         category: safeStr(rawItem.category ?? ""),
         estimated_cost: rawItem.estimated_cost ?? 0,
         business_functionalities: (rawItem.business_functionalities ?? []).map(safeStr),
-        reasoning: safeStr(rawItem.reasoning ?? ""),
+        reasoning: safeStr(metadataParsed.ai_insight || rawItem.reasoning || ""),
         search_count: rawItem.search_count ?? 0,
         view_count: rawItem.view_count ?? 0,
         popularity_points: rawItem.popularity_points ?? 0,
@@ -285,7 +290,7 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
                 <div className="px-6 py-4 mx-4 mb-4 bg-primary/5 rounded-xl border border-primary/20">
                     <div className="flex items-center gap-2 mb-2">
                         <Lightbulb className="h-4 w-4 text-primary" />
-                        <span className="text-xs font-bold tracking-widest uppercase text-primary">Architectural Reasoning</span>
+                        <span className="text-xs font-bold tracking-widest uppercase text-primary">AI Re-Ranker Insight</span>
                     </div>
                     <div className="prose prose-sm prose-compact max-w-none">
                         <Markdown remarkPlugins={[remarkGfm]}>{item.reasoning}</Markdown>
@@ -515,6 +520,7 @@ export default function AgentCatalogSearch() {
     // Filters
     const [limit, setLimit] = useState(5);
     const [minScore, setMinScore] = useState(0.3);
+    const [aiRerank, setAiRerank] = useState(false);
 
     // Discovery Polling Hook
     useEffect(() => {
@@ -719,6 +725,7 @@ export default function AgentCatalogSearch() {
                     query,
                     limit,
                     min_score: minScore,
+                    ai_rerank: aiRerank,
                 }),
             });
 
@@ -883,6 +890,18 @@ export default function AgentCatalogSearch() {
                                 <span className="text-sm font-bold text-gray-700 tabular-nums w-10">
                                     {Math.round(minScore * 100)}%
                                 </span>
+                            </div>
+                            <div className="h-6 w-px bg-gray-200" />
+                            <div className="flex items-center gap-2">
+                                <label className="text-xs font-bold text-violet-600 uppercase tracking-wider flex items-center gap-1">
+                                    <Sparkles className="h-3.5 w-3.5" /> AI Re-Rank
+                                </label>
+                                <input
+                                    type="checkbox"
+                                    checked={aiRerank}
+                                    onChange={(e) => setAiRerank(e.target.checked)}
+                                    className="w-4 h-4 text-violet-600 rounded focus:ring-violet-500 border-gray-300 ml-1"
+                                />
                             </div>
                         </div>
                     )}
