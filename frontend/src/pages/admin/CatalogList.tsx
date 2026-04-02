@@ -110,7 +110,8 @@ export default function CatalogList() {
             });
             if (!res.ok) throw new Error("Failed to fetch full catalog details");
             const data = await res.json();
-            setDetailedCatalog(data);
+            // The API returns an array for legacy LanceDB compatibility
+            setDetailedCatalog(Array.isArray(data) && data.length > 0 ? data[0] : data);
         } catch (err) {
             alert("Failed to load catalog details");
             setSelectedRepoId(null);
