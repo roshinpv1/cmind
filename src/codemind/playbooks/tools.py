@@ -609,7 +609,7 @@ class PlaybookTools:
         # ── AI LLM RE-RANKING (EXPERT MODE) ──────────────────────────
         if ai_rerank and results:
             try:
-                from codemind.llm.models import CmindChatModel
+                from codemind.llm.factory import get_chat_model
                 from codemind.playbooks.structured_schemas import CatalogRerankOutput
                 import json as _json
 
@@ -626,7 +626,7 @@ class PlaybookTools:
                 user_msg = f"User Query: '{query_str}'\n\nRate these candidate components. Score 1-100. Discard irrelevant ones entirely. Return in the exact JSON schema requested.\n\nCandidates:\n{_json.dumps(rerank_payload, indent=2)}"
                 
                 print(f"[TOOLS] Initiating LLM Re-Ranking for {len(results)} items...")
-                model = CmindChatModel(task="ranker", temperature=0.0)
+                model = get_chat_model()
                 llm = model.with_structured_output(CatalogRerankOutput)
                 
                 output = llm.invoke([
