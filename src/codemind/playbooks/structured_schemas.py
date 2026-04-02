@@ -65,6 +65,17 @@ class CatalogEntry(BaseModel):
         return values
 
 
+class CatalogRerankItem(BaseModel):
+    """An LLM-scored catalog item."""
+    repo_id: str = Field(description="The repo_id of the catalog entry")
+    relevance_score: int = Field(ge=0, le=100, description="Strict 1-100 score of how perfectly the component matches the exact technical constraints, functionality, and intent of the user's query.")
+    reasoning: str = Field(description="1-sentence explanation of why it was scored this way. If it is completely irrelevant, state why.")
+
+class CatalogRerankOutput(BaseModel):
+    """Structured output for search result re-ranking."""
+    items: list[CatalogRerankItem] = Field(default_factory=list, description="The strictly re-ordered and scored items.")
+
+
 class CatalogMatch(BaseModel):
     """A single capability-to-catalog match."""
     capability: str = Field(description="Capability being matched")

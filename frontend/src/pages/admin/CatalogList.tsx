@@ -481,6 +481,38 @@ export default function CatalogList() {
                                                 )) : <span className="text-sm text-gray-400">No tags extracted</span>}
                                             </div>
                                         </div>
+                                        {/* Capabilities Card */}
+                                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow lg:col-span-2">
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Business Capabilities</h4>
+                                            <div className="flex flex-col gap-2">
+                                                {detailedCatalog.business_functionalities?.length ? detailedCatalog.business_functionalities.map((cap: string, i: number) => (
+                                                    <div key={i} className="flex items-start gap-2 text-sm text-gray-800">
+                                                        <CheckCircle2 className="w-4 h-4 text-emerald-500 mt-0.5 flex-shrink-0" />
+                                                        <span className="font-medium">{cap}</span>
+                                                    </div>
+                                                )) : <span className="text-sm text-gray-400 flex items-center gap-2"><X className="w-4 h-4 text-red-400" /> No capabilities declared</span>}
+                                            </div>
+                                        </div>
+                                        {/* Economics Card */}
+                                        <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm hover:shadow-md transition-shadow">
+                                            <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Economics & Build</h4>
+                                            <div className="space-y-3">
+                                                <div>
+                                                    <div className="text-[10px] text-gray-500 uppercase font-bold tracking-wide">Est. Build Cost</div>
+                                                    <div className="text-lg font-black text-gray-900">${(detailedCatalog.estimated_cost || 0).toLocaleString()}</div>
+                                                </div>
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <div>
+                                                        <div className="text-[10px] text-gray-500 uppercase font-bold tracking-wide">Complexity</div>
+                                                        <div className="text-sm font-bold text-violet-600 capitalize">{detailedCatalog.complexity_tier || "N/A"}</div>
+                                                    </div>
+                                                    <div>
+                                                        <div className="text-[10px] text-gray-500 uppercase font-bold tracking-wide">Team/Time</div>
+                                                        <div className="text-sm font-bold text-gray-700">{detailedCatalog.team_size_estimate || 1} team · {detailedCatalog.estimated_dev_months || 0}m</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                     
                                     {/* Component Manifest Raw Data */}

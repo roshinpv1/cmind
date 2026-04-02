@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Search, Loader2 } from "lucide-react";
+import { Search, Loader2, Sparkles } from "lucide-react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { authService } from "../../lib/auth";
@@ -22,6 +22,7 @@ export default function CatalogSearch() {
     // Advanced parameters
     const [limit, setLimit] = useState(5);
     const [minScore, setMinScore] = useState(0.7);
+    const [aiRerank, setAiRerank] = useState(false);
 
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -40,7 +41,8 @@ export default function CatalogSearch() {
                 body: JSON.stringify({
                     query: query,
                     limit: limit,
-                    min_score: minScore
+                    min_score: minScore,
+                    ai_rerank: aiRerank
                 })
             });
 
@@ -117,6 +119,19 @@ export default function CatalogSearch() {
                         />
                         <span>{(minScore * 100).toFixed(0)}%</span>
                     </div>
+
+                    <div className="flex items-center space-x-2 border-l border-gray-200 pl-4">
+                        <label htmlFor="airerank" className="font-medium text-violet-600 flex items-center gap-1">
+                            <Sparkles className="w-4 h-4" /> Expert AI Re-Rank:
+                        </label>
+                        <input
+                            type="checkbox"
+                            id="airerank"
+                            checked={aiRerank}
+                            onChange={(e) => setAiRerank(e.target.checked)}
+                            className="w-4 h-4 text-violet-600 rounded focus:ring-violet-500 border-gray-300"
+                        />
+                    </div>
                 </div>
             </div>
 
@@ -135,6 +150,22 @@ export default function CatalogSearch() {
                                 {new Date(item.created_at).toLocaleDateString()}
                             </span>
                         </div>
+                        {(() => {
+                            try {
+                                const meta = JSON.parse(item.metadata || "{}");
+                                if (meta.ai_insight) {
+                                    return (
+                                        <div className="px-6 py-3 bg-violet-50 border-t border-violet-100 flex items-start gap-2">
+                                            <Sparkles className="w-5 h-5 text-violet-500 mt-0.5 flex-shrink-0" />
+                                            <p className="text-sm font-medium text-violet-800 leading-relaxed">
+                                                {meta.ai_insight}
+                                            </p>
+                                        </div>
+                                    );
+                                }
+                            } catch (err) {}
+                            return null;
+                        })()}
                         <div className="px-6 py-4 prose prose-red max-w-none">
                             <div className="text-gray-700">
                                 <Markdown remarkPlugins={[remarkGfm]}>{item.result}</Markdown>

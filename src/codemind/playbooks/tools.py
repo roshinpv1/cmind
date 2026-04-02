@@ -415,7 +415,8 @@ class PlaybookTools:
         queries: list[str], 
         repo_id: str | list[str] | None = None, 
         limit: int = 10,
-        min_score: float = 0.5
+        min_score: float = 0.5,
+        ai_rerank: bool = False
     ) -> list[dict]:
         """
         Internal high-quality catalog search:
@@ -605,6 +606,57 @@ class PlaybookTools:
         results.sort(key=lambda x: x["score"], reverse=True)
         results = results[:limit]
 
+        # ── AI LLM RE-RANKING (EXPERT MODE) ──────────────────────────
+        if ai_rerank and results:
+            try:
+                from codemind.llm.models import CmindChatModel
+                from codemind.playbooks.structured_schemas import CatalogRerankOutput
+                import json as _json
+
+                rerank_payload = []
+                for r in results:
+                    rerank_payload.append({
+                        "repo_id": r["repo_id"],
+                        "repo_name": r.get("repo_name", ""),
+                        "preview": r.get("chunk_text", "")[:400] 
+                    })
+                
+                query_str = queries[0] if isinstance(queries, list) else queries
+                sys_prompt = "You are a Catalog Retrieval Expert. Strictly re-rank and score components based ONLY on how mathematically relevant they are to the user's constraints."
+                user_msg = f"User Query: '{query_str}'\n\nRate these candidate components. Score 1-100. Discard irrelevant ones entirely. Return in the exact JSON schema requested.\n\nCandidates:\n{_json.dumps(rerank_payload, indent=2)}"
+                
+                print(f"[TOOLS] Initiating LLM Re-Ranking for {len(results)} items...")
+                model = CmindChatModel(task="ranker", temperature=0.0)
+                llm = model.with_structured_output(CatalogRerankOutput)
+                
+                output = llm.invoke([
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": user_msg}
+                ])
+                
+                ranked_rids = {item.repo_id: item for item in output.items}
+                
+                final_results = []
+                for r in results:
+                    if r["repo_id"] in ranked_rids:
+                        r_item = ranked_rids[r["repo_id"]]
+                        # Override the LanceDB cosine score with the GPT/Claude assigned relevance
+                        r["score"] = r_item.relevance_score / 100.0  # Normalized to 0.0-1.0
+                        # Append the reasoning into the UI visible metadata
+                        meta = _json.loads(r.get("metadata", "{}"))
+                        meta["ai_insight"] = r_item.reasoning
+                        r["metadata"] = _json.dumps(meta)
+                        final_results.append(r)
+                
+                final_results.sort(key=lambda x: x["score"], reverse=True)
+                results = final_results
+                print(f"[TOOLS] LLM Re-Ranking complete. Kept {len(results)} items.")
+
+            except Exception as e:
+                print(f"[TOOLS] AI Re-ranking failed (non-fatal, falling back to dense vectors): {e}")
+                import traceback
+                traceback.print_exc()
+
         # ── Track search popularity ──────────────────────────────────
         # Increment search_count (+1) and popularity_points (+1) for
         # every catalog item that appeared in these results.
@@ -648,7 +700,8 @@ class PlaybookTools:
                 queries=queries,
                 repo_id=repo_id,
                 limit=limit,
-                min_score=min_score
+                min_score=min_score,
+                ai_rerank=params.get("ai_rerank", False)
             )
             
             return {
