@@ -611,6 +611,7 @@ class PlaybookTools:
             try:
                 from codemind.llm.factory import get_chat_model
                 from codemind.playbooks.structured_schemas import CatalogRerankOutput
+                from langchain_core.messages import SystemMessage, HumanMessage
                 import json as _json
 
                 rerank_payload = []
@@ -630,8 +631,8 @@ class PlaybookTools:
                 llm = model.with_structured_output(CatalogRerankOutput)
                 
                 output = llm.invoke([
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": user_msg}
+                    SystemMessage(content=sys_prompt),
+                    HumanMessage(content=user_msg)
                 ])
                 
                 ranked_rids = {item.repo_id: item for item in output.items}
