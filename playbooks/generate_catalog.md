@@ -45,15 +45,15 @@ You must scan the code and use the provided context to understand:
     "repo_name": "Human-readable project name",
     "repo_url": "https://github.com/org/repo",
     "branch": "main",
-    "description": "One-line summary of what this project does",
-    "summary_high_level": "2-3 sentence overview suitable for catalog browsing",
-    "summary_detailed": "Comprehensive multi-paragraph analysis covering architecture, key components, data flow, and design decisions",
+    "description": "One-line summary of what this project does and the domain it sits in",
+    "summary_high_level": "Extremely keyword-rich 3-4 sentence overview of the core functionality, target audience, domain context, and what external systems it integrates with (critical for semantic search indexing!)",
+    "summary_detailed": "Comprehensive multi-paragraph analysis covering architecture, key components, external APIs, data flow, integrations, and specific design patterns",
     "category": "Web App",
     "quality_score": 80,
     "architecture": "Describe the architecture: layers, patterns (MVC, microservices, event-driven), key modules and their responsibilities",
     "tech_stack": "Languages, frameworks, databases, and infrastructure (e.g., Python 3.12, FastAPI, PostgreSQL, Docker, LangGraph)",
     "specification": "Key APIs, interfaces, protocols, or contracts exposed by this project",
-    "topics": ["topic1", "topic2", "topic3"],
+    "topics": ["topic1", "topic2", "topic3", "business_domain", "architecture_pattern", "external_integration_name"],
     "pros": ["Strength 1", "Strength 2"],
     "cons": ["Weakness 1", "Weakness 2"],
     "first_author": "Original author from context",
@@ -80,12 +80,13 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 
 ### Field Guidelines
 - **repo_name**: Use the actual project/component name (e.g., "PromptShield", "CodeMind API")
-- **summary_high_level**: Brief enough for catalog listing, detailed enough to understand purpose
-- **summary_detailed**: Include architecture decisions, component interactions, data flow
+- **description**: Must clearly state the domain context as well.
+- **summary_high_level**: Because this is indexed by a dense vector database, maximize keyword density! Explicitly name drop key integrations (e.g., 'Kafka', 'Salesforce'), domain terminology ('Trading', 'HR'), and specific functional capabilities.
+- **summary_detailed**: Include architecture decisions, component interactions, data flow, and EVERY external system or API it touches.
 - **category**: Choose the most accurate from: Monolith, Microservice, AI Agent, MCP (Model Context Protocol), AI Enabled, Frontend, Backend, Fullstack, API, Web App, CLI Tool, Library, Framework, ML Pipeline, Data Pipeline, Infrastructure, DevOps, Security, Testing, Documentation, Other
 - **quality_score**: 1-30 (poor), 31-60 (adequate), 61-80 (good), 81-100 (excellent)
-- **specification**: Document REST APIs, gRPC services, CLI commands, library interfaces
-- **topics**: Include technology names, domain terms, and capability keywords for searchability
+- **specification**: Document REST APIs, gRPC services, CLI commands, library interfaces, and event messages (e.g., Kafka topics consumed/produced)
+- **topics**: Extract at least 8-10 high-value tags! Include exact technology names, strict business domain terms (e.g. 'Fintech', 'HRIS'), architecture patterns, and third-party SaaS names. Do NOT use generic tags like 'app'.
 - **first_author**: Extract the first author or creator from the metadata context
 - **total_commits**: Extract total commit count from the metadata context
 - **last_pr_title**: Extract the last merged PR title from the metadata context
@@ -93,7 +94,7 @@ Do NOT write "Here is the catalog entry". Just the JSON.
 - **estimated_dev_months**: How many developer-months it would take to rebuild from scratch (e.g., 2 for a small CLI, 12 for a complex platform)
 - **team_size_estimate**: Ideal team size to build it (1-10)
 - **complexity_tier**: Classify as `low` (simple CRUD/CLI), `medium` (multi-service, integrations), `high` (distributed, ML, real-time), or `extreme` (large-scale platform)
-- **business_functionalities**: Extract or infer the core business use cases, features, and domain operations the application performs (e.g., "Payment Processing", "Order Management").
+- **business_functionalities**: You MUST perfectly and exhaustively list every major standalone business process, domain operation, or user-facing feature it serves. Be hyper-specific (e.g., "Process JWT OAuth2 Logins via Active Directory" instead of just "Auth"). Extract at least 5+.
 
 ## Output Schema
 ```yaml
@@ -104,9 +105,9 @@ fields:
   repo_name: {type: string, required: true, description: "Human-readable project name"}
   repo_url: {type: string, default: "", description: "Repository URL"}
   branch: {type: string, default: "main", description: "Branch name"}
-  description: {type: string, required: true, description: "One-line summary"}
-  summary_high_level: {type: string, required: true, description: "2-3 sentence overview for catalog browsing"}
-  summary_detailed: {type: string, required: true, description: "Comprehensive multi-paragraph analysis"}
+  description: {type: string, required: true, description: "One-line summary with domain context"}
+  summary_high_level: {type: string, required: true, description: "Keyword-rich 3-4 sentence overview explicitly stating integrations and domain logic"}
+  summary_detailed: {type: string, required: true, description: "Comprehensive multi-paragraph analysis explicitly listing all external systems and data flows"}
   category: {type: string, required: true, description: "Software architecture or type (e.g. Monolith, Microservice, MCP, AI Agent, Frontend, Backend, API)"}
   quality_score: {type: integer, min: 1, max: 100, default: 50, description: "Quality score 1-100"}
   architecture: {type: string, default: "", description: "Architecture description"}
@@ -142,7 +143,8 @@ fields:
 | Discoverability | 20% | Topics array includes relevant searchable terms |
 
 ## Evaluation
-- business_functionalities must contain >= 3 business_functionalities
+- business_functionalities must contain >= 5 high-quality, descriptive elements
+- topics must contain >= 8 explicit technology/domain tags
 - description must not be empty
 - summary_detailed must not be empty
 
