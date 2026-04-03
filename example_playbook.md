@@ -27,7 +27,7 @@ Provide the name of the file and the framework you want me to write tests for (e
 ```yaml
 mode: hybrid
 limit: 250
-min_score: 0.2
+min_score: 0.5
 queries:
   - "Find all utility functions in the module"
   - "Find existing test fixtures and mock setups"

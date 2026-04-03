@@ -195,7 +195,7 @@ async def debug_catalog(repo_id: str, skip_llm: bool = False, db_path: str = "da
                 print(f"              {text_preview}...")
         else:
             # Diagnostic: run without min_score to see what we're missing
-            raw = lance.search(query_emb, repo_id=repo_id, limit=5, min_score=0.0)
+            raw = lance.search(query_emb, repo_id=repo_id, limit=5, min_score=0.5)
             if raw:
                 top_dist = [r.get("_distance", 1.0) for r in raw[:3]]
                 warn(f"Without min_score filter, found {len(raw)} results. "

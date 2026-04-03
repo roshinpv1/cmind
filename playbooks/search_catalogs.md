@@ -148,6 +148,6 @@ inject_repo_metadata: false
 ```yaml
 limit: 5
 mode: catalog
-min_score: 0.0
+min_score: 0.5
 queries: []
 ```

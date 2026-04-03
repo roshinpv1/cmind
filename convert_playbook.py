@@ -68,7 +68,7 @@ Provide the goal or specific components you want to analyze.
 ```yaml
 mode: hybrid
 limit: 100
-min_score: 0.3
+min_score: 0.5
 queries:
   - "Find core domain models"
   - "Find main entry points"

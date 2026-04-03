@@ -236,7 +236,7 @@ class LanceDBStorage:
         repo_id: str | list[str] | None = None,
         limit: int = 10,
         table_name: str = "code_chunks",
-        min_score: float = 0.3,
+        min_score: float = 0.5,
     ) -> list[dict]:
         """
         Semantic search over chunks.

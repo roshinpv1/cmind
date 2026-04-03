@@ -70,7 +70,7 @@ List any missing systems in the `gaps` array, and write a cohesive summary in `a
 ```yaml
 mode: catalog
 limit: 15
-min_score: 0.1
+min_score: 0.5
 ```
 
 ## Output Schema

@@ -87,7 +87,7 @@ def catalog_search(
     query: str,
     repo_id: str | None = None,
     limit: int = 5,
-    min_score: float = 0.8,
+    min_score: float = 0.5,
 ) -> str:
     """Search across all indexed repository catalogs using semantic similarity.
 

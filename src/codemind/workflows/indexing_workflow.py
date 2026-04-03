@@ -202,7 +202,8 @@ class IndexingWorkflow:
             state.stage = "detecting_changes"
 
             detector = ChangeDetector(state.repo_path)
-            repo = self.manifest.get_repository(state.repo_path)
+            branch = getattr(state, "branch", "main")
+            repo = self.manifest.get_repository(state.repo_path, branch=branch)
 
             if repo:
                 last_commit = repo.last_commit_hash
@@ -588,10 +589,10 @@ class IndexingWorkflow:
 
         # ── Phase 1: Create/update repository in manifest (CRITICAL) ─────
         try:
-            repo = self.manifest.get_repository(state.repo_path)
+            branch = getattr(state, "branch", "main")
+            repo = self.manifest.get_repository(state.repo_path, branch=branch)
             
             metadata = getattr(state, "metadata", {})
-            branch = getattr(state, "branch", "main")
             
             if not repo:
                 self.manifest.create_repository(
@@ -601,7 +602,7 @@ class IndexingWorkflow:
                     org=getattr(state, 'org', None),
                     user_id=getattr(state, 'user_id', None)
                 )
-                repo = self.manifest.get_repository(state.repo_path)
+                repo = self.manifest.get_repository(state.repo_path, branch=branch)
                 print(f"[MANIFEST] ✅ Created repository entry for {state.repo_id}")
             
             # Update manifest with commit hash and metadata

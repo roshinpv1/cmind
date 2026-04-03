@@ -86,7 +86,7 @@ You are the **Build vs Reuse Advisor** — a senior engineering economics analys
 ```yaml
 mode: catalog
 limit: 15
-min_score: 0.1
+min_score: 0.5
 ```
 
 ## Output Schema

@@ -38,7 +38,7 @@ class PlaybookCreateRequest(BaseModel):
     icon: str = "Brain"
     color: str = "violet"
     system_prompt: str = "You are a helpful coding assistant."
-    search_strategy: dict = Field(default_factory=lambda: {"mode": "hybrid", "limit": 100, "min_score": 0.3, "queries": []})
+    search_strategy: dict = Field(default_factory=lambda: {"mode": "hybrid", "limit": 100, "min_score": 0.5, "queries": []})
     output_schema: dict = Field(default_factory=dict)
     behavior: dict = Field(default_factory=lambda: {"exclude_test_files": False, "grounding_fence": False, "inject_repo_metadata": False})
     examples: list = Field(default_factory=list)

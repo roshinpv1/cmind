@@ -159,6 +159,6 @@ inject_repo_metadata: true
 ```yaml
 limit: 150
 mode: react
-min_score: 0.25
+min_score: 0.5
 queries: []
 ```

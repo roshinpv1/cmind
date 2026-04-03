@@ -160,7 +160,7 @@ skip_schema_validation: true
 ```yaml
 limit: 80
 mode: hybrid
-min_score: 0.15
+min_score: 0.5
 queries:
   # Foundational — every codebase has these
   - "main entry point application startup initialization"
