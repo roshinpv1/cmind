@@ -4,7 +4,7 @@ version: "1.0"
 description: Deep multi-dimensional codebase analysis that answers any user query with evidence-backed findings
 category: analysis
 complexity: high
-max_iterations: 8
+max_iterations: 5
 ---
 
 # Playbook: analyze_codebase
@@ -157,8 +157,8 @@ inject_repo_metadata: true
 
 ## Search Strategy
 ```yaml
-limit: 150
+limit: 50
 mode: react
-min_score: 0.5
+min_score: 0.2
 queries: []
 ```

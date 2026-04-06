@@ -286,12 +286,12 @@ fields:
 ```yaml
 exclude_test_files: false
 grounding_fence: true
-inject_repo_metadata: true
+inject_repo_metadata: false
 ```
 
 ## Search Strategy
 ```yaml
-limit: 200
+limit: 20
 mode: react
 min_score: 0.5
 queries: []

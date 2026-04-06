@@ -117,8 +117,8 @@ inject_repo_metadata: false
 
 ## Search Strategy
 ```yaml
-limit: 100
+limit: 50
 mode: react
-min_score: 0.5
+min_score: 0.25
 queries: []
 ```
