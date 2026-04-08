@@ -87,6 +87,29 @@ class ListFilesInput(BaseModel):
     file_type: Optional[str] = Field(default=None, description="File extension to filter, e.g. '.py'")
 
 
+class ListFileSystemInput(BaseModel):
+    """Input for listing physical files across the entire host."""
+    path: str = Field(description="Absolute path to a directory on the physical file system")
+
+
+class ReadFileSystemInput(BaseModel):
+    """Input for reading a physical file across the entire host."""
+    path: str = Field(description="Absolute path to a file on the physical file system")
+
+
+class WriteFileSystemInput(BaseModel):
+    """Input for writing a physical file across the entire host."""
+    path: str = Field(description="Absolute path to save the physical file")
+    content: str = Field(description="Text content to write to the file")
+
+
+class GrepSearchInput(BaseModel):
+    """Input for searching literal strings across the repository via grep."""
+    query: str = Field(description="Literal string or regular expression to search for")
+    repo_id: Optional[str] = Field(default=None, description="Repository identifier")
+    includes: Optional[list[str]] = Field(default=None, description="File extensions to include, e.g. ['*.py', '*.js']")
+
+
 class SearchCatalogsInput(BaseModel):
     """Input for searching across repository catalogs."""
     query: str = Field(description="Search query for catalog entries")
@@ -122,7 +145,7 @@ class SaveCatalogEntryInput(BaseModel):
 
 # ─── Tool Factory ─────────────────────────────────────────────────────────────
 
-def create_langchain_tools(playbook_tools) -> list:
+def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list[str]] = None) -> list:
     """Create LangChain tool instances that delegate to PlaybookTools methods.
     
     Args:
@@ -142,6 +165,9 @@ def create_langchain_tools(playbook_tools) -> list:
     ) -> str:
         """Search indexed codebase using semantic and structural queries.
         Best for finding code related to a concept, feature, or pattern."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+        
         params = {
             "queries": queries,
             "repo_id": repo_id,
@@ -161,6 +187,9 @@ def create_langchain_tools(playbook_tools) -> list:
         end_line: Optional[int] = None,
     ) -> str:
         """Read content of a specific file. Use when you know the exact file path."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         params = {"file_path": file_path, "repo_id": repo_id}
         if start_line is not None:
             params["start_line"] = start_line
@@ -176,6 +205,9 @@ def create_langchain_tools(playbook_tools) -> list:
     ) -> str:
         """Get structural outline (AST) of a file showing classes, methods, and functions.
         Use this BEFORE reading a large file to locate exact line numbers of functions."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         params = {"file_path": file_path, "repo_id": repo_id}
         result = await playbook_tools.get_file_outline(params)
         return json.dumps(result, default=str)
@@ -187,6 +219,9 @@ def create_langchain_tools(playbook_tools) -> list:
         symbol_type: Optional[str] = None,
     ) -> str:
         """Find a class or function by name. Returns file locations and definitions."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         params = {"name": name, "repo_id": repo_id}
         if symbol_type:
             params["symbol_type"] = symbol_type
@@ -196,6 +231,9 @@ def create_langchain_tools(playbook_tools) -> list:
     @tool(args_schema=GetCallersInput)
     async def get_callers(function_name: str, repo_id: str) -> str:
         """Find all functions that call a given function. Shows who depends on it."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         result = await playbook_tools.get_callers({
             "function_name": function_name, "repo_id": repo_id
         })
@@ -204,6 +242,9 @@ def create_langchain_tools(playbook_tools) -> list:
     @tool(args_schema=GetCalleesInput)
     async def get_callees(function_name: str, repo_id: str) -> str:
         """Find all functions called by a given function. Shows what it depends on."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         result = await playbook_tools.get_callees({
             "function_name": function_name, "repo_id": repo_id
         })
@@ -215,6 +256,9 @@ def create_langchain_tools(playbook_tools) -> list:
     ) -> str:
         """Get file-level import dependencies.
         direction='imports' for what this file uses, 'imported_by' for what uses this file."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         result = await playbook_tools.get_dependencies({
             "file_path": file_path, "repo_id": repo_id, "direction": direction
         })
@@ -227,12 +271,53 @@ def create_langchain_tools(playbook_tools) -> list:
         file_type: Optional[str] = None,
     ) -> str:
         """List files in the repository matching a pattern or file type."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         params = {"repo_id": repo_id}
         if pattern:
             params["pattern"] = pattern
         if file_type:
             params["file_type"] = file_type
         result = await playbook_tools.list_files(params)
+        return json.dumps(result, default=str)
+    
+    @tool(args_schema=ListFileSystemInput)
+    async def list_file_system(path: str) -> str:
+        """List files natively traversing the physical host file system (bypassing repo index graph tracking).
+        Use this when searching outside of the repository boundary, especially for migrations."""
+        result = await playbook_tools.list_file_system({"path": path})
+        return json.dumps(result, default=str)
+
+    @tool(args_schema=ReadFileSystemInput)
+    async def read_file_system(path: str) -> str:
+        """Read text extracted from a physical file system path (bypassing the Vector DB).
+        Use this to analyze files originating from outside the sandbox."""
+        result = await playbook_tools.read_file_system({"path": path})
+        return json.dumps(result, default=str)
+    
+    @tool(args_schema=WriteFileSystemInput)
+    async def write_file_system(path: str, content: str) -> str:
+        """Write text to a physical file system path (bypassing the Vector DB).
+        Use this to save generated migrations securely to disk. Automatically creates required folder structures."""
+        result = await playbook_tools.write_file_system({"path": path, "content": content})
+        return json.dumps(result, default=str)
+    
+    @tool(args_schema=GrepSearchInput)
+    async def grep_search(
+        query: str,
+        repo_id: Optional[str] = None,
+        includes: Optional[list[str]] = None,
+    ) -> str:
+        """Search across the codebase for exact literal strings or regex patterns. 
+        Use this when semantic search fails or when looking for hardcoded values, error messages, or exact imports."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
+        params = {"query": query, "repo_id": repo_id}
+        if includes:
+            params["includes"] = includes
+        result = await playbook_tools.grep_search(params)
         return json.dumps(result, default=str)
     
     @tool(args_schema=SearchCatalogsInput)
@@ -243,6 +328,9 @@ def create_langchain_tools(playbook_tools) -> list:
     ) -> str:
         """Search across high-level documentation catalogs.
         Use to find relevant repositories or architectural summaries."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+            
         params = {"query": query, "limit": limit}
         if repo_id:
             params["repo_id"] = repo_id
@@ -254,6 +342,9 @@ def create_langchain_tools(playbook_tools) -> list:
         """Save a comprehensive catalog entry documenting a repository.
         Includes purpose, architecture, quality assessment, and metadata.
         Handles both flat and nested LLM output formats."""
+        if enforced_repo_id:
+            kwargs["repo_id"] = enforced_repo_id
+            
         result = await playbook_tools.save_catalog_entry(kwargs)
         return json.dumps(result, default=str)
     
@@ -266,6 +357,10 @@ def create_langchain_tools(playbook_tools) -> list:
         get_callees,
         get_dependencies,
         list_files,
+        list_file_system,
+        read_file_system,
+        write_file_system,
+        grep_search,
         search_catalogs,
         save_catalog_entry,
     ]

@@ -1171,7 +1171,7 @@ class PlaybookExecutor:
         print(f"[EXECUTOR] ⚡ ReAct mode for playbook '{playbook_name}'")
         
         try:
-            workflow = self._build_react_workflow(playbook)
+            workflow = self._build_react_workflow(playbook, user_input)
             
             # Build initial message with goal + context
             goal = user_input.get("goal", user_input.get("query", ""))
@@ -1242,7 +1242,7 @@ class PlaybookExecutor:
                 "logs": [f"ReAct execution error: {str(e)}"]
             }
     
-    def _build_react_workflow(self, playbook):
+    def _build_react_workflow(self, playbook, user_input=None):
         """
         Build a standard LangGraph ReAct workflow.
         
@@ -1252,8 +1252,17 @@ class PlaybookExecutor:
         """
         from .langchain_tools import create_langchain_tools
         
+        user_input = user_input or {}
+        enforced_repo_id = user_input.get("repo_id")
+        
+        # Handle 'latest' magic string passed from default frontend states
+        if enforced_repo_id == "latest":
+            enforced_repo_id = None
+        elif isinstance(enforced_repo_id, list) and len(enforced_repo_id) == 1 and enforced_repo_id[0] == "latest":
+            enforced_repo_id = None
+        
         # Create LangChain tools from PlaybookTools
-        tools = create_langchain_tools(self.tools)
+        tools = create_langchain_tools(self.tools, enforced_repo_id=enforced_repo_id)
         
         # Bind tools to chat model
         chat_model = self._get_chat_model()
@@ -1300,7 +1309,14 @@ class PlaybookExecutor:
                 }
             
             # Build messages: system + conversation history
-            messages = [SystemMessage(content=privacy_filter.mask(system_prompt))]
+            local_system_prompt = system_prompt
+            if enforced_repo_id:
+                if isinstance(enforced_repo_id, list):
+                    local_system_prompt += f"\n\n### STRICT ENFORCEMENT\nYou are restricted to inspecting ONLY Repository IDs: {', '.join(enforced_repo_id)}. You MUST pass repo_id as an argument to every tool you use. Do not search globally."
+                else:
+                    local_system_prompt += f"\n\n### STRICT ENFORCEMENT\nYou are restricted to inspecting ONLY Repository ID: {enforced_repo_id}. You MUST pass this repo_id as an argument to every tool you use. Do not search globally."
+                    
+            messages = [SystemMessage(content=privacy_filter.mask(local_system_prompt))]
             messages.extend(state.get("messages", []))
             
             # Get LLM config for token budgets
@@ -1313,6 +1329,33 @@ class PlaybookExecutor:
                     max_tokens=max_tokens,
                     temperature=0.1
                 )
+                
+                # Real-time trace logging requested by user
+                try:
+                    trace_file = f"/tmp/codemind_agent_{state.get('playbook_name', 'trace')}.log"
+                    with open(trace_file, "a", encoding="utf-8") as tf:
+                        tf.write(f"\n\n{'='*60}\n")
+                        tf.write(f"ITERATION {iteration + 1} ACTIVITY\n")
+                        tf.write(f"{'='*60}\n")
+                        if iteration == 0:
+                            tf.write(f">> SYSTEM PROMPT (First 1500 chars):\n{local_system_prompt[:1500]}...\n\n")
+                            tf.write(f">> USER INSTRUCTION:\n{messages[1].content if len(messages)>1 else ''}\n\n")
+                        else:
+                            tf.write(">> INCOMING TOOL EXECUTION RESULTS (from previous step):\n")
+                            for msg in messages:
+                                if msg.__class__.__name__ == "ToolMessage":
+                                    tf.write(f"- Tool [{msg.name}] payload size: {len(str(msg.content))} chars\n")
+                                    tf.write(f"{str(msg.content)[:500]}... [TRUNCATED]\n\n")
+                        
+                        tf.write(">> NEXT AGENT DECISION:\n")
+                        if response.content:
+                            tf.write(f"{response.content}\n")
+                        if hasattr(response, 'tool_calls') and response.tool_calls:
+                            import json
+                            tf.write("\n>> COMMANDING TOOL CALLS:\n")
+                            tf.write(json.dumps(response.tool_calls, indent=2) + "\n")
+                except Exception as ex:
+                    print(f"[EXECUTOR] Warning: could not write trace log: {ex}")
                 
                 # Log what happened
                 has_tool_calls = hasattr(response, 'tool_calls') and response.tool_calls

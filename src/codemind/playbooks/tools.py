@@ -410,6 +410,178 @@ class PlaybookTools:
         except Exception as e:
             return {"error": str(e), "files": [], "count": 0}
 
+    async def list_file_system(self, params: dict) -> dict:
+        """List files directly from the physical host file system bypassing the database.
+        
+        Args:
+            params: {
+                path: str (absolute path)
+            }
+        """
+        import os
+        try:
+            path = params.get("path")
+            if not path or not os.path.exists(path):
+                return {"error": f"Path not found: {path}", "files": [], "count": 0}
+            
+            files = []
+            if os.path.isfile(path):
+                files.append(path)
+            else:
+                for root, _, filenames in os.walk(path):
+                    for name in filenames:
+                        files.append(os.path.join(root, name))
+            
+            # Cap at 500 files for agent context safety
+            if len(files) > 500:
+                files = files[:500]
+                
+            return {"success": True, "files": files, "count": len(files)}
+        except Exception as e:
+            return {"error": str(e), "files": [], "count": 0}
+
+    async def read_file_system(self, params: dict) -> dict:
+        """Read file content directly from the physical host file system.
+        
+        Args:
+            params: {
+                path: str (absolute path)
+            }
+        """
+        import os
+        try:
+            path = params.get("path")
+            if not path or not os.path.isfile(path):
+                return {"error": f"File not found: {path}", "content": ""}
+            
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+                
+            # Basic truncation if file is absurdly huge (protect LLM context)
+            if len(content) > 100000:
+                content = content[:100000] + "...[Truncated]"
+                
+            return {
+                "success": True,
+                "file_path": path,
+                "content": content,
+            }
+        except Exception as e:
+            return {"error": str(e), "content": ""}
+
+    async def write_file_system(self, params: dict) -> dict:
+        """Write content directly to the physical host file system.
+        
+        Args:
+            params: {
+                path: str (absolute path),
+                content: str
+            }
+        """
+        import os
+        try:
+            path = params.get("path")
+            content = params.get("content", "")
+            
+            if not path:
+                return {"error": "Path cannot be empty"}
+                
+            # Ensure folder structure exists systematically
+            directory = os.path.dirname(path)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory, exist_ok=True)
+                
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+                
+            return {
+                "success": True,
+                "file_path": path,
+                "bytes_written": len(content)
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    async def grep_search(self, params: dict) -> dict:
+        """Find literal string matches across the codebase using exact or regex matching.
+        
+        Args:
+            params: {
+                query: str,
+                repo_id: str (optional),
+                includes: list[str] (optional, e.g. ["*.py"])
+            }
+        """
+        try:
+            import subprocess
+            from codemind.storage.models import RepositoryManifest
+            
+            repo_id = params.get("repo_id")
+            if not repo_id:
+                latest = await self._get_default_latest_repos()
+                if not latest:
+                    return {"error": "No repository defined", "results": "", "count": 0}
+                repo_id = latest[0] if isinstance(latest, list) else latest
+                
+            query = params.get("query", "")
+            if not query:
+                return {"error": "No query provided for grep", "results": "", "count": 0}
+                
+            includes = params.get("includes", [])
+            
+            # Fetch physical repo path
+            repo_path = None
+            if self.db:
+                session = getattr(self.db, "get_session", lambda: None)()
+                if session:
+                    manifest = session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
+                    if manifest and manifest.repo_path:
+                        repo_path = manifest.repo_path
+                    if hasattr(session, 'close'):
+                        session.close()
+            
+            if not repo_path:
+                return {"error": f"Physical repository path not found for {repo_id}", "results": "", "count": 0}
+                
+            # Build grep command
+            # -r = recursive, -n = line numbers, -I = ignore binary, -E = extended regex
+            cmd = ["grep", "-rnIE", query]
+            if includes:
+                for ext in includes:
+                    # Grep include syntax
+                    cmd.append(f"--include={ext}")
+            cmd.append(".")
+            
+            # Execute safely
+            result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
+            output = result.stdout
+            
+            if not output:
+                if result.stderr:
+                    return {"error": result.stderr, "results": "", "count": 0}
+                return {"success": True, "results": "No matches found.", "count": 0}
+                
+            # Truncate to avoid context window explosion
+            lines = output.splitlines()
+            count = len(lines)
+            max_lines = 500
+            
+            if count > max_lines:
+                output = "\n".join(lines[:max_lines])
+                output += f"\n\n...[Output truncated, {count - max_lines} more matches found. Please refine your query.]"
+            else:
+                output = "\n".join(lines)
+                
+            return {
+                "success": True,
+                "results": output,
+                "count": count
+            }
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return {"error": f"Grep execution failed: {str(e)}", "results": "", "count": 0}
+
     async def _search_catalogs_internal(
         self, 
         queries: list[str], 

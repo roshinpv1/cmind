@@ -170,6 +170,8 @@ To call a tool, respond with a JSON block:
 
 You may call multiple tools at once by adding more items to the tool_calls array.
 If you don't need to call a tool, just respond normally with text.
+
+IMPORTANT: When you output a JSON block to call a tool, DO NOT output any text pretending to be the 'Tool Result'. Stop generating immediately after the tool call block and wait for the system to execute the tool and provide the real result.
 """)
     
     return "\n".join(lines)
@@ -413,17 +415,21 @@ class CmindChatModel(BaseChatModel):
             elif isinstance(msg, AIMessage):
                 content = msg.content or ""
                 if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    tool_calls_text = []
+                    calls_list = []
                     for tc in msg.tool_calls:
-                        tool_calls_text.append(
-                            f"[Called tool: {tc['name']} with args: {tc.get('args', {})}]"
-                        )
-                    content += "\n" + "\n".join(tool_calls_text)
+                        calls_list.append({
+                            "name": tc["name"],
+                            "args": tc.get("args", {})
+                        })
+                    tool_json = json.dumps({"tool_calls": calls_list})
+                    if content.strip():
+                        content += "\n\n"
+                    content += f"```json\n{tool_json}\n```"
                 if content.strip():
                     conversation_parts.append(f"Assistant: {content}")
             elif isinstance(msg, ToolMessage):
                 conversation_parts.append(
-                    f"Tool Result ({msg.name}): {msg.content}"
+                    f"System (Tool Result from {msg.name}):\n{msg.content}"
                 )
         
         system_prompt = "\n\n".join(system_parts) if system_parts else None

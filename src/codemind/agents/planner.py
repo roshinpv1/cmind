@@ -26,7 +26,7 @@ import uuid
 from .planner_state import PlannerState
 
 
-def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
+def create_playbook_meta_tools(registry, executor, allowed_playbooks=None, enforced_repo_id=None):
     """Create LangChain tools that wrap playbook execution.
     
     Each playbook becomes a callable tool that the planner LLM can invoke.
@@ -60,7 +60,9 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None):
             async def run_playbook(query: str, repo_id: Optional[str | list[str]] = None) -> str:
                 f"""Execute the {pb_name_inner} playbook. {pb_desc_inner}"""
                 user_input = {"query": query, "goal": query}
-                if repo_id:
+                if enforced_repo_id:
+                    user_input["repo_id"] = enforced_repo_id
+                elif repo_id and repo_id != "latest":
                     user_input["repo_id"] = repo_id
                 
                 try:
@@ -124,16 +126,16 @@ class PlannerAgent:
             self._chat_model = CmindChatModel(driver=self.llm)
         return self._chat_model
     
-    def _create_tools(self, allowed_playbooks=None):
+    def _create_tools(self, allowed_playbooks=None, enforced_repo_id=None):
         """Create all available tools (data tools + playbook meta-tools)."""
         from ..playbooks.langchain_tools import create_langchain_tools
         
         # Data tools (search_codebase, read_file, etc.)
-        data_tools = create_langchain_tools(self.executor.tools)
+        data_tools = create_langchain_tools(self.executor.tools, enforced_repo_id=enforced_repo_id)
         
         # Playbook meta-tools
         playbook_tools = create_playbook_meta_tools(
-            self.registry, self.executor, allowed_playbooks
+            self.registry, self.executor, allowed_playbooks, enforced_repo_id=enforced_repo_id
         )
         
         # If playbooks are constrained, we strictly enforce it by only providing the specified 
@@ -671,7 +673,7 @@ class PlannerAgent:
         print(f"{'='*60}")
         
         # Create tools based on allowed_playbooks
-        tools = self._create_tools(allowed_playbooks)
+        tools = self._create_tools(allowed_playbooks, enforced_repo_id=repo_id)
         print(f"[PLANNER] Available tools: {[t.name for t in tools]}")
         
         # Build workflow with these tools
