@@ -4,7 +4,7 @@ version: "1.0"
 description: An ultra-strict, hallucination-free API endpoint discovery tool. Scans raw source code to extract exposed API endpoints, methods, and protocols purely from implemented logic while ignoring documentation files.
 category: analysis
 complexity: high
-max_iterations: 15
+max_iterations: 20
 ---
 
 # Playbook: discover_api_endpoints
@@ -65,6 +65,11 @@ For every endpoint discovered, you must also attempt to extract:
 
 ## Output Format
 Produce a structured JSON detailing every verified endpoint.
+**STRICT REQUIREMENT:** Your final response MUST be 100% raw, parsable JSON.
+- Do NOT wrap the JSON in markdown blocks (e.g. ```json).
+- Do NOT include ANY conversational text before or after the JSON payload.
+- Do NOT use ANY emojis, icons, or symbols anywhere in the output.
+- Every key and string value must be properly escaped for strict JSON parsing.
 
 ## Evaluation
 - Every endpoint must have a valid `source_file` and `line_reference`.
@@ -111,7 +116,7 @@ inject_repo_metadata: true
 
 ## Search Strategy
 ```yaml
-limit: 500
+limit: 100
 mode: react
 min_score: 0.5
 queries: 
@@ -124,4 +129,15 @@ queries:
   - "serverless.yml"
   - "template.yaml"
   - "authenticate"
+  - "@RequestMapping"
+  - "@GetMapping"
+  - "@PostMapping"
+  - "@RestController"
+  - "app.route"
+  - "router.get"
+  - "app.use"
+  - "[HttpGet]"
+  - "[Route]"
+  - "http.HandleFunc"
+  - "r.GET"
 ```
