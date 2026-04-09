@@ -2,9 +2,8 @@
 """
 Native Enterprise PII & Secret Scanner and Anonymizer.
 
-This is a single-file utility that scans an entire codebase directory for both:
-1. PII (Personally Identifiable Information) natively via pure spaCy NER (Names, Orgs, Locations).
-2. Secrets & Regex PII (AWS Keys, GitHub Tokens, Emails, Phone Numbers) via compiled regular expressions.
+This is a 100% dependency-free, native Python standard library utility.
+Designed for enterprise environments that restrict external ML packages like spaCy or Presidio.
 
 Dual Purpose:
 1. Directory Scanner: Recursively scans a codebase for exposed Secrets and PII.
