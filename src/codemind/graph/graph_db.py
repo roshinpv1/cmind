@@ -110,13 +110,14 @@ class KuzuGraphAdapter:
         self.conn.execute(
             'CREATE NODE TABLE IF NOT EXISTS File('
             'id STRING, repo_id STRING, name STRING, path STRING, '
-            'language STRING DEFAULT "", '
+            'language STRING DEFAULT "", community_id STRING DEFAULT "", '
             'PRIMARY KEY(id))'
         )
         self.conn.execute(
             'CREATE NODE TABLE IF NOT EXISTS Class('
             'id STRING, repo_id STRING, name STRING, file_path STRING, '
             'start_line INT64 DEFAULT 0, end_line INT64 DEFAULT 0, '
+            'community_id STRING DEFAULT "", '
             'PRIMARY KEY(id))'
         )
         self.conn.execute(
@@ -154,6 +155,18 @@ class KuzuGraphAdapter:
         self.conn.execute('CREATE REL TABLE IF NOT EXISTS INHERITS_FROM(FROM Class TO Class)')
         self.conn.execute('CREATE REL TABLE IF NOT EXISTS IMPLEMENTS(FROM Class TO Class)')
         self.conn.execute('CREATE REL TABLE IF NOT EXISTS HANDLED_BY(FROM API TO Function)')
+        
+        # Semantic relationship tables for LLM Vision/Graphify inferences
+        self.conn.execute(
+            'CREATE REL TABLE IF NOT EXISTS SEMANTIC_LINK_FILE(FROM File TO File, '
+            'provenance STRING DEFAULT "INFERRED", confidence_score DOUBLE DEFAULT 0.8, '
+            'reasoning STRING DEFAULT "")'
+        )
+        self.conn.execute(
+            'CREATE REL TABLE IF NOT EXISTS SEMANTIC_LINK_CLASS(FROM Class TO Class, '
+            'provenance STRING DEFAULT "INFERRED", confidence_score DOUBLE DEFAULT 0.8, '
+            'reasoning STRING DEFAULT "")'
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -358,6 +371,32 @@ class KuzuGraphAdapter:
             {"aid": api_id, "fid": func_id}
         )
 
+    def add_semantic_link(self, repo_id: str, node_type: str, source_id: str, target_id: str,
+                          provenance: str = "INFERRED", confidence: float = 0.8, reasoning: str = ""):
+        """Add a semantic relationship inferred by an LLM."""
+        if node_type == "Class":
+            rel_table = "SEMANTIC_LINK_CLASS"
+        elif node_type == "File":
+            rel_table = "SEMANTIC_LINK_FILE"
+        else:
+            return
+
+        self._execute(
+            f'MATCH (a:{node_type} {{id: $sid}}), (b:{node_type} {{id: $tid}}) '
+            f'MERGE (a)-[:{rel_table} {{provenance: $prov, confidence_score: $conf, reasoning: $rsn}}]->(b)',
+            {"sid": source_id, "tid": target_id, "prov": provenance, "conf": float(confidence), "rsn": reasoning}
+        )
+
+    def update_node_community(self, node_type: str, node_id: str, community_id: str):
+        """Update the topology cluster boundary (Leiden algorithm) for a node."""
+        if node_type not in ["File", "Class"]:
+            return
+            
+        self._execute(
+            f'MATCH (n:{node_type} {{id: $nid}}) SET n.community_id = $cid',
+            {"nid": node_id, "cid": str(community_id)}
+        )
+
     def close(self):
         """Close graph database connection."""
         # Kuzu handles cleanup on garbage collection
@@ -414,3 +453,15 @@ class GraphBuilder:
                                 parent_file: str, parent_class: str):
         if self.is_noop: return
         self.graph.add_inheritance_edge(repo_id, child_file, child_class, parent_file, parent_class)
+
+    def build_semantic_link(self, repo_id: str, node_type: str, source_id: str, target_id: str,
+                            provenance: str = "INFERRED", confidence: float = 0.8, reasoning: str = ""):
+        """Forward a semantic inference link."""
+        if self.is_noop: return
+        self.graph.add_semantic_link(repo_id, node_type, source_id, target_id, provenance, confidence, reasoning)
+
+    def set_community_id(self, node_type: str, node_id: str, community_id: str):
+        """Write clustered community ID to node."""
+        if self.is_noop: return
+        self.graph.update_node_community(node_type, node_id, community_id)
+

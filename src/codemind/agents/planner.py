@@ -319,11 +319,18 @@ class PlannerAgent:
                 "Do NOT respond with a text answer yet."
             )
         
+
+        # Attach Graphify context to the System Message directly so it never slides out
+        topo_hook = ""
+        if state.get("topology_context"):
+            topo_hook = f"\n\nGRAPHIFY PRE-FLIGHT REPORT (God Nodes):\n{state['topology_context']}\n"
+
         system_msg = SystemMessage(content=(
             "You are a code analysis agent. You have tools available to search code, "
             "analyze repositories, and retrieve information.\n\n"
             "Use the available tools to gather information needed to answer the user's goal.\n"
             + finish_instruction
+            + topo_hook
         ))
         
         # Build the user message with goal + history
@@ -679,10 +686,16 @@ class PlannerAgent:
         # Build workflow with these tools
         workflow = self._build_workflow(tools)
         
+        # Build PRE-FLIGHT Graphify topology context
+        topology_context = self._build_architecture_context(repo_id)
+        if topology_context:
+            print("[PLANNER] Injected Graphify Pre-Flight Context successfully")
+        
         initial_state: PlannerState = {
             "messages": [],  # MessagesState field
             "goal": goal,
             "repo_id": repo_id,
+            "topology_context": topology_context,
             "allowed_playbooks": allowed_playbooks,
             "plan": [],
             "current_step": 0,
@@ -700,7 +713,10 @@ class PlannerAgent:
             # Generate thread_id for checkpointing if not provided
             if not thread_id:
                 thread_id = str(uuid.uuid4())
-            config = {"configurable": {"thread_id": thread_id}}
+            config = {
+                "configurable": {"thread_id": thread_id},
+                "recursion_limit": 150
+            }
             print(f"[PLANNER] Thread ID: {thread_id}")
             
             result = await workflow.ainvoke(initial_state, config=config)
@@ -729,3 +745,32 @@ class PlannerAgent:
                 "iterations": 0,
                 "error": str(e),
             }
+
+    def _build_architecture_context(self, repo_id: str | list[str] | None) -> str:
+        """
+        Executes a Graphify Pre-flight hook.
+        Retrieves Topology (Leiden Communities & God Nodes) directly from 
+        Küzü DB to prevent the LLM from hallucinating codebase structure during tool calls.
+        """
+        if not repo_id or isinstance(repo_id, list):
+            return ""
+            
+        try:
+            from codemind.graph.graph_db import KuzuGraphAdapter
+            from codemind.graph.cluster_topology import TopologyClusterer
+            db = KuzuGraphAdapter()
+            clusterer = TopologyClusterer(db)
+            
+            god_nodes = clusterer.get_god_nodes(repo_id, top_n=5)
+            if not god_nodes:
+                return ""
+                
+            report = "The codebase contains the following fundamental core components (God Nodes):\n"
+            for node in god_nodes:
+                report += f"- {node['node_id']} (in-degree edges: {node['in_degree']})\n"
+                
+            report += "\nUse this topological knowledge BEFORE searching raw files."
+            return report
+        except Exception as e:
+            print(f"[PLANNER] Pre-flight Graphify hook failed: {e}")
+            return ""

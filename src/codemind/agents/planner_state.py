@@ -25,6 +25,7 @@ class PlannerState(MessagesState):
     goal: str  # User's natural language goal
     repo_id: Optional[str]  # Repository to work with (None for global)
     allowed_playbooks: Optional[list[str]]  # Whitelist of playbooks (None = all)
+    topology_context: Optional[str]  # Graphify pre-flight context hook
     
     # === Planning ===
     plan: list[dict]  # Current plan: [{"playbook": "...", "params": {...}}]

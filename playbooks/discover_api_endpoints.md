@@ -60,7 +60,7 @@ For every endpoint discovered, you must also attempt to extract:
 ## Anti-Patterns
 - **STRICT HALLUCINATION GUARD**: Do NOT read, parse, or rely on `README.md`, `swagger.yaml` (unless strictly asked to parse OpenAPI), `docs/`, or any `.txt` files. Your analysis MUST come from `.py`, `.js`, `.ts`, `.java`, `.go`, `.cs`, `.proto`, etc.
 - **Do NOT guess dynamic paths**: If an endpoint is generated via an abstract loop and you cannot determine the exact base path, report it as dynamic and supply the line of code.
-- **Do NOT return 3rd party API calls**: We are looking for APIs **EXPOSED** by this app, NOT external APIs being consumed by it (do not list `requests.get("https://api.stripe.com")`).
+- **Do NOT return 3rd party API calls**: We are looking for APIs **EXPOSED** by this app, NOT external APIs being consumed by it (do not list `requests.get("https://api.codemind.ai")`).
 - **Do NOT output partial endpoints without their base route**: If a Controller has `@RequestMapping("/api/v1")` and a method has `@GetMapping("/users")`, you MUST construct the final endpoint as `/api/v1/users`.
 
 ## Output Format
