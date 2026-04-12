@@ -58,7 +58,8 @@ async def get_current_user(
     Dependency to get the current authenticated user from JWT.
     Returns the user dict if valid, otherwise None (allowing public access where needed).
     """
-    if AUTH_DISABLED:
+    # Dynamically check ENV every request so toggles don't require server restarts
+    if os.getenv("CODEMIND_AUTH_DISABLED", "false").lower() == "true":
         return {
             "user_id": "auth_disabled_override",
             "email": "localdeveloper@codemind.local",
