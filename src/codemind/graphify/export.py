@@ -8,8 +8,8 @@ from collections import Counter
 from pathlib import Path
 import networkx as nx
 from networkx.readwrite import json_graph
-from graphify.security import sanitize_label
-from graphify.analyze import _node_community_map
+from codemind.graphify.security import sanitize_label
+from codemind.graphify.analyze import _node_community_map
 
 COMMUNITY_COLORS = [
     "#4E79A7", "#F28E2B", "#E15759", "#76B7B2", "#59A14F",

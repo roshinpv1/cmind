@@ -2,14 +2,14 @@ import sys
 import json
 from pathlib import Path
 
-from graphify.detect import detect
-from graphify.extract import extract
-from graphify.semantic import extract_semantic
-from graphify.build import build
-from graphify.cluster import cluster, score_all
-from graphify.analyze import god_nodes, surprising_connections, suggest_questions
-from graphify.report import generate
-from graphify.export import to_json
+from codemind.graphify.detect import detect
+from codemind.graphify.extract import extract
+from codemind.graphify.semantic import extract_semantic
+from codemind.graphify.build import build
+from codemind.graphify.cluster import cluster, score_all
+from codemind.graphify.analyze import god_nodes, surprising_connections, suggest_questions
+from codemind.graphify.report import generate
+from codemind.graphify.export import to_json
 
 def generate_graph(target_dir: str | Path, deep_mode: bool = False):
     target_path = Path(target_dir).resolve()

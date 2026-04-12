@@ -18,7 +18,7 @@ load_dotenv()
 from codemind.jobs import JobManager, JobStatus
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
-from codemind.graph.graph_db import KuzuGraphAdapter
+from codemind.graph.graph_db import GraphifyAdapter
 from codemind.workflows import IndexingState, IndexingWorkflow
 
 logger = logging.getLogger("codemind.worker")
@@ -54,7 +54,7 @@ class IndexWorker:
         self,
         poll_interval: int = 5,
         db_path: str | None = None,
-        graph_db: "KuzuGraphAdapter | None" = None,
+        graph_db: "GraphifyAdapter | None" = None,
     ):
         self.poll_interval = poll_interval
         
@@ -68,10 +68,8 @@ class IndexWorker:
         self.manifest = ManifestManager(db_path=db_path)
         self.lance_storage = LanceDBStorage()
 
-        # Graph DB (Kuzu) - Use provided instance or create own
-        # When running inside the server process, the server passes its instance
-        # to avoid Kuzu single-process lock conflicts.
-        self.graph_db = graph_db if graph_db is not None else KuzuGraphAdapter()
+        # Graph DB (Graphify NetworkX) - Use provided instance or create own
+        self.graph_db = graph_db if graph_db is not None else GraphifyAdapter()
 
         logger.info("Worker initialized (poll_interval=%ds)", poll_interval)
 

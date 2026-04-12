@@ -756,9 +756,9 @@ class PlannerAgent:
             return ""
             
         try:
-            from codemind.graph.graph_db import KuzuGraphAdapter
+            from codemind.graph.graph_db import GraphifyAdapter
             from codemind.graph.cluster_topology import TopologyClusterer
-            db = KuzuGraphAdapter()
+            db = GraphifyAdapter()
             clusterer = TopologyClusterer(db)
             
             god_nodes = clusterer.get_god_nodes(repo_id, top_n=5)

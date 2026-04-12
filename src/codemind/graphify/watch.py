@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 
-from graphify.detect import CODE_EXTENSIONS, DOC_EXTENSIONS, PAPER_EXTENSIONS, IMAGE_EXTENSIONS
+from codemind.graphify.detect import CODE_EXTENSIONS, DOC_EXTENSIONS, PAPER_EXTENSIONS, IMAGE_EXTENSIONS
 
 _WATCHED_EXTENSIONS = CODE_EXTENSIONS | DOC_EXTENSIONS | PAPER_EXTENSIONS | IMAGE_EXTENSIONS
 _CODE_EXTENSIONS = CODE_EXTENSIONS
@@ -17,13 +17,13 @@ def _rebuild_code(watch_path: Path, *, follow_symlinks: bool = False) -> bool:
     Returns True on success, False on error.
     """
     try:
-        from graphify.extract import extract
-        from graphify.detect import detect
-        from graphify.build import build_from_json
-        from graphify.cluster import cluster, score_all
-        from graphify.analyze import god_nodes, surprising_connections, suggest_questions
-        from graphify.report import generate
-        from graphify.export import to_json
+        from codemind.graphify.extract import extract
+        from codemind.graphify.detect import detect
+        from codemind.graphify.build import build_from_json
+        from codemind.graphify.cluster import cluster, score_all
+        from codemind.graphify.analyze import god_nodes, surprising_connections, suggest_questions
+        from codemind.graphify.report import generate
+        from codemind.graphify.export import to_json
 
         detected = detect(watch_path, follow_symlinks=follow_symlinks)
         code_files = [Path(f) for f in detected['files']['code']]

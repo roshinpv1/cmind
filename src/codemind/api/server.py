@@ -97,7 +97,7 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup resources."""
-    from codemind.graph import KuzuGraphAdapter
+    from codemind.graph import GraphifyAdapter
     from codemind.graph.graph_query import GraphQueryService
 
     # Initialize services
@@ -106,7 +106,7 @@ async def lifespan(app: FastAPI):
     app.state.job_manager = JobManager()
     
     # Graph DB (Kuzu) - Independent embedded graph database
-    app.state.graph_db = KuzuGraphAdapter()
+    app.state.graph_db = GraphifyAdapter()
     app.state.graph_query = GraphQueryService(app.state.graph_db)
 
     # Initialize agent services (existing doc generator)

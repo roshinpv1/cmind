@@ -156,7 +156,7 @@ This project has a graphify knowledge graph at graphify-out/.
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `python3 -c "from codemind.graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
 """
 
 _CLAUDE_MD_MARKER = "## graphify"
@@ -171,7 +171,7 @@ This project has a graphify knowledge graph at graphify-out/.
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `python3 -c "from codemind.graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
 """
 
 _AGENTS_MD_MARKER = "## graphify"
@@ -184,7 +184,7 @@ This project has a graphify knowledge graph at graphify-out/.
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `python3 -c "from codemind.graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
 """
 
 _GEMINI_MD_MARKER = "## graphify"
@@ -309,7 +309,7 @@ This project has a graphify knowledge graph at graphify-out/.
 
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
-- After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+- After modifying code files in this session, run `python3 -c "from codemind.graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
 """
 
 
@@ -756,7 +756,7 @@ def main() -> None:
             print(f"Usage: graphify {cmd} [install|uninstall]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "hook":
-        from graphify.hooks import install as hook_install, uninstall as hook_uninstall, status as hook_status
+        from codemind.graphify.hooks import install as hook_install, uninstall as hook_uninstall, status as hook_status
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         if subcmd == "install":
             print(hook_install(Path(".")))
@@ -771,8 +771,8 @@ def main() -> None:
         if len(sys.argv) < 3:
             print("Usage: graphify query \"<question>\" [--dfs] [--budget N] [--graph path]", file=sys.stderr)
             sys.exit(1)
-        from graphify.serve import _score_nodes, _bfs, _dfs, _subgraph_to_text
-        from graphify.security import sanitize_label
+        from codemind.graphify.serve import _score_nodes, _bfs, _dfs, _subgraph_to_text
+        from codemind.graphify.security import sanitize_label
         from networkx.readwrite import json_graph
         question = sys.argv[2]
         use_dfs = "--dfs" in sys.argv
@@ -837,7 +837,7 @@ def main() -> None:
         p.add_argument("--nodes", nargs="*", default=[])
         p.add_argument("--memory-dir", default="graphify-out/memory")
         opts = p.parse_args(sys.argv[2:])
-        from graphify.ingest import save_query_result as _sqr
+        from codemind.graphify.ingest import save_query_result as _sqr
         out = _sqr(
             question=opts.question,
             answer=opts.answer,
@@ -847,7 +847,7 @@ def main() -> None:
         )
         print(f"Saved to {out}")
     elif cmd == "benchmark":
-        from graphify.benchmark import run_benchmark, print_benchmark
+        from codemind.graphify.benchmark import run_benchmark, print_benchmark
         graph_path = sys.argv[2] if len(sys.argv) > 2 else "graphify-out/graph.json"
         # Try to load corpus_words from detect output
         corpus_words = None
@@ -864,7 +864,7 @@ def main() -> None:
         # graphify generate <path> [--deep]
         target = sys.argv[2] if len(sys.argv) > 2 else "."
         deep = "--deep" in sys.argv
-        from graphify.pipeline import generate_graph
+        from codemind.graphify.pipeline import generate_graph
         generate_graph(target, deep_mode=deep)
     else:
         print(f"error: unknown command '{cmd}'", file=sys.stderr)

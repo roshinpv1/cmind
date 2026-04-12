@@ -1,18 +1,18 @@
 """
 Graph query service for code structure navigation.
 
-Provides high-level query methods over the Kuzu graph database.
+Provides high-level query methods over the Graphify NetworkX graph.
+Replaces legacy Kuzu Cypher queries with pure Python iterations.
 """
 
 from typing import Any
-import re
-
-from .graph_db import KuzuGraphAdapter
-
 import os
 import re
+import networkx as nx
 
-# Pattern to strip dynamic system paths prefix from LanceDB file paths
+from .graph_db import GraphifyAdapter
+
+# Pattern to strip dynamic system paths prefix from file paths
 _BASE = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
 _REPOS_PATH = os.getenv("CODEMIND_REPOS_PATH", os.path.join(_BASE, "repos"))
 _REPOS_PREFIX = _REPOS_PATH.replace('\\', '/').rstrip('/') + '/'
@@ -20,174 +20,141 @@ _REPO_PATH_PREFIX = re.compile(rf'^{re.escape(_REPOS_PREFIX)}[^/]+/[^/]+/')
 
 
 class GraphQueryService:
-    """Service for querying code structure using Kuzu graph."""
+    """Service for querying code structure using Graphify Graph."""
 
-    def __init__(self, graph_db: KuzuGraphAdapter):
+    def __init__(self, graph_db: GraphifyAdapter):
         """Initialize graph query service."""
         self.graph = graph_db
 
     def _normalize_path(self, file_path: str) -> str:
-        """Normalize a file path by stripping the data/repos/{name}/{branch}/ prefix.
-        
-        LanceDB stores full paths like 'data/repos/promptshield/main/backend/main.py'
-        but Kuzu stores relative paths like 'backend/main.py'.
-        """
+        """Normalize a file path."""
         return _REPO_PATH_PREFIX.sub('', file_path)
-
-    def _execute(self, query: str, params: dict | None = None) -> list[list]:
-        """Execute a Cypher query and return all rows."""
-        result = self.graph._execute(query, params)
-        return self.graph._result_to_list(result)
 
     def find_files_by_pattern(
         self, repo_id: str, pattern: str | None = None, file_type: str | None = None
     ) -> list[dict]:
         """Find files matching a pattern or file type."""
-        repo_node_id = f"repo:{repo_id}"
-        
-        if pattern and file_type:
-            rows = self._execute(
-                'MATCH (r:Repository {id: $rid})-[:CONTAINS]->(f:File) '
-                'WHERE f.path CONTAINS $pattern AND f.path ENDS WITH $ext '
-                'RETURN f.path, f.name, f.language',
-                {"rid": repo_node_id, "pattern": pattern, "ext": file_type}
-            )
-        elif pattern:
-            rows = self._execute(
-                'MATCH (r:Repository {id: $rid})-[:CONTAINS]->(f:File) '
-                'WHERE f.path CONTAINS $pattern '
-                'RETURN f.path, f.name, f.language',
-                {"rid": repo_node_id, "pattern": pattern}
-            )
-        elif file_type:
-            rows = self._execute(
-                'MATCH (r:Repository {id: $rid})-[:CONTAINS]->(f:File) '
-                'WHERE f.path ENDS WITH $ext '
-                'RETURN f.path, f.name, f.language',
-                {"rid": repo_node_id, "ext": file_type}
-            )
-        else:
-            rows = self._execute(
-                'MATCH (r:Repository {id: $rid})-[:CONTAINS]->(f:File) '
-                'RETURN f.path, f.name, f.language',
-                {"rid": repo_node_id}
-            )
-
-        return [
-            {"file_path": row[0], "name": row[1], "language": row[2]}
-            for row in rows
-        ]
+        G = self.graph.get_graph(repo_id)
+        results = []
+        for n, data in G.nodes(data=True):
+            if data.get("type") == "File":
+                path = data.get("path", "")
+                name = data.get("label", "")
+                if pattern and pattern not in path: continue
+                if file_type and not path.endswith(file_type): continue
+                results.append({
+                    "file_path": path,
+                    "name": name,
+                    "language": data.get("language", "")
+                })
+        return results
 
     def get_classes_in_file(self, repo_id: str, file_path: str) -> list[dict]:
         """Get all classes defined in a file."""
         file_path = self._normalize_path(file_path)
-        file_node_id = f"file:{repo_id}:{file_path}"
-
-        rows = self._execute(
-            'MATCH (f:File {id: $fid})-[:DECLARES]->(c:Class) '
-            'RETURN c.name, c.start_line, c.end_line',
-            {"fid": file_node_id}
-        )
-        return [
-            {"name": row[0], "start_line": row[1], "end_line": row[2]}
-            for row in rows
-        ]
+        G = self.graph.get_graph(repo_id)
+        file_id = f"file:{repo_id}:{file_path}"
+        
+        results = []
+        if file_id in G:
+            for u, v, edata in G.edges([file_id], data=True):
+               if edata.get("type") == "DECLARES":
+                   target = v if u == file_id else u
+                   data = G.nodes[target]
+                   if data.get("type") == "Class":
+                       results.append({
+                           "name": data.get("name"),
+                           "start_line": data.get("start_line", 0),
+                           "end_line": data.get("end_line", 0)
+                       })
+        return results
 
     def get_functions_in_class(self, repo_id: str, class_name: str) -> list[dict]:
-        """Get all functions/methods in a class."""
-        rows = self._execute(
-            'MATCH (c:Class)-[:HAS_METHOD]->(fn:Function) '
-            'WHERE c.repo_id = $rid AND c.name = $name '
-            'RETURN fn.name, fn.file_path, fn.start_line, fn.end_line',
-            {"rid": repo_id, "name": class_name}
-        )
-        return [
-            {"name": row[0], "file_path": row[1], 
-             "start_line": row[2], "end_line": row[3]}
-            for row in rows
-        ]
+        G = self.graph.get_graph(repo_id)
+        results = []
+        
+        class_node = None
+        for n, data in G.nodes(data=True):
+            if data.get("type") == "Class" and data.get("name") == class_name:
+                class_node = n
+                break
+                
+        if not class_node:
+            return results
+            
+        for u, v, edata in G.edges([class_node], data=True):
+            if edata.get("type") == "HAS_METHOD":
+                target = v if u == class_node else u
+                data = G.nodes[target]
+                if data.get("type") == "Function":
+                    results.append({
+                        "name": data.get("name"),
+                        "file_path": data.get("file_path"),
+                        "start_line": data.get("start_line", 0),
+                        "end_line": data.get("end_line", 0)
+                    })
+        return results
 
     def find_symbol_by_name(
         self, repo_id: str, name: str, symbol_type: str | None = None
     ) -> list[dict]:
-        """Find classes or functions by name (partial match)."""
+        G = self.graph.get_graph(repo_id)
         results = []
         name_lower = name.lower()
+        
+        want_class = symbol_type is None or symbol_type.lower() in ("class", "interface", "struct")
+        want_func = symbol_type is None or symbol_type.lower() in ("function", "method")
 
-        if symbol_type is None or symbol_type.lower() in ("class", "interface", "struct"):
-            rows = self._execute(
-                'MATCH (c:Class) '
-                'WHERE c.repo_id = $rid AND lower(c.name) CONTAINS $name '
-                'RETURN c.name, c.file_path, c.start_line, c.end_line, "Class"',
-                {"rid": repo_id, "name": name_lower}
-            )
-            results.extend([
-                {"name": r[0], "file_path": r[1], "start_line": r[2],
-                 "end_line": r[3], "type": r[4]}
-                for r in rows
-            ])
-
-        if symbol_type is None or symbol_type.lower() in ("function", "method"):
-            rows = self._execute(
-                'MATCH (fn:Function) '
-                'WHERE fn.repo_id = $rid AND lower(fn.name) CONTAINS $name '
-                'RETURN fn.name, fn.file_path, fn.start_line, fn.end_line, '
-                'CASE WHEN fn.parent_class <> "" THEN "Method" ELSE "Function" END',
-                {"rid": repo_id, "name": name_lower}
-            )
-            results.extend([
-                {"name": r[0], "file_path": r[1], "start_line": r[2],
-                 "end_line": r[3], "type": r[4]}
-                for r in rows
-            ])
-
+        for n, data in G.nodes(data=True):
+            if not data.get("name"): continue
+            
+            node_type = data.get("type")
+            if want_class and node_type == "Class" and name_lower in data.get("name", "").lower():
+                results.append({
+                    "name": data.get("name"), "file_path": data.get("file_path"),
+                    "start_line": data.get("start_line", 0), "end_line": data.get("end_line", 0),
+                    "type": "Class"
+                })
+            elif want_func and node_type == "Function" and name_lower in data.get("name", "").lower():
+                ctype = "Method" if data.get("parent_class") else "Function"
+                results.append({
+                    "name": data.get("name"), "file_path": data.get("file_path"),
+                    "start_line": data.get("start_line", 0), "end_line": data.get("end_line", 0),
+                    "type": ctype
+                })
         return results
 
     def get_file_context(self, repo_id: str, file_path: str) -> dict[str, Any]:
-        """Get structural context for a file (classes, functions)."""
         file_path = self._normalize_path(file_path)
-        file_node_id = f"file:{repo_id}:{file_path}"
-
-        # Classes in file
-        class_rows = self._execute(
-            'MATCH (f:File {id: $fid})-[:DECLARES]->(c:Class) '
-            'RETURN c.name, c.start_line, c.end_line',
-            {"fid": file_node_id}
-        )
-        classes = [
-            {"name": r[0], "start_line": r[1], "end_line": r[2]}
-            for r in class_rows
-        ]
-
-        # Functions in file (top-level)
-        func_rows = self._execute(
-            'MATCH (f:File {id: $fid})-[:DECLARES_FUNC]->(fn:Function) '
-            'RETURN fn.name, fn.start_line, fn.end_line',
-            {"fid": file_node_id}
-        )
-        functions = [
-            {"name": r[0], "start_line": r[1], "end_line": r[2]}
-            for r in func_rows
-        ]
-
-        # Methods in classes for this file
-        method_rows = self._execute(
-            'MATCH (f:File {id: $fid})-[:DECLARES]->(c:Class)-[:HAS_METHOD]->(fn:Function) '
-            'RETURN c.name, fn.name, fn.start_line, fn.end_line',
-            {"fid": file_node_id}
-        )
-        methods = [
-            {"class": r[0], "name": r[1], "start_line": r[2], "end_line": r[3]}
-            for r in method_rows
-        ]
-
-        # Imports from this file
-        import_rows = self._execute(
-            'MATCH (f:File {id: $fid})-[:IMPORTS]->(dep:File) '
-            'RETURN dep.path',
-            {"fid": file_node_id}
-        )
-        imports = [r[0] for r in import_rows]
+        G = self.graph.get_graph(repo_id)
+        file_id = f"file:{repo_id}:{file_path}"
+        
+        classes = []
+        functions = []
+        methods = []
+        imports = []
+        
+        if file_id in G:
+            for u, v, edata in G.edges([file_id], data=True):
+                target = v if u == file_id else u
+                target_data = G.nodes[target]
+                etype = edata.get("type")
+                
+                if etype == "DECLARES" and target_data.get("type") == "Class":
+                    classes.append({"name": target_data.get("name"), "start_line": target_data.get("start_line", 0), "end_line": target_data.get("end_line", 0)})
+                    for cu, cv, cedata in G.edges([target], data=True):
+                        if cedata.get("type") == "HAS_METHOD":
+                            mtarget = cv if cu == target else cu
+                            m_data = G.nodes[mtarget]
+                            methods.append({"class": target_data.get("name"), "name": m_data.get("name"), 
+                                          "start_line": m_data.get("start_line", 0), "end_line": m_data.get("end_line", 0)})
+                                          
+                elif etype == "DECLARES_FUNC" and target_data.get("type") == "Function":
+                    functions.append({"name": target_data.get("name"), "start_line": target_data.get("start_line", 0), "end_line": target_data.get("end_line", 0)})
+                
+                elif etype == "IMPORTS":
+                     if target_data.get("type") == "File":
+                         imports.append(target_data.get("path"))
 
         return {
             "file_path": file_path,
@@ -197,41 +164,23 @@ class GraphQueryService:
             "imports": imports,
         }
 
-    def filter_by_structure(
-        self, repo_id: str, filters: dict[str, Any]
-    ) -> list[str]:
-        """Get list of file paths matching structural filters."""
+    def filter_by_structure(self, repo_id: str, filters: dict[str, Any]) -> list[str]:
         file_paths = set()
-
-        # Filter by file type extension
         file_type = filters.get("file_type")
         if file_type:
             results = self.find_files_by_pattern(repo_id, file_type=file_type)
             file_paths.update(r["file_path"] for r in results)
 
-        # Filter by class name
         class_name = filters.get("class_name")
         if class_name:
-            rows = self._execute(
-                'MATCH (c:Class) '
-                'WHERE c.repo_id = $rid AND lower(c.name) CONTAINS $name '
-                'RETURN c.file_path',
-                {"rid": repo_id, "name": class_name.lower()}
-            )
-            file_paths.update(r[0] for r in rows)
+            cresults = self.find_symbol_by_name(repo_id, class_name, "class")
+            file_paths.update(r["file_path"] for r in cresults)
 
-        # Filter by function name
         func_name = filters.get("function_name")
         if func_name:
-            rows = self._execute(
-                'MATCH (fn:Function) '
-                'WHERE fn.repo_id = $rid AND lower(fn.name) CONTAINS $name '
-                'RETURN fn.file_path',
-                {"rid": repo_id, "name": func_name.lower()}
-            )
-            file_paths.update(r[0] for r in rows)
+            fresults = self.find_symbol_by_name(repo_id, func_name, "function")
+            file_paths.update(r["file_path"] for r in fresults)
 
-        # Filter by pattern (path substring)
         pattern = filters.get("pattern")
         if pattern:
             results = self.find_files_by_pattern(repo_id, pattern=pattern)
@@ -239,182 +188,178 @@ class GraphQueryService:
 
         return list(file_paths)
 
-    # ── Call Graph Queries ───────────────────────────────────────────────
-
     def get_callers(self, repo_id: str, func_name: str) -> list[dict]:
-        """Find all functions that call the given function."""
-        rows = self._execute(
-            'MATCH (caller:Function)-[c:CALLS]->(fn:Function) '
-            'WHERE fn.repo_id = $rid AND fn.name = $name '
-            'RETURN caller.name, caller.file_path, c.line',
-            {"rid": repo_id, "name": func_name}
-        )
-        return [
-            {"name": r[0], "file_path": r[1], "line": r[2]}
-            for r in rows
-        ]
-
-    def get_callees(self, repo_id: str, func_name: str) -> list[dict]:
-        """Find all functions called by the given function."""
-        rows = self._execute(
-            'MATCH (fn:Function)-[c:CALLS]->(callee:Function) '
-            'WHERE fn.repo_id = $rid AND fn.name = $name '
-            'RETURN callee.name, callee.file_path, c.line',
-            {"rid": repo_id, "name": func_name}
-        )
-        return [
-            {"name": r[0], "file_path": r[1], "line": r[2]}
-            for r in rows
-        ]
-
-    # ── Dependency Queries ───────────────────────────────────────────────
-
-    def get_dependency_chain(self, repo_id: str, file_path: str) -> list[dict]:
-        """Get all files imported by this file (direct dependencies)."""
-        file_path = self._normalize_path(file_path)
-        file_node_id = f"file:{repo_id}:{file_path}"
-        rows = self._execute(
-            'MATCH (f:File {id: $fid})-[i:IMPORTS]->(dep:File) '
-            'RETURN dep.path, i.module_name',
-            {"fid": file_node_id}
-        )
-        return [
-            {"file_path": r[0], "module_name": r[1]}
-            for r in rows
-        ]
-
-    def get_file_dependents(self, repo_id: str, file_path: str) -> list[dict]:
-        """Get all files that import this file."""
-        file_path = self._normalize_path(file_path)
-        file_node_id = f"file:{repo_id}:{file_path}"
-        rows = self._execute(
-            'MATCH (dep:File)-[i:IMPORTS]->(f:File {id: $fid}) '
-            'RETURN dep.path, i.module_name',
-            {"fid": file_node_id}
-        )
-        return [
-            {"file_path": r[0], "module_name": r[1]}
-            for r in rows
-        ]
-
-    def get_dependents(self, repo_id: str, file_path: str) -> list[dict]:
-        """Wrapper for get_file_dependents to match interface."""
-        return self.get_file_dependents(repo_id, file_path)
-
-    # ── Impact Analysis ──────────────────────────────────────────────────
-
-    def get_impact_radius(self, repo_id: str, symbol_name: str) -> list[dict]:
-        """Get all symbols/files affected by changing this symbol.
-        
-        Uses multi-hop graph traversal — this is where Kuzu shines over SQLite.
-        """
+        G = self.graph.get_graph(repo_id)
         results = []
-
-        # Direct callers (1 hop)
-        caller_rows = self._execute(
-            'MATCH (caller:Function)-[:CALLS]->(fn:Function) '
-            'WHERE fn.repo_id = $rid AND fn.name = $name '
-            'RETURN caller.name, caller.file_path, 1 AS depth, "calls" AS relation',
-            {"rid": repo_id, "name": symbol_name}
-        )
-        results.extend([
-            {"name": r[0], "file_path": r[1], "depth": r[2], "relation": r[3]}
-            for r in caller_rows
-        ])
-
-        # Transitive callers (2-3 hops) — Kuzu handles this natively
-        transitive_rows = self._execute(
-            'MATCH (caller:Function)-[:CALLS*2..3]->(fn:Function) '
-            'WHERE fn.repo_id = $rid AND fn.name = $name '
-            'RETURN DISTINCT caller.name, caller.file_path',
-            {"rid": repo_id, "name": symbol_name}
-        )
-        for r in transitive_rows:
-            if not any(x["name"] == r[0] and x["file_path"] == r[1] for x in results):
-                results.append({
-                    "name": r[0], "file_path": r[1], 
-                    "depth": 2, "relation": "transitive_call"
-                })
-
-        # Files that depend on the file containing this symbol
-        func_rows = self._execute(
-            'MATCH (fn:Function) WHERE fn.repo_id = $rid AND fn.name = $name '
-            'RETURN fn.file_path',
-            {"rid": repo_id, "name": symbol_name}
-        )
-        for func_row in func_rows:
-            file_path = func_row[0]
-            dep_rows = self.get_file_dependents(repo_id, file_path)
-            for dep in dep_rows:
-                if not any(x.get("file_path") == dep["file_path"] for x in results):
-                    results.append({
-                        "name": dep["file_path"].split("/")[-1],
-                        "file_path": dep["file_path"],
-                        "depth": 1,
-                        "relation": "imports"
-                    })
-
+        for u, v, edata in G.edges(data=True):
+            if edata.get("type") == "CALLS":
+                caller = G.nodes[u]
+                callee = G.nodes[v]
+                if callee.get("name") == func_name:
+                    results.append({"name": caller.get("name"), "file_path": caller.get("file_path"), "line": edata.get("line", 0)})
         return results
 
-    # ── Class Hierarchy ──────────────────────────────────────────────────
+    def get_callees(self, repo_id: str, func_name: str) -> list[dict]:
+        G = self.graph.get_graph(repo_id)
+        results = []
+        for u, v, edata in G.edges(data=True):
+            if edata.get("type") == "CALLS":
+                caller = G.nodes[u]
+                callee = G.nodes[v]
+                if caller.get("name") == func_name:
+                    results.append({"name": callee.get("name"), "file_path": callee.get("file_path"), "line": edata.get("line", 0)})
+        return results
+
+    def get_dependency_chain(self, repo_id: str, file_path: str) -> list[dict]:
+        file_path = self._normalize_path(file_path)
+        G = self.graph.get_graph(repo_id)
+        file_id = f"file:{repo_id}:{file_path}"
+        results = []
+        
+        if file_id in G:
+            for u, v, edata in G.edges([file_id], data=True):
+                target = v if u == file_id else u
+                if edata.get("type") == "IMPORTS":
+                     if G.nodes[target].get("type") == "File":
+                         results.append({"file_path": G.nodes[target].get("path"), "module_name": edata.get("module_name", "")})
+        return results
+
+    def get_file_dependents(self, repo_id: str, file_path: str) -> list[dict]:
+        file_path = self._normalize_path(file_path)
+        G = self.graph.get_graph(repo_id)
+        file_id = f"file:{repo_id}:{file_path}"
+        results = []
+        
+        for u, v, edata in G.edges(data=True):
+            if edata.get("type") == "IMPORTS":
+                if v == file_id:
+                    results.append({"file_path": G.nodes[u].get("path"), "module_name": edata.get("module_name", "")})
+                elif u == file_id and not G.is_directed():
+                    pass 
+        return results
+
+    def get_dependents(self, repo_id: str, file_path: str) -> list[dict]:
+        return self.get_file_dependents(repo_id, file_path)
+
+    def get_impact_radius(self, repo_id: str, symbol_name: str) -> list[dict]:
+        G = self.graph.get_graph(repo_id)
+        results = []
+        
+        target_nodes = [n for n, data in G.nodes(data=True) if data.get("name") == symbol_name and data.get("type") == "Function"]
+        if not target_nodes:
+            return results
+            
+        target_id = target_nodes[0]
+        
+        def get_callers_at_depth(start_id, max_depth):
+            visited = set([start_id])
+            queue = [(start_id, 0)]
+            found = []
+            
+            while queue:
+                current, depth = queue.pop(0)
+                if depth > 0:
+                    found.append((current, depth))
+                if depth >= max_depth:
+                    continue
+                for u, v, data in G.edges(data=True):
+                     if data.get("type") == "CALLS" and v == current and u not in visited:
+                         visited.add(u)
+                         queue.append((u, depth + 1))
+            return found
+            
+        callers = get_callers_at_depth(target_id, 3)
+        for caller_id, depth in callers:
+            caller_data = G.nodes[caller_id]
+            results.append({
+                "name": caller_data.get("name"),
+                "file_path": caller_data.get("file_path"),
+                "depth": depth,
+                "relation": "calls" if depth == 1 else "transitive_call"
+            })
+            
+        file_path = G.nodes[target_id].get("file_path")
+        if file_path:
+             deps = self.get_file_dependents(repo_id, file_path)
+             for dep in deps:
+                 if not any(x.get("file_path") == dep["file_path"] for x in results):
+                     results.append({
+                         "name": dep["file_path"].split("/")[-1],
+                         "file_path": dep["file_path"],
+                         "depth": 1,
+                         "relation": "imports"
+                     })
+                     
+        return results
 
     def get_class_hierarchy(self, repo_id: str, class_name: str) -> dict:
-        """Get parents and children (subclasses)."""
-        # Parents (superclasses) — multi-hop
-        parent_rows = self._execute(
-            'MATCH (c:Class)-[:INHERITS_FROM*1..5]->(parent:Class) '
-            'WHERE c.repo_id = $rid AND c.name = $name '
-            'RETURN parent.name, parent.file_path',
-            {"rid": repo_id, "name": class_name}
-        )
-        parents = [
-            {"name": r[0], "file_path": r[1]}
-            for r in parent_rows
-        ]
-
-        # Children (subclasses)
-        child_rows = self._execute(
-            'MATCH (child:Class)-[:INHERITS_FROM]->(c:Class) '
-            'WHERE c.repo_id = $rid AND c.name = $name '
-            'RETURN child.name, child.file_path',
-            {"rid": repo_id, "name": class_name}
-        )
-        children = [
-            {"name": r[0], "file_path": r[1]}
-            for r in child_rows
-        ]
-
-        # Implementations
-        impl_rows = self._execute(
-            'MATCH (impl:Class)-[:IMPLEMENTS]->(c:Class) '
-            'WHERE c.repo_id = $rid AND c.name = $name '
-            'RETURN impl.name, impl.file_path',
-            {"rid": repo_id, "name": class_name}
-        )
-        implementations = [
-            {"name": r[0], "file_path": r[1]}
-            for r in impl_rows
-        ]
-
+        G = self.graph.get_graph(repo_id)
+        target_nodes = [n for n, data in G.nodes(data=True) if data.get("name") == class_name and data.get("type") == "Class"]
+        
+        parents = []
+        children = []
+        implementations = []
+        
+        if target_nodes:
+            target_id = target_nodes[0]
+            
+            def get_parents(start_id, max_depth):
+                visited = set([start_id])
+                queue = [(start_id, 0)]
+                found = []
+                while queue:
+                    current, depth = queue.pop(0)
+                    if depth > 0:
+                        found.append(current)
+                    if depth >= max_depth:
+                        continue
+                    for u, v, data in G.edges(data=True):
+                        if data.get("type") == "INHERITS_FROM" and u == current and v not in visited:
+                            visited.add(v)
+                            queue.append((v, depth + 1))
+                return found
+                
+            for parent_id in get_parents(target_id, 5):
+                parents.append({"name": G.nodes[parent_id].get("name"), "file_path": G.nodes[parent_id].get("file_path")})
+                
+            for u, v, data in G.edges(data=True):
+                if data.get("type") == "INHERITS_FROM" and v == target_id:
+                    children.append({"name": G.nodes[u].get("name"), "file_path": G.nodes[u].get("file_path")})
+                    
+            for u, v, data in G.edges(data=True):
+                if data.get("type") == "IMPLEMENTS" and v == target_id:
+                    implementations.append({"name": G.nodes[u].get("name"), "file_path": G.nodes[u].get("file_path")})
+                    
         return {
             "class_name": class_name,
             "parents": parents,
             "children": children,
-            "implementations": implementations,
+            "implementations": implementations
         }
 
-    # ── API Queries ──────────────────────────────────────────────────────
-
     def get_api_endpoints(self, repo_id: str) -> list[dict]:
-        """Get all API endpoints and their handlers."""
-        rows = self._execute(
-            'MATCH (a:API)-[:HANDLED_BY]->(fn:Function) '
-            'WHERE a.repo_id = $rid '
-            'RETURN a.method, a.route, fn.name, fn.file_path',
-            {"rid": repo_id}
-        )
-        return [
-            {"method": r[0], "route": r[1], 
-             "handler": r[2], "file_path": r[3]}
-            for r in rows
-        ]
+        G = self.graph.get_graph(repo_id)
+        results = []
+        for n, data in G.nodes(data=True):
+            if data.get("type") == "API":
+                handler = ""
+                for u, v, edata in G.edges([n], data=True):
+                    if edata.get("type") == "HANDLED_BY":
+                        target = v if u == n else u
+                        handler = G.nodes[target].get("name", "")
+                
+                results.append({
+                    "method": data.get("method"),
+                    "route": data.get("route"),
+                    "file_path": data.get("file_path"),
+                    "handler": handler
+                })
+        return results
+
+    def trace_symbol_definition(self, repo_id: str, symbol_name: str, 
+                                start_file: str | None = None) -> list[dict]:
+        results = self.find_symbol_by_name(repo_id, symbol_name)
+        if start_file:
+            start_file = self._normalize_path(start_file)
+            results.sort(key=lambda x: x["file_path"] != start_file)
+        return results
