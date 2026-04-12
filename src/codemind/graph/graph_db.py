@@ -168,7 +168,7 @@ class GraphifyAdapter:
 
 # Backward compatibility aliases
 SQLiteGraphAdapter = GraphifyAdapter
-KuzuGraphAdapter = GraphifyAdapter
+
 
 
 class GraphBuilder:

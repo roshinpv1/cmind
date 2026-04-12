@@ -197,7 +197,7 @@ class TestCodeMindE2E:
         assert any("DatabaseAdapter" in r.get("chunk_text", "") for r in results)
 
     def test_05_structural_search(self):
-        """3b. Query Kuzu graph engine via structural filters."""
+        """3b. Query Graphify graph engine via structural filters."""
         # Use structural search mode and apply a .py filter 
         response = self.session.post(f"{BASE_URL}/api/v1/search", json={
             "query": "",

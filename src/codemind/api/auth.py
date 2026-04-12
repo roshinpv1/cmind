@@ -25,6 +25,9 @@ SECRET_KEY = os.getenv("JWT_SECRET_KEY", "74889c1694d9b2323c6f2a7a371c6ca674889c
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 week
 
+# Feature flag to entirely disable auth during local dev/testing
+AUTH_DISABLED = os.getenv("CODEMIND_AUTH_DISABLED", "false").lower() == "true"
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/v1/auth/token", auto_error=False)
 
 # --- JWT Helpers ---
@@ -55,6 +58,15 @@ async def get_current_user(
     Dependency to get the current authenticated user from JWT.
     Returns the user dict if valid, otherwise None (allowing public access where needed).
     """
+    if AUTH_DISABLED:
+        return {
+            "user_id": "auth_disabled_override",
+            "email": "localdeveloper@codemind.local",
+            "full_name": "Local Overrider",
+            "role": "admin",
+            "department": "Engineering"
+        }
+        
     if not token:
         return None
         

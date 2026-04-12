@@ -143,7 +143,7 @@ async def run_test(goal: str, repo_id: str):
         storage_path = os.environ.get("LANCE_STORAGE_PATH", "data/lancedb")
         lance_storage = LanceDBStorage(storage_path)
         
-        graph_db_path = os.environ.get("KUZU_DB_PATH", "data/kuzu_db")
+        graph_db_path = os.environ.get("GRAPH_DB_PATH", "data/graph_db")
         graph_service = GraphQueryService(graph_db_path)
         
         embedder = get_embedder()

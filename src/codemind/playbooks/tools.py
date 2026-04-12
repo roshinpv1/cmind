@@ -282,7 +282,7 @@ class PlaybookTools:
             repo_id = params["repo_id"]
             file_path = params["file_path"]
             
-            # Use the Kuzu graph to get the extracted Tree-Sitter AST context
+            # Use the Graphify adapter to get the extracted Tree-Sitter AST context
             outline = self.graph.get_file_context(repo_id, file_path)
             
             # Format nicely for the LLM

@@ -12,7 +12,7 @@ class VisionGraphExtractor:
     Implements Graphify's Multimodal extraction pipeline.
     Scans a repository for images (architecture diagrams) and markdown/PDFs,
     runs a Vision-capable LLM to extract semantic context, and injects
-    'INFERRED' relationships into Kuzu Graph DB.
+    'INFERRED' relationships into Graphify.
     """
     
     def __init__(self, repo_path: str, repo_id: str, graph_builder: GraphBuilder):
@@ -98,7 +98,7 @@ class VisionGraphExtractor:
                     except:
                         confidence = 0.5
                         
-                    # Inject mapping into Kuzu DB
+                    # Inject mapping into Graphify
                     source_id = f"file:{self.repo_id}:{source}"
                     target_id = f"file:{self.repo_id}:{target}"
                     

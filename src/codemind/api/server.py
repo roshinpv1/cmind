@@ -105,7 +105,7 @@ async def lifespan(app: FastAPI):
     app.state.lance_storage = LanceDBStorage()
     app.state.job_manager = JobManager()
     
-    # Graph DB (Kuzu) - Independent embedded graph database
+    # Graph DB (Graphify) - Independent embedded graph database
     app.state.graph_db = GraphifyAdapter()
     app.state.graph_query = GraphQueryService(app.state.graph_db)
 
@@ -145,7 +145,7 @@ async def lifespan(app: FastAPI):
     routes_msg += "============================="
     print(routes_msg, file=sys.stderr)
 
-    # Start index worker as background thread (shares Kuzu instance)
+    # Start index worker as background thread (shares Graphify instance)
     import threading
     from codemind.worker.index_worker import IndexWorker, _shutdown as _worker_shutdown
     import codemind.worker.index_worker as worker_module
@@ -153,7 +153,7 @@ async def lifespan(app: FastAPI):
     worker = IndexWorker(
         poll_interval=int(os.getenv("WORKER_POLL_INTERVAL", "5")),
         db_path=os.getenv("CODEMIND_DB_PATH", os.path.join(os.getenv("CODEMIND_BASE_PATH", "./tmp/"), "codemind.db")),
-        graph_db=app.state.graph_db,  # Share Kuzu instance
+        graph_db=app.state.graph_db,  # Share Graphify instance
     )
     worker_thread = threading.Thread(target=worker.run, daemon=True, name="index-worker")
     worker_thread.start()

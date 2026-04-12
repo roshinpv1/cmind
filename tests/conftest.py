@@ -283,13 +283,13 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     from codemind.storage.lancedb_storage import LanceDBStorage
     from codemind.storage import ManifestManager
     from codemind.jobs import JobManager
-    from codemind.graph import KuzuGraphAdapter
+    from codemind.graph.graph_db import GraphifyAdapter
     from codemind.graph.graph_query import GraphQueryService
 
     # Create temp storage
     db_path = str(tmp_path / "api_test.db")
     lance_dir = str(tmp_path / "lancedb_api_test")
-    kuzu_dir = str(tmp_path / "kuzu_api_test")
+    graph_dir = str(tmp_path / "graph_api_test")
     os.makedirs(lance_dir, exist_ok=True)
 
     # Use the REAL server app
@@ -299,7 +299,7 @@ def app_client(tmp_path, mock_llm, mock_embedder):
     manifest = ManifestManager(db_path=db_path)
     lance = LanceDBStorage(lance_dir)
     job_manager = JobManager(db_path=db_path)
-    graph_db = KuzuGraphAdapter(kuzu_dir)
+    graph_db = GraphifyAdapter()
     graph_query = GraphQueryService(graph_db)
 
     # Wire up app state with mocked/temp infrastructure

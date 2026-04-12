@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from codemind.playbooks import PlaybookRegistry, PlaybookExecutor, PlaybookTools
 from codemind.storage.lancedb_storage import LanceDBStorage
 from codemind.graph.graph_query import GraphQueryService
-from codemind.graph.kuzu_graph import KuzuGraphDB
+from codemind.graph.graph_db import GraphifyAdapter
 from codemind.llm.factory import get_llm_client
 
 
@@ -36,7 +36,7 @@ async def test_playbook_execution():
     print("\n2. Initializing data layer...")
     try:
         lance_storage = LanceDBStorage("data/lancedb")
-        graph_db = KuzuGraphDB("data/kuzu_graph")
+        graph_db = GraphifyAdapter()
         graph_service = GraphQueryService(graph_db)
         llm_client = get_llm_client()
         
