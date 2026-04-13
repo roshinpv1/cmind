@@ -788,15 +788,40 @@ class PlaybookTools:
 
                 rerank_payload = []
                 for r in results:
+                    # Parse metadata for rich business context
+                    r_meta = _json.loads(r.get("metadata", "{}")) if r.get("metadata") else {}
                     rerank_payload.append({
                         "repo_id": r["repo_id"],
                         "repo_name": r.get("repo_name", ""),
-                        "preview": r.get("chunk_text", "")[:400] 
+                        # Business signals — primary scoring dimension
+                        "business_functionalities": r_meta.get("business_functionalities", []),
+                        "category": r_meta.get("category", ""),
+                        # Technology signals — secondary scoring dimension
+                        "tech_stack": r_meta.get("tech_stack", ""),
+                        "architecture": r_meta.get("architecture", ""),
+                        # Short text preview for general context
+                        "preview": r.get("chunk_text", "")[:300]
                     })
-                
+
                 query_str = queries[0] if isinstance(queries, list) else queries
-                sys_prompt = "You are a Catalog Retrieval Expert. Strictly re-rank and score components based ONLY on how mathematically relevant they are to the user's constraints."
-                user_msg = f"User Query: '{query_str}'\n\nRate these candidate components. Score 1-100. Discard irrelevant ones entirely. Return in the exact JSON schema requested.\n\nCandidates:\n{_json.dumps(rerank_payload, indent=2)}"
+                sys_prompt = (
+                    "You are an Enterprise Component Discovery Expert. "
+                    "Your PRIMARY scoring criterion is BUSINESS RELEVANCE (70% weight): "
+                    "does this component fulfill the user's business need, domain requirement, or functional goal? "
+                    "Evaluate using business_functionalities and category. Ignore tech stack for this dimension. "
+                    "Your SECONDARY criterion is TECHNOLOGY FIT (30% weight): "
+                    "does the tech_stack or architecture align with explicit technical constraints in the query? "
+                    "If the query has no technical constraints, score technology_fit_score as 50 (neutral). "
+                    "CRITICAL: A strong business match ALWAYS outranks a weak business match regardless of tech similarity. "
+                    "Compute final_score = ROUND((business_relevance_score * 0.7) + (technology_fit_score * 0.3)). "
+                    "Omit components with business_relevance_score < 20 as irrelevant."
+                )
+                user_msg = (
+                    f"User Query: '{query_str}'\n\n"
+                    "Score each candidate using the two-dimension schema. "
+                    "Return ONLY components that have business_relevance_score >= 20.\n\n"
+                    f"Candidates:\n{_json.dumps(rerank_payload, indent=2)}"
+                )
                 
                 print(f"[TOOLS] Initiating LLM Re-Ranking for {len(results)} items...")
                 model = get_chat_model()
@@ -808,19 +833,22 @@ class PlaybookTools:
                 ])
                 
                 ranked_rids = {item.repo_id: item for item in output.items}
-                
+
                 final_results = []
                 for r in results:
                     if r["repo_id"] in ranked_rids:
                         r_item = ranked_rids[r["repo_id"]]
-                        # Override the LanceDB cosine score with the GPT/Claude assigned relevance
-                        r["score"] = r_item.relevance_score / 100.0  # Normalized to 0.0-1.0
-                        # Append the reasoning into the UI visible metadata
+                        # Use the blended final_score (70% business + 30% tech) as authoritative rank
+                        r["score"] = r_item.final_score / 100.0
+                        # Surface all sub-scores into metadata for UI transparency
                         meta = _json.loads(r.get("metadata", "{}"))
+                        meta["ai_business_score"] = r_item.business_relevance_score
+                        meta["ai_tech_score"] = r_item.technology_fit_score
+                        meta["ai_final_score"] = r_item.final_score
                         meta["ai_insight"] = r_item.reasoning
                         r["metadata"] = _json.dumps(meta)
                         final_results.append(r)
-                
+
                 final_results.sort(key=lambda x: x["score"], reverse=True)
                 results = final_results
                 print(f"[TOOLS] LLM Re-Ranking complete. Kept {len(results)} items.")

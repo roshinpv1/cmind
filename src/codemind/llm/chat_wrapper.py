@@ -498,16 +498,48 @@ class _StructuredOutputRunnable(Runnable):
             return asyncio.run(self.ainvoke(input, config, **kwargs))
     
     async def ainvoke(self, input, config=None, **kwargs):
-        """Async structured output generation."""
-        # Build schema instruction
+        """Async structured output generation with retry on parse failure."""
+        import re as _re
+
         schema_json = json.dumps(self.schema.model_json_schema(), indent=2)
+
+        # Build a concrete filled example from schema defaults so the LLM
+        # sees exactly what shape we expect, not just an abstract JSON Schema spec.
+        def _make_example(schema_class) -> str:
+            example = {}
+            for fname, finfo in schema_class.model_fields.items():
+                ann = finfo.annotation
+                origin = getattr(ann, "__origin__", None)
+                default = finfo.default
+                from pydantic_core import PydanticUndefined
+                if default not in (None, ..., PydanticUndefined, "", 0, []):
+                    example[fname] = default
+                elif origin is list:
+                    example[fname] = []
+                elif ann is int:
+                    example[fname] = 75
+                elif ann is float:
+                    example[fname] = 0.75
+                elif ann is bool:
+                    example[fname] = True
+                else:
+                    example[fname] = f"<{fname}>"
+            return json.dumps(example, indent=2)
+
+        try:
+            example_json = _make_example(self.schema)
+        except Exception:
+            example_json = "{}"
+
         schema_instruction = (
             f"\n\nYou MUST respond with a valid JSON object matching this schema:\n"
-            f"```json\n{schema_json}\n```\n"
-            f"Output ONLY the JSON object, no other text. "
+            f"```json\n{schema_json}\n```\n\n"
+            f"Example of the EXACT shape expected (fill with real values):\n"
+            f"```json\n{example_json}\n```\n"
+            f"Output ONLY the JSON object. No markdown prose, no extra keys, no trailing text. "
             f"Wrap it in a ```json code block."
         )
-        
+
         # Augment messages with schema instruction
         if isinstance(input, list):
             messages = list(input)
@@ -515,7 +547,7 @@ class _StructuredOutputRunnable(Runnable):
             messages = input.get("messages", [])
         else:
             messages = [HumanMessage(content=str(input))]
-        
+
         # Inject into system message
         augmented = []
         has_system = False
@@ -525,16 +557,40 @@ class _StructuredOutputRunnable(Runnable):
                 has_system = True
             else:
                 augmented.append(msg)
-        
+
         if not has_system:
             augmented.insert(0, SystemMessage(content=schema_instruction))
-        
-        # Generate via underlying model
-        result = await self.chat_model._agenerate_impl(augmented, **kwargs)
-        raw_text = result.generations[0].message.content
-        
-        # Extract and validate JSON
-        return _parse_structured_output(raw_text, self.schema)
+
+        # ── Retry loop: attempt up to 2 times before raising ─────────────
+        last_error = None
+        for attempt in range(2):
+            result = await self.chat_model._agenerate_impl(augmented, **kwargs)
+            raw_text = result.generations[0].message.content
+
+            # Strip <think> tags that may still slip through
+            raw_text = _re.sub(r'<think>.*?</think>', '', raw_text, flags=_re.DOTALL).strip()
+
+            try:
+                return _parse_structured_output(raw_text, self.schema)
+            except Exception as e:
+                last_error = e
+                if attempt == 0:
+                    # First failure: strengthen the prompt and retry
+                    print(f"[STRUCTURED_OUTPUT] Parse attempt 1 failed ({e}), retrying with stricter prompt...")
+                    repair_instruction = (
+                        "\n\nPREVIOUS RESPONSE WAS INVALID. You MUST return ONLY a JSON object "
+                        f"with these exact keys: {list(self.schema.model_fields.keys())}. "
+                        "No extra keys, no markdown, just the JSON object wrapped in ```json."
+                    )
+                    # Append correction as a new human message so the model sees the failure
+                    augmented = augmented + [
+                        AIMessage(content=raw_text),
+                        HumanMessage(content=repair_instruction)
+                    ]
+
+        raise ValueError(
+            f"Structured output failed after 2 attempts. Last error: {last_error}"
+        )
 
 
 def _parse_structured_output(text: str, schema: type) -> Any:
@@ -544,27 +600,26 @@ def _parse_structured_output(text: str, schema: type) -> Any:
     1. ```json code block
     2. Raw JSON object
     3. First { to last } extraction
+    4. _repair_json — strip comments, trailing commas, rebalance braces
     """
     import re
-    
+
     # Strategy 1: ```json code block
-    match = re.search(r'```json\s*({.*?})\s*```', text, re.DOTALL)
+    match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
     if match:
         try:
             data = json.loads(match.group(1))
             return schema.model_validate(data)
         except Exception as e:
-            print(f"[PARSER ERROR] Strategy 1 failed: {e}")
-            pass
-    
+            print(f"[PARSER] Strategy 1 failed: {e}")
+
     # Strategy 2: Try the whole text as JSON
     try:
         data = json.loads(text.strip())
         return schema.model_validate(data)
     except Exception as e:
-        print(f"[PARSER ERROR] Strategy 2 failed: {e}")
-        pass
-    
+        print(f"[PARSER] Strategy 2 failed: {e}")
+
     # Strategy 3: Find first { to last }
     start = text.find('{')
     end = text.rfind('}')
@@ -573,9 +628,42 @@ def _parse_structured_output(text: str, schema: type) -> Any:
             data = json.loads(text[start:end + 1])
             return schema.model_validate(data)
         except Exception as e:
-            print(f"[PARSER ERROR] Strategy 3 failed: {e}")
+            print(f"[PARSER] Strategy 3 failed: {e}")
+
+    # Strategy 4: Aggressive repair — strip JS comments, trailing commas, rebalance braces
+    def _repair(s: str) -> dict | None:
+        s = re.sub(r'//.*?$', '', s, flags=re.MULTILINE)   # strip // comments
+        s = re.sub(r',\s*([}\]])', r'\1', s)                # trailing commas
+        # Find outermost brace pair
+        depth, start_i, end_i = 0, None, None
+        for i, c in enumerate(s):
+            if c == '{':
+                if depth == 0:
+                    start_i = i
+                depth += 1
+            elif c == '}':
+                depth -= 1
+                if depth == 0:
+                    end_i = i + 1
+                    break
+        if start_i is not None and end_i is not None:
+            s = s[start_i:end_i]
+        try:
+            return json.loads(s)
+        except Exception:
             pass
-    
-    # Fallback: return raw text wrapped in a minimal schema if possible
+        # Last resort: strip non-ASCII and retry
+        try:
+            return json.loads(''.join(c for c in s if ord(c) < 128))
+        except Exception:
+            return None
+
+    repaired = _repair(text)
+    if repaired is not None:
+        try:
+            return schema.model_validate(repaired)
+        except Exception as e:
+            print(f"[PARSER] Strategy 4 (repair) failed: {e}")
+
     raise ValueError(f"Could not parse structured output from LLM response: {text[:200]}...")
 

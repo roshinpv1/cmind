@@ -66,10 +66,35 @@ class CatalogEntry(BaseModel):
 
 
 class CatalogRerankItem(BaseModel):
-    """An LLM-scored catalog item."""
+    """An LLM-scored catalog item with explicit business and technology sub-scores."""
     repo_id: str = Field(description="The repo_id of the catalog entry")
-    relevance_score: int = Field(ge=0, le=100, description="Strict 1-100 score of how perfectly the component matches the exact technical constraints, functionality, and intent of the user's query.")
-    reasoning: str = Field(description="1-sentence explanation of why it was scored this way. If it is completely irrelevant, state why.")
+    business_relevance_score: int = Field(ge=0, le=100,
+        description=(
+            "Primary score (0-100): how well this component's PURPOSE and BUSINESS CAPABILITIES "
+            "solve the user's stated business goal or domain need. "
+            "Focus on business_functionalities, category, and what the component achieves for real users. "
+            "Ignore technology stack entirely when computing this score."
+        )
+    )
+    technology_fit_score: int = Field(ge=0, le=100,
+        description=(
+            "Secondary score (0-100): how well the component's tech stack, architecture, and frameworks "
+            "align with any explicit technical constraints mentioned in the query. "
+            "Score 50 (neutral) if the query has no technical constraints."
+        )
+    )
+    final_score: int = Field(ge=0, le=100,
+        description=(
+            "Blended score: ROUND((business_relevance_score * 0.7) + (technology_fit_score * 0.3)). "
+            "This is the authoritative ranking score."
+        )
+    )
+    reasoning: str = Field(
+        description=(
+            "2-sentence explanation. Sentence 1: why the business relevance score was assigned. "
+            "Sentence 2: why the technology fit score was assigned."
+        )
+    )
 
 class CatalogRerankOutput(BaseModel):
     """Structured output for search result re-ranking."""
