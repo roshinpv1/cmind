@@ -34,13 +34,14 @@ You will operate in a continuous loop evaluating the retrieved codebase:
 
 1. **RECONNAISSANCE:** Map the "Trust Boundaries." Identify where external user input (API, UI, Headers, Webhooks, Queues) enters the system and where it touches sensitive "Sinks" (Database, Auth State, Memory, Shell, Internal Network).
 2. **HYPOTHESIZE:** Systematically audit for all profound reasoning vectors:
-    - **State-Machine & Auth Bypasses:** Can I reach 'Success' or access restricted resources without proper token verification? Are JWT signatures ignored? Does the OAuth flow lack state validation?
-    - **Privilege Escalation:** Can User A manipulate the request to read/write User B's data (IDOR) or escalate to Admin (Vertical)?
-    - **Business Logic Flaws:** Could an attacker bypass pricing caps, force negative totals, abuse concurrent coupon codes, or break invariant business rules?
-    - **Race Conditions:** If I send two identical requests in the same millisecond to a state-modifying endpoint, does it result in double-spending or corruption?
-    - **Contextual Desync & Parameter Pollution:** Does the frontend validation differ from the backend logic in a way that allows injection? Does HTTP parameter pollution bypass WAFs or internal routing checks?
-    - **SSRF & Deserialization:** Can I force the backend to fetch arbitrary internal URLs or blindly deserialize crafted binary payloads?
-    - **Cryptographic Logic Failures:** Does the code rely on predictable RNGs for session tokens? Are secrets hardcoded or improperly rotated?
+    - **Injection Attacks:** Trace user input flows to find SQL injection, command injection, LDAP injection, NoSQL injection, XPath injection, and XML External Entities (XXE).
+    - **Authentication & Authorization:** Identify broken authentication logic, privilege escalation paths, insecure direct object references (IDOR), session flaws, and state-machine bypasses.
+    - **Business Logic Flaws:** Analyze race conditions around transactions/auth (double-spending) and Time-of-check-time-of-use (TOCTOU) logic vulnerabilities.
+    - **Data Exposure & PII:** Hunt for hardcoded secrets, sensitive data logging, information disclosure, and mishandling of internal PII.
+    - **Cryptographic Issues:** Find weak hashing algorithms, improper/hardcoded key management, and insecure (predictable) random number generation used in security functions.
+    - **Input Validation:** Look for missing boundaries/sanitization leading to buffer overflows or uncontrolled memory access.
+    - **Configuration & Supply Chain:** Flag insecure code-level defaults, missing security headers, permissive CORS wildcard routing, and vulnerable/typosquatted dependency imports.
+    - **Cross-Site Scripting (XSS) & Code Execution:** Trace data paths for RCE via unsafe deserialization (pickle, YAML), unconstrained `eval()` injections, Reflected/Stored, and DOM-based XSS.
 3. **ACT (CODE EXECUTION):** When you find a potential flaw, DO NOT report it yet. Write a Python script to computationally simulate the exploit in a sandbox.
 4. **OBSERVE:** Analyze the hypothetical execution flow of your script against the code context. 
     - If the exploit succeeds and demonstrably bypasses trust boundaries: Move to **Reporting**.
@@ -94,39 +95,24 @@ inject_repo_metadata: true
 
 ## Search Strategy
 ```yaml
-limit: 250
+limit: 25
 mode: react
 min_score: 0.5
 queries: 
-  - "auth"
-  - "middleware"
-  - "gateway"
-  - "financial"
-  - "payment"
-  - "checkout"
-  - "state"
-  - "race condition"
-  - "balance"
-  - "transaction"
-  - "jwt"
-  - "oauth"
-  - "signature verify"
-  - "deserialize"
-  - "pickle"
-  - "session"
-  - "webhook"
-  - "rbac"
-  - "role"
-  - "permissions"
-  - "http client"
-  - "database"
-  - "sql"
-  - "query"
-  - "orm"
-  - "repository"
-  - "service"
-  - "handler"
-  - "controller"
-  - "cache"
-  - "redis"
+  - "sql raw query"
+  - "exec command spawn"
+  - "xml document parser"
+  - "cookie session secret"
+  - "jwt verify signature"
+  - "role privilege admin"
+  - "user id parameter"
+  - "redis cache transaction"
+  - "api key token hardcoded"
+  - "logger pii"
+  - "md5 sha1 random math"
+  - "eval exec pickle yaml"
+  - "serialize deserialize"
+  - "buffer array memory"
+  - "cors allow origin headers"
+  - "innerhtml sanitize react"
 ```
