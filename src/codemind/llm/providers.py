@@ -87,6 +87,11 @@ class LocalDriver(LLMDriver):
             data = response.json()
             output = data["choices"][0]["message"]["content"]
             
+            # Strip <think>...</think> reasoning/planning blocks that some local models
+            # (DeepSeek-R1, Qwen3-thinking, etc.) emit before the final response.
+            # These must never leak into playbook results or tool outputs.
+            output = _re_mod.sub(r'<think>.*?</think>', '', output, flags=_re_mod.DOTALL).strip()
+            
             # Safety net: detect and truncate degenerate repetition loops
             output = self._detect_and_truncate_repetition(output)
             return output
