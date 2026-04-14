@@ -13,6 +13,9 @@ import logging
 import functools
 
 from datetime import UTC, datetime
+from pathlib import Path
+from urllib.parse import urlparse
+import re
 from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.responses import JSONResponse
@@ -498,6 +501,52 @@ class RepoListItem(BaseModel):
     cd_repo_url: str | None = None
     contributors: list[dict] | None = None  # [{"name": "...", "commits": N}, ...]
 
+_HEX_RE = re.compile(r"^[0-9a-f]{16,}$")
+
+
+def _repo_name_from_url(repo_url: str | None) -> str | None:
+    """Extract repository name from HTTPS/SSH Git URL."""
+    if not repo_url:
+        return None
+    try:
+        path = urlparse(repo_url).path.strip("/")
+        if not path:
+            return None
+        name = path.split("/")[-1]
+        if name.endswith(".git"):
+            name = name[:-4]
+        return name or None
+    except Exception:
+        return None
+
+
+def _infer_repo_display_name_and_branch(
+    repo_path: str,
+    repo_url: str | None,
+    repo_branch: str | None,
+) -> tuple[str, str]:
+    """Return stable display name and branch for UI consumers."""
+    branch = (repo_branch or "").strip() or "main"
+
+    # Preferred source for cloned/remote repositories.
+    name_from_url = _repo_name_from_url(repo_url)
+    if name_from_url:
+        return name_from_url, branch
+
+    parts = [p for p in str(Path(repo_path)).split("/") if p]
+    if not parts:
+        return "unknown", branch
+
+    candidate = parts[-1]
+    if candidate == "repo" and len(parts) >= 2:
+        candidate = parts[-2]
+
+    if candidate in {"repos", "repo"}:
+        return "unknown", branch
+    if _HEX_RE.match(candidate):
+        return "unknown", branch
+    return candidate, branch
+
 
 @app.get("/api/v1/repos", response_model=list[RepoListItem])
 async def list_repos(user: dict = Depends(require_user)):
@@ -512,17 +561,11 @@ async def list_repos(user: dict = Depends(require_user)):
     seen_repo_ids = set()
     
     for r in repos:
-        # Infer properties from path
-        path_parts = str(r.repo_path).split("/")
-        name = None
-        branch = None
-        
-        if len(path_parts) >= 2:
-            potential_branch = path_parts[-1]
-            potential_name = path_parts[-2]
-            if potential_name != "repos":
-                 name = potential_name
-                 branch = potential_branch
+        name, branch = _infer_repo_display_name_and_branch(
+            repo_path=r.repo_path,
+            repo_url=r.repo_url,
+            repo_branch=r.branch,
+        )
 
         # Parse contributors JSON
         contributors = None
@@ -534,8 +577,8 @@ async def list_repos(user: dict = Depends(require_user)):
 
         results.append(RepoListItem(
             repo_id=r.repo_id,
-            name=name or "unknown",
-            branch=branch or "unknown",
+            name=name,
+            branch=branch,
             path=r.repo_path,
             repo_url=r.repo_url,
             status="indexed",
@@ -558,12 +601,14 @@ async def list_repos(user: dict = Depends(require_user)):
         catalogs = session.query(CatalogStore).all()
         for c in catalogs:
             if c.repo_id not in seen_repo_ids:
+                meta = c.metadata_json if isinstance(c.metadata_json, dict) else {}
+                name = c.repo_name or _repo_name_from_url(c.git_url) or c.repo_id
                 results.append(RepoListItem(
                     repo_id=c.repo_id,
-                    name=c.repo_name or c.repo_id,
-                    branch=None,
+                    name=name,
+                    branch=c.git_branch or meta.get("branch") or "main",
                     path=c.repo_id,
-                    repo_url=None,
+                    repo_url=c.git_url or meta.get("repo_url"),
                     status="catalog-only",
                     total_files=0,
                     last_indexed=str(c.updated_at or c.created_at or 0),
@@ -611,14 +656,16 @@ async def get_repo_detail(repo_id: str):
     if r:
         # Found in manifest
         print(f"[SERVER] Found repo in manifest: {r.repo_id}")
-        path_parts = str(r.repo_path).split("/")
-        name = path_parts[-2] if len(path_parts) >= 2 and path_parts[-2] != "repos" else "unknown"
-        branch = path_parts[-1] if len(path_parts) >= 2 else "unknown"
+        name, branch = _infer_repo_display_name_and_branch(
+            repo_path=r.repo_path,
+            repo_url=r.repo_url,
+            repo_branch=r.branch,
+        )
 
         return RepoDetail(
             repo_id=r.repo_id,
             name=name,
-            branch=r.branch or branch,
+            branch=branch,
             path=r.repo_path,
             repo_url=r.repo_url,
             org=r.org,
@@ -802,7 +849,7 @@ class GraphQueryRequest(BaseModel):
 
 @app.post("/api/v1/graph/query")
 async def query_graph(request: GraphQueryRequest):
-    """Query code structure using Kùzu graph."""
+    """Query code structure using the Graphify-backed graph (NetworkX)."""
     graph_query = app.state.graph_query
     manifest: ManifestManager = app.state.manifest
     
@@ -850,6 +897,149 @@ async def query_graph(request: GraphQueryRequest):
     
     return []
 
+
+class GraphifyAnalyzeRequest(BaseModel):
+    """Targeted Graphify / structural analysis (token-efficient, no full-file reads).
+
+    Backed by ``graphify-out/graph.json`` loaded via GraphQueryService.
+    Prefer these actions before bulk semantic search or reading whole files.
+    """
+
+    repo_id: str
+    action: str
+    # Optional fields — use those relevant to ``action``
+    pattern: str | None = None
+    file_type: str | None = None
+    file_path: str | None = None
+    symbol_name: str | None = None
+    function_name: str | None = None
+    class_name: str | None = None
+    start: str | None = None
+    end: str | None = None
+    direction: str = "imports"  # imports | imported_by (for file_dependencies)
+    anchor_file: str | None = None
+    hops: int = 2
+    limit: int = 15
+
+
+@app.post("/api/v1/graphify/analyze")
+async def graphify_analyze(request: GraphifyAnalyzeRequest):
+    """Unified structural / relationship API (Claude Code + Graphify style).
+
+    Returns compact JSON suitable for LLM context — maps *relationships* and
+    *structure* from the pre-built graph, not raw file bodies.
+    """
+    graph_query = app.state.graph_query
+    manifest: ManifestManager = app.state.manifest
+
+    if not manifest.get_repository_by_id(request.repo_id):
+        raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
+
+    rid = request.repo_id
+    act = request.action.strip().lower()
+
+    try:
+        if act == "architecture_map":
+            return graph_query.get_architecture_map(rid, limit=max(1, min(request.limit, 50)))
+
+        if act == "file_outline":
+            if not request.file_path:
+                raise HTTPException(status_code=400, detail="file_path required for file_outline")
+            return graph_query.get_file_context(rid, request.file_path)
+
+        if act == "find_files":
+            return graph_query.find_files_by_pattern(
+                rid, pattern=request.pattern, file_type=request.file_type
+            )
+
+        if act == "symbol":
+            if not request.symbol_name:
+                raise HTTPException(status_code=400, detail="symbol_name required for symbol")
+            return graph_query.find_symbol_by_name(rid, request.symbol_name)
+
+        if act == "callers":
+            if not request.function_name:
+                raise HTTPException(status_code=400, detail="function_name required for callers")
+            return graph_query.get_callers(rid, request.function_name)
+
+        if act == "callees":
+            if not request.function_name:
+                raise HTTPException(status_code=400, detail="function_name required for callees")
+            return graph_query.get_callees(rid, request.function_name)
+
+        if act == "file_dependencies":
+            if not request.file_path:
+                raise HTTPException(status_code=400, detail="file_path required for file_dependencies")
+            if request.direction == "imported_by":
+                return graph_query.get_dependents(rid, request.file_path)
+            return graph_query.get_dependency_chain(rid, request.file_path)
+
+        if act == "trace_path":
+            if not request.start or not request.end:
+                raise HTTPException(status_code=400, detail="start and end required for trace_path")
+            path = graph_query.trace_connectivity_path(rid, request.start, request.end)
+            return {"success": True, "path": path, "length": len(path)}
+
+        if act == "impact_radius":
+            if not request.symbol_name:
+                raise HTTPException(status_code=400, detail="symbol_name required for impact_radius")
+            return graph_query.get_impact_radius(rid, request.symbol_name)
+
+        if act == "reachable_files":
+            if not request.anchor_file:
+                raise HTTPException(status_code=400, detail="anchor_file required for reachable_files")
+            files = graph_query.get_reachable_files(
+                rid, request.anchor_file, hops=max(1, min(request.hops, 5))
+            )
+            return {"repo_id": rid, "anchor_file": request.anchor_file, "hops": request.hops, "files": sorted(files)}
+
+        if act == "class_hierarchy":
+            if not request.class_name:
+                raise HTTPException(status_code=400, detail="class_name required for class_hierarchy")
+            return graph_query.get_class_hierarchy(rid, request.class_name)
+
+        if act == "api_endpoints":
+            return graph_query.get_api_endpoints(rid)
+
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unknown action '{request.action}'. "
+                "Use: architecture_map, file_outline, find_files, symbol, callers, callees, "
+                "file_dependencies, trace_path, impact_radius, reachable_files, class_hierarchy, api_endpoints"
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Graphify analyze failed: {e}") from e
+
+
+class GraphifyRunRequest(BaseModel):
+    """Regenerate Graphify artifacts for an indexed repo."""
+
+    repo_id: str
+    no_viz: bool = False
+    obsidian: bool = False
+    obsidian_dir: str | None = None
+
+
+@app.post("/api/v1/graphify/run")
+async def graphify_run(request: GraphifyRunRequest):
+    """Regenerate graph artifacts for an indexed repo_id."""
+    from codemind.api.autonomous_agents import playbook_executor
+
+    if not playbook_executor:
+        raise HTTPException(status_code=503, detail="Playbook system not initialized")
+
+    manifest: ManifestManager = app.state.manifest
+    if not manifest.get_repository_by_id(request.repo_id):
+        raise HTTPException(status_code=404, detail=f"Repository {request.repo_id} not found")
+
+    result = await playbook_executor.tools.graphify_run(request.model_dump())
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Graphify run failed"))
+    return result
 
 
 class CatalogCreateRequest(BaseModel):

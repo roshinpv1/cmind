@@ -650,15 +650,18 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
     seen_ids: set[str] = set()
     function_bodies: list[tuple[str, object]] = []
 
-    def add_node(nid: str, label: str, line: int) -> None:
+    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
             nodes.append({
                 "id": nid,
                 "label": label,
+                "type": node_type,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
+                "end_line": end_line,
+                "docstring": docstring,
             })
 
     def add_edge(src: str, tgt: str, relation: str, line: int,
@@ -673,8 +676,19 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
             "weight": weight,
         })
 
+    def _probe_docstring(node) -> str | None:
+        """Generic docstring probe for function/class bodies."""
+        body = _find_body(node, config)
+        if not body or not body.children: return None
+        # Look at first statement if it's a string (Python/JS triple quotes) or a comment
+        first = body.children[0]
+        if first.type in ("expression_statement", "string", "comment", "comment_statement"):
+            txt = _read_text(first, source).strip("\"' \n\t")
+            if len(txt) > 5: return txt
+        return None
+
     file_nid = _make_id(stem)
-    add_node(file_nid, path.name, 1)
+    add_node(file_nid, path.name, 1, node_type="File")
 
     def walk(node, parent_class_nid: str | None = None) -> None:
         t = node.type
@@ -699,7 +713,9 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
             class_name = _read_text(name_node, source)
             class_nid = _make_id(stem, class_name)
             line = node.start_point[0] + 1
-            add_node(class_nid, class_name, line)
+            end_line = node.end_point[0] + 1
+            doc = _probe_docstring(node)
+            add_node(class_nid, class_name, line, node_type="Class", end_line=end_line, docstring=doc)
             add_edge(file_nid, class_nid, "contains", line)
 
             # Python-specific: inheritance
@@ -802,13 +818,16 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                 return
 
             line = node.start_point[0] + 1
+            end_line = node.end_point[0] + 1
+            doc = _probe_docstring(node)
+            
             if parent_class_nid:
                 func_nid = _make_id(parent_class_nid, func_name)
-                add_node(func_nid, f".{func_name}()", line)
+                add_node(func_nid, f".{func_name}()", line, node_type="Method", end_line=end_line, docstring=doc, parent_id=parent_class_nid)
                 add_edge(parent_class_nid, func_nid, "method", line)
             else:
                 func_nid = _make_id(stem, func_name)
-                add_node(func_nid, f"{func_name}()", line)
+                add_node(func_nid, f"{func_name}()", line, node_type="Function", end_line=end_line, docstring=doc)
                 add_edge(file_nid, func_nid, "contains", line)
 
             body = _find_body(node, config)
@@ -1177,15 +1196,18 @@ def extract_julia(path: Path) -> dict:
     seen_ids: set[str] = set()
     function_bodies: list[tuple[str, object]] = []
 
-    def add_node(nid: str, label: str, line: int) -> None:
+    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
             nodes.append({
                 "id": nid,
                 "label": label,
+                "type": node_type,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
+                "end_line": end_line,
+                "docstring": docstring,
             })
 
     def add_edge(src: str, tgt: str, relation: str, line: int,
@@ -1392,15 +1414,18 @@ def extract_go(path: Path) -> dict:
     seen_ids: set[str] = set()
     function_bodies: list[tuple[str, object]] = []
 
-    def add_node(nid: str, label: str, line: int) -> None:
+    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
             nodes.append({
                 "id": nid,
                 "label": label,
+                "type": node_type,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
+                "end_line": end_line,
+                "docstring": docstring,
             })
 
     def add_edge(src: str, tgt: str, relation: str, line: int,
@@ -1415,8 +1440,16 @@ def extract_go(path: Path) -> dict:
             "weight": weight,
         })
 
+    def _probe_docstring(node) -> str | None:
+        """Probe for Go comments (usually above the node)."""
+        # Go comments are typically preceding siblings or children of specific types
+        # For simplicity, we'll try to find a comment child or sibling if possible
+        # but in tree-sitter-go, usually comments are top-level or attached.
+        # This is a placeholder for Go-specific comment logic.
+        return None
+
     file_nid = _make_id(stem)
-    add_node(file_nid, path.name, 1)
+    add_node(file_nid, path.name, 1, node_type="File")
 
     def walk(node) -> None:
         t = node.type
@@ -1426,8 +1459,9 @@ def extract_go(path: Path) -> dict:
             if name_node:
                 func_name = _read_text(name_node, source)
                 line = node.start_point[0] + 1
+                end_line = node.end_point[0] + 1
                 func_nid = _make_id(stem, func_name)
-                add_node(func_nid, f"{func_name}()", line)
+                add_node(func_nid, f"{func_name}()", line, node_type="Function", end_line=end_line)
                 add_edge(file_nid, func_nid, "contains", line)
                 body = node.child_by_field_name("body")
                 if body:
@@ -1449,15 +1483,16 @@ def extract_go(path: Path) -> dict:
             if name_node:
                 method_name = _read_text(name_node, source)
                 line = node.start_point[0] + 1
+                end_line = node.end_point[0] + 1
                 if receiver_type:
                     parent_nid = _make_id(pkg_scope, receiver_type)
-                    add_node(parent_nid, receiver_type, line)
+                    add_node(parent_nid, receiver_type, line, node_type="Class")
                     method_nid = _make_id(parent_nid, method_name)
-                    add_node(method_nid, f".{method_name}()", line)
+                    add_node(method_nid, f".{method_name}()", line, node_type="Method", end_line=end_line)
                     add_edge(parent_nid, method_nid, "method", line)
                 else:
                     method_nid = _make_id(stem, method_name)
-                    add_node(method_nid, f"{method_name}()", line)
+                    add_node(method_nid, f"{method_name}()", line, node_type="Method", end_line=end_line)
                     add_edge(file_nid, method_nid, "contains", line)
                 body = node.child_by_field_name("body")
                 if body:
@@ -1471,8 +1506,9 @@ def extract_go(path: Path) -> dict:
                     if name_node:
                         type_name = _read_text(name_node, source)
                         line = child.start_point[0] + 1
+                        end_line = child.end_point[0] + 1
                         type_nid = _make_id(pkg_scope, type_name)
-                        add_node(type_nid, type_name, line)
+                        add_node(type_nid, type_name, line, node_type="Class", end_line=end_line)
                         add_edge(file_nid, type_nid, "contains", line)
             return
 
@@ -1580,15 +1616,18 @@ def extract_rust(path: Path) -> dict:
     seen_ids: set[str] = set()
     function_bodies: list[tuple[str, object]] = []
 
-    def add_node(nid: str, label: str, line: int) -> None:
+    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
             nodes.append({
                 "id": nid,
                 "label": label,
+                "type": node_type,
                 "file_type": "code",
                 "source_file": str_path,
                 "source_location": f"L{line}",
+                "end_line": end_line,
+                "docstring": docstring,
             })
 
     def add_edge(src: str, tgt: str, relation: str, line: int,
@@ -2565,31 +2604,43 @@ def _check_tree_sitter_version() -> None:
         )
 
 
-def extract(paths: list[Path]) -> dict:
+def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
     Two-pass process:
     1. Per-file structural extraction (classes, functions, imports)
     2. Cross-file import resolution: turns file-level imports into
        class-level INFERRED edges (DigestAuth --uses--> Response)
+
+    Parameters
+    ----------
+    paths       Source files to process.
+    cache_root  Directory under which ``graphify-out/cache/`` is created.
+                Defaults to the common ancestor of *paths* (legacy behaviour).
+                Pass the repo_id directory (``{REPOS_PATH}/{repo_id}/``) to keep
+                the cache outside the repository clone.
     """
     _check_tree_sitter_version()
     per_file: list[dict] = []
 
-    # Infer a common root for cache keys
-    try:
-        if not paths:
+    # Determine where to write the per-file cache
+    if cache_root is not None:
+        root = Path(cache_root)
+    else:
+        # Legacy: infer from common ancestor of the processed files
+        try:
+            if not paths:
+                root = Path(".")
+            elif len(paths) == 1:
+                root = paths[0].parent
+            else:
+                common_len = sum(
+                    1 for i in range(min(len(p.parts) for p in paths))
+                    if len({p.parts[i] for p in paths}) == 1
+                )
+                root = Path(*paths[0].parts[:common_len]) if common_len else Path(".")
+        except Exception:
             root = Path(".")
-        elif len(paths) == 1:
-            root = paths[0].parent
-        else:
-            common_len = sum(
-                1 for i in range(min(len(p.parts) for p in paths))
-                if len({p.parts[i] for p in paths}) == 1
-            )
-            root = Path(*paths[0].parts[:common_len]) if common_len else Path(".")
-    except Exception:
-        root = Path(".")
 
     _DISPATCH: dict[str, Any] = {
         ".py": extract_python,

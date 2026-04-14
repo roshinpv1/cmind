@@ -252,8 +252,15 @@ def build_pydantic_model(name: str, schema_dict: dict) -> type[BaseModel] | None
         
         # Determine Python type
         if type_name == "array":
-            items_type = field_spec.get("items", "string")
-            item_python_type = _YAML_TYPE_MAP.get(items_type, str)
+            items_spec = field_spec.get("items", "string")
+            # items can be a plain string ("string", "integer") OR a nested
+            # object dict ({type: object, properties: ...}).  Only look up the
+            # type map for plain strings; treat complex objects as dict/Any.
+            if isinstance(items_spec, dict):
+                items_type_str = items_spec.get("type", "object")
+                item_python_type = _YAML_TYPE_MAP.get(items_type_str, dict)
+            else:
+                item_python_type = _YAML_TYPE_MAP.get(str(items_spec), str)
             python_type = list[item_python_type]
             if default is None:
                 default = []

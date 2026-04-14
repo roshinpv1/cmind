@@ -14,10 +14,10 @@ from codemind.indexer.ast_chunker import ASTChunker
 from codemind.indexer.call_extractor import CallExtractor
 from codemind.indexer.embedder import EmbeddingGenerator
 from codemind.indexer.file_filters import CODE_EXTENSIONS, KNOWN_FILENAMES
-from codemind.indexer.import_resolver import ImportResolver
 from codemind.indexer.models import FileChange
 from codemind.storage import ManifestManager
 from codemind.storage.lancedb_storage import LanceDBStorage
+from codemind.graphify.extract import extract as graphify_extract
 
 
 @dataclass
@@ -42,6 +42,7 @@ class IndexingState:
     user_id: str | None = None  # User who initiated the indexing
     repo_url: str | None = None  # Git remote URL (when cloned)
     cd_repo_url: str | None = None  # Companion CD repo URL (if found)
+    graphify_data: dict = field(default_factory=dict) # Unified extraction results
 
 
 class IndexingWorkflow:
@@ -111,37 +112,31 @@ class IndexingWorkflow:
             print(f"[WORKFLOW] ✅ detect_changes complete — {state.files_changed} changed files")
             self._report_progress("detecting_changes", 10)
 
-            self._report_progress("extracting_ast", 15)
-            state = self.extract_ast(state)
-            if state.error:
-                print(f"[WORKFLOW] ❌ extract_ast failed: {state.error}")
-                return state
-            print(f"[WORKFLOW] ✅ extract_ast complete")
-            self._report_progress("extracting_ast", 20)
+            # AST extraction now consolidated into discovery pass
+            self._report_progress("discovery", 15)
 
             self._report_progress("chunking", 25)
-            state = self.chunk_and_embed_files(state)
-            if state.error:
-                print(f"[WORKFLOW] ❌ chunk_and_embed_files failed: {state.error}")
-                return state
-            print(f"[WORKFLOW] ✅ chunk_and_embed_files complete — {state.chunks_created} chunks, {state.embeddings_generated} embeddings")
+            # --- Skip LanceDB/Embedding if disabled ---
+            if self.embedder.provider_type == "none":
+                print(f"[WORKFLOW] ⚡ Skipping chunking and embedding (No-LanceDB Mode)")
+                state.chunks_created = 0
+                state.embeddings_generated = 0
+            else:
+                state = self.chunk_and_embed_files(state)
+                if state.error:
+                    print(f"[WORKFLOW] ❌ chunk_and_embed_files failed: {state.error}")
+                    return state
+                print(f"[WORKFLOW] ✅ chunk_and_embed_files complete — {state.chunks_created} chunks, {state.embeddings_generated} embeddings")
+            # ------------------------------------------
             self._report_progress("embedding", 65)
 
-            self._report_progress("building_graph", 70)
-            state = self.build_graph(state)
+            self._report_progress("discovery", 70)
+            state = self.run_discovery(state)
             if state.error:
-                print(f"[WORKFLOW] ❌ build_graph failed: {state.error}")
+                print(f"[WORKFLOW] ❌ discovery failed: {state.error}")
                 return state
-            print(f"[WORKFLOW] ✅ build_graph complete")
-            self._report_progress("building_graph", 80)
-
-            self._report_progress("extracting_relationships", 85)
-            state = self.extract_relationships(state)
-            if state.error:
-                print(f"[WORKFLOW] ❌ extract_relationships failed: {state.error}")
-                return state
-            print(f"[WORKFLOW] ✅ extract_relationships complete")
-            self._report_progress("extracting_relationships", 90)
+            print(f"[WORKFLOW] ✅ discovery complete")
+            self._report_progress("discovery", 90)
 
             self._report_progress("updating_manifest", 95)
             state = self.update_manifest(state)
@@ -184,17 +179,6 @@ class IndexingWorkflow:
                 pass
 
         return state
-
-    def _get_ast(self, file_path: Path, language: str):
-        """Helper to get AST with in-memory caching for the duration of the workflow."""
-        path_str = str(file_path)
-        if hasattr(self, "_ast_cache") and path_str in self._ast_cache:
-            return self._ast_cache[path_str]
-        
-        result = self.ast_extractor.extract(file_path, language)
-        if hasattr(self, "_ast_cache"):
-            self._ast_cache[path_str] = result
-        return result
 
     def detect_changes(self, state: IndexingState) -> IndexingState:
         """Node: Detect changed files."""
@@ -249,19 +233,7 @@ class IndexingWorkflow:
 
         return state
 
-    def extract_ast(self, state: IndexingState) -> IndexingState:
-        """Node: Extract AST from files."""
-        try:
-            state.stage = "extracting_ast"
-
-            # Extract AST from each changed Python file
-            # AST extraction happens during graph building phase
-            # to avoid extracting twice
-
-        except Exception as e:
-            state.error = f"AST extraction failed: {e}"
-
-        return state
+    # Legacy extract_ast consolidated into run_discovery
 
     def chunk_and_embed_files(self, state: IndexingState) -> IndexingState:
         """Node: Chunk files and generate embeddings in streams to limit memory."""
@@ -277,6 +249,11 @@ class IndexingWorkflow:
             state.stage = "chunking_and_embedding"
             total = len(state.changed_files)
             print(f"[STREAM] Starting streamed chunking & embedding for {total} files...")
+            
+            # --- Diagnostic for Zero-Vector Mode ---
+            if getattr(self.embedder.provider, "__class__", None).__name__ == "NoneEmbeddingProvider":
+                print(f"[STREAM] ⚡ Zero-Vector Mode active: skipping actual embedding generation.")
+            # ----------------------------------------
 
             # Pre-filter files
             chunkable = []
@@ -363,184 +340,72 @@ class IndexingWorkflow:
 
         return state
 
-    def build_graph(self, state: IndexingState) -> IndexingState:
-        """Node: Build code graph."""
+    def run_discovery(self, state: IndexingState) -> IndexingState:
+        """Unified discovery phase using Graphify."""
         try:
-            state.stage = "building_graph"
-            print(f"[GRAPH] Starting graph building for repo: {state.repo_id}")
-
-            # Build repository node
-            print(f"[GRAPH] Creating repository node...")
-            self.graph_builder.build_repository_node(state.repo_id, state.repo_path)
-            print(f"[GRAPH] ✅ Repository node created")
-
-            # Build file nodes and extract structure
-            print(f"[GRAPH] Processing {len(state.changed_files)} changed files...")
-            files_processed = 0
-            
-            import time
-
-            for file_change in state.changed_files:
-                file_path = Path(state.repo_path) / file_change.path
-
-                # Add file node
-                self.graph_builder.build_file_node(
-                    state.repo_id, 
-                    str(file_change.path),
-                    str(file_change.path)  # relative_path
-                )
-                files_processed += 1
-
-                # Extract and add classes/functions for ALL supported languages
-                language = self.ast_extractor.detect_language(file_path)
-                if language:
-                    try:
-                        # Cooperative internal timeout will handle stalls
-                        result = self._get_ast(file_path, language)
-
-                        if result and result.symbols:
-                            # Add class nodes
-                            for symbol in result.symbols:
-                                if symbol.type in ("class", "interface", "struct", "trait", "enum"):
-                                    self.graph_builder.build_class_node(
-                                        state.repo_id,
-                                        str(file_change.path),
-                                        symbol.name,
-                                    )
-
-                            # Add function nodes
-                            for symbol in result.symbols:
-                                if symbol.type in ("function", "method"):
-                                    parent_class = symbol.parent if symbol.type == "method" else None
-                                    self.graph_builder.build_function_node(
-                                        state.repo_id,
-                                        str(file_change.path),
-                                        symbol.name,
-                                        parent_class,
-                                    )
-                    except TimeoutError:
-                        print(f"[GRAPH] ⚠️  AST extraction timed out for {file_change.path}, skipping.")
-                    except Exception as e:
-                        print(f"[GRAPH] ⚠️  AST extraction failed for {file_change.path}: {e}")
-
-            print(f"[GRAPH] ✅ Processed {files_processed} files")
-
-        except Exception as e:
-            print(f"[GRAPH] ❌ Graph building failed: {type(e).__name__}: {e}")
-            import traceback
-            traceback.print_exc()
-            state.error = f"Graph building failed: {e}"
-
-        return state
-
-    def extract_relationships(self, state: IndexingState) -> IndexingState:
-        """Node: Extract cross-file relationships (IMPORTS, CALLS, INHERITS)."""
-        try:
-            state.stage = "extracting_relationships"
+            state.stage = "discovery"
             repo_path = Path(state.repo_path)
-            import_resolver = ImportResolver(repo_path)
+            
+            # Map changed files to absolute paths
+            paths_to_process = []
+            for fc in state.changed_files:
+                p = repo_path / fc.path
+                if p.exists():
+                    paths_to_process.append(p)
+            
+            if not paths_to_process:
+                print(f"[DISCOVERY] No new files to discover.")
+                state.graphify_data = {"nodes": [], "edges": []}
+                return state
 
-            import_edges = 0
-            call_edges = 0
-            inherit_edges = 0
+            print(f"[DISCOVERY] Running Graphify extraction on {len(paths_to_process)} files...")
 
-            # Build a symbol-to-file index for resolving cross-file calls
-            symbol_file_map: dict[str, list[str]] = {}  # name → [file_paths]
+            # Pass the repo_id dir as the cache root so the per-file cache lands at
+            # {REPOS_PATH}/{repo_id}/graphify-out/cache/  — outside the clone.
+            cache_root: Path | None = None
+            if self.graph and hasattr(self.graph, "base_path"):
+                cache_root = Path(self.graph.base_path) / state.repo_id
 
-            import time
+            result = graphify_extract(paths_to_process, cache_root=cache_root)
+            state.graphify_data = result
+            
+            # Count extracted symbols roughly
+            symbols_count = len([n for n in result.get("nodes", []) if n.get("type") in ("Function", "Method", "Class")])
+            state.symbols_extracted = symbols_count
+            print(f"[DISCOVERY] ✅ Extracted {len(result.get('nodes', []))} nodes and {len(result.get('edges', []))} edges.")
 
-            # 1. Extract AST and Imports
-            for file_change in state.changed_files:
-                file_path = repo_path / file_change.path
-                if not file_path.exists():
-                    continue
+            # Update Graph Database directly
+            if not self.graph_builder.is_noop:
+                print(f"[DISCOVERY] Syncing results to graph database...")
+                self.graph_builder.set_batch_mode(True)
+                
+                G = self.graph_builder.graph.get_graph(state.repo_id)
+                
+                # Add nodes
+                for node in result.get("nodes", []):
+                    # Standardize node properties for UI/Agent compatibility
+                    props = {k: v for k, v in node.items() if k not in ("id", "label")}
+                    G.add_node(node["id"], label=node["label"], **props)
+                
+                # Add edges
+                for edge in result.get("edges", []):
+                    src = edge.get("source")
+                    tgt = edge.get("target")
+                    rel = edge.get("relation")
+                    if src and tgt and rel:
+                        props = {k: v for k, v in edge.items() if k not in ("source", "target", "relation")}
+                        G.add_edge(src, tgt, relation=rel, **props)
 
-                language = self.ast_extractor.detect_language(file_path)
-                if not language:
-                    continue
-
-                try:
-                    # Cooperative internal timeout will handle stalls
-                    result = self._get_ast(file_path, language)
-
-                    if result and result.symbols:
-                        # Index symbols
-                        for sym in result.symbols:
-                            if sym.name not in symbol_file_map:
-                                symbol_file_map[sym.name] = []
-                            symbol_file_map[sym.name].append(str(file_change.path))
-
-                        # Build IMPORTS edges
-                        for imp in result.imports:
-                            # Skip resolving massive imports to avoid ImportResolver O(N) worst-case
-                            if len(state.changed_files) > 1000 and len(imp.module) > 200:
-                                continue
-                                
-                            resolved = import_resolver.resolve(
-                                imp.module, language, source_file=file_path
-                            )
-                            if resolved:
-                                self.graph_builder.build_import_edges(
-                                    state.repo_id, str(file_change.path), resolved, imp.module
-                                )
-                                import_edges += 1
-
-                        # Build INHERITS edges
-                        for sym in result.symbols:
-                            if sym.bases:
-                                for base in sym.bases:
-                                    # Find the file that declares the base class
-                                    if base in symbol_file_map:
-                                        for base_file in symbol_file_map[base]:
-                                            if base_file != str(file_change.path):
-                                                self.graph_builder.build_inheritance_edges(
-                                                    state.repo_id,
-                                                    str(file_change.path), sym.name,
-                                                    base_file, base,
-                                                )
-                                                inherit_edges += 1
-
-                except TimeoutError:
-                    print(f"[REL] ⚠️  AST extraction timed out for {file_change.path}, skipping.")
-                except Exception as e:
-                    print(f"[REL] ⚠️  Relationship extraction failed for {file_change.path}: {e}")
-
-            # 2. Extract Calls
-            print(f"[REL] Extracting calls from {len(state.changed_files)} files...")
-            for file_change in state.changed_files:
-                file_path = repo_path / file_change.path
-                if not file_path.exists():
-                    continue
-
-                try:
-                    # Cooperative internal timeout
-                    calls = self.call_extractor.extract_calls(file_path)
-                    
-                    if calls:
-                        for call in calls:
-                            # Resolve callee to a file
-                            if call.callee_name in symbol_file_map:
-                                for callee_file in symbol_file_map[call.callee_name]:
-                                    self.graph_builder.build_call_edges(
-                                        state.repo_id,
-                                        str(file_change.path), call.caller_name,
-                                        callee_file, call.callee_name,
-                                        call.line,
-                                    )
-                                    call_edges += 1
-                except TimeoutError:
-                    print(f"[REL] ⚠️  Call extraction timed out for {file_change.path}, skipping.")
-                except Exception:
-                    pass
-
-            print(f"[REL] ✅ Extracted {import_edges} imports, {call_edges} calls, {inherit_edges} inheritance edges")
+                self.graph_builder.commit(state.repo_id)
+                self.graph_builder.set_batch_mode(False)
+                print(f"[DISCOVERY] ✅ Graph database synchronized")
 
         except Exception as e:
-            print(f"[REL] ❌ Relationship extraction failed: {type(e).__name__}: {e}")
+            print(f"[DISCOVERY] ❌ Failed: {e}")
             import traceback
             traceback.print_exc()
-            # Non-fatal: don't set state.error so indexing continues
-
+            state.error = str(e)
+            
         return state
 
     @classmethod
@@ -634,56 +499,65 @@ class IndexingWorkflow:
         # ── Phase 2: Persist symbols (OPTIONAL — failure is non-fatal) ───
         try:
             symbols_to_persist = []
-            repo_path = Path(state.repo_path)
-            for file_change in state.changed_files:
-                file_path = repo_path / file_change.path
-                if not file_path.exists():
+            graph_nodes = state.graphify_data.get("nodes", [])
+            
+            # Language map for manifest consistency
+            LANG_EXT_MAP = {
+                ".py": "python", ".js": "javascript", ".ts": "typescript", 
+                ".go": "go", ".java": "java", ".sol": "solidity", ".rs": "rust"
+            }
+            
+            for node in graph_nodes:
+                # Map Graphify types to manifest types
+                raw_type = node.get("type", "").lower()
+                if raw_type not in ("function", "method", "class", "interface", "struct", "trait", "enum"):
                     continue
                 
-                language = self.ast_extractor.detect_language(file_path)
-                if not language:
-                    continue
-                    
-                try:
-                    result = self._get_ast(file_path, language)
-                    if not result:
-                        continue
-                    for sym in result.symbols:
-                        import hashlib
-                        symbol_id = hashlib.sha256(
-                            f"{state.repo_id}:{file_change.path}:{sym.type}:{sym.name}".encode()
-                        ).hexdigest()[:20]
-                        
-                        parent_id = None
-                        if sym.parent:
-                            parent_id = hashlib.sha256(
-                                f"{state.repo_id}:{file_change.path}:class:{sym.parent}".encode()
-                            ).hexdigest()[:20]
-                        
-                        symbols_to_persist.append({
-                            "symbol_id": symbol_id,
-                            "file_path": str(file_change.path),
-                            "symbol_name": sym.name,
-                            "symbol_type": sym.type,
-                            "signature": getattr(sym, 'signature', None),
-                            "language": language,
-                            "start_line": sym.start_line,
-                            "end_line": sym.end_line,
-                            "parent_symbol_id": parent_id,
-                            "docstring": getattr(sym, 'docstring', None),
-                            "commit_sha": state.commit_hash,
-                        })
-                except Exception as e:
-                    print(f"[MANIFEST] ⚠️ Symbol extraction failed for {file_change.path}: {e}")
+                symbol_type = raw_type
+                if raw_type in ("struct", "interface", "trait", "enum"):
+                    symbol_type = "class" # Down-sample for search consistency
+                
+                # Derive start_line from source_location ("L10")
+                loc = node.get("source_location", "L0")
+                start_line = 0
+                if loc.startswith("L"):
+                    try: start_line = int(loc[1:])
+                    except: pass
+                
+                # Clean up symbol name (strip '()' for functions/methods)
+                name = node["label"].rstrip("()")
+                if name.startswith("."): name = name[1:] # Method dot-prefix
+                
+                # Determine language from source_file
+                file_path = node.get("source_file", "")
+                ext = Path(file_path).suffix.lower()
+                language = LANG_EXT_MAP.get(ext, ext[1:] if ext else "unknown")
+
+                symbols_to_persist.append({
+                    "symbol_id": node["id"],
+                    "repo_id": state.repo_id,
+                    "file_path": file_path,
+                    "symbol_name": name,
+                    "symbol_type": symbol_type,
+                    "signature": node["label"], 
+                    "language": language,
+                    "start_line": start_line,
+                    "end_line": node.get("end_line", start_line),
+                    "docstring": node.get("docstring"),
+                    "parent_symbol_id": node.get("parent_id"),
+                    "commit_sha": state.commit_hash,
+                })
             
             if symbols_to_persist:
+                print(f"[MANIFEST] Syncing {len(symbols_to_persist)} symbols from Graphify results...")
                 count = self.manifest.upsert_symbols(state.repo_id, symbols_to_persist)
                 state.symbols_extracted = count
                 print(f"[MANIFEST] ✅ Persisted {count} symbols")
 
         except Exception as e:
-            # Symbol persistence is non-fatal — repo is already saved
             print(f"[MANIFEST] ⚠️ Symbol persistence failed (non-fatal): {e}")
+            import traceback
+            traceback.print_exc()
 
         # ── Phase 3: Save commit snapshot (OPTIONAL) ─────────────────────
         if state.commit_hash:

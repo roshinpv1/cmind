@@ -78,6 +78,7 @@ class PlaybookResponse(BaseModel):
     """Response from playbook execution."""
     success: bool
     result: Optional[str] = None
+    data: Optional[Any] = None
     error: Optional[str] = None
     logs: list[str] = []
 
@@ -379,12 +380,26 @@ async def execute_playbook(request: PlaybookRequest):
     # Execute
     result = await playbook_executor.execute(final_playbook_name, user_input)
     
-    # Extract result string from outputs
-    output_text = result.get("outputs", {}).get("result")
+    # Extract result payload from normalized outputs
+    outputs = result.get("outputs", {}) or {}
+    output_text = outputs.get("result")
+    output_data = outputs.get("data")
+
+    # If textual result is empty but structured data exists, provide compact text fallback
+    if (not output_text or not str(output_text).strip()) and output_data is not None:
+        import json as _json
+
+        try:
+            output_text = _json.dumps(output_data, default=str)
+        except Exception:
+            output_text = str(output_data)
+    elif not output_text or not str(output_text).strip():
+        output_text = "Playbook completed but returned no analyzable findings. Check tool logs and repository scope."
     
     return PlaybookResponse(
         success=result["success"],
         result=output_text,
+        data=output_data,
         error=result.get("error"),
         logs=result.get("logs", [])
     )

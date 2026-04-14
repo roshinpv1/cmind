@@ -6,6 +6,7 @@ Replaces legacy Kuzu Cypher queries with pure Python iterations.
 """
 
 from typing import Any
+import fnmatch
 import os
 import re
 import networkx as nx
@@ -30,18 +31,65 @@ class GraphQueryService:
         """Normalize a file path."""
         return _REPO_PATH_PREFIX.sub('', file_path)
 
+    def _node_file_path(self, data: dict) -> str | None:
+        """
+        Extract a relative file path from a graph node's attribute dict.
+
+        Graphify stores the path as ``source_file`` (absolute path).
+        GraphBuilder stores it as ``file_path`` (relative).
+        Some legacy nodes use ``path``.
+
+        Returns a normalized relative path, or None if none found.
+        """
+        raw = (
+            data.get("file_path")
+            or data.get("source_file")
+            or data.get("path")
+        )
+        if not raw:
+            return None
+        return self._normalize_path(str(raw))
+
     def find_files_by_pattern(
         self, repo_id: str, pattern: str | None = None, file_type: str | None = None
     ) -> list[dict]:
-        """Find files matching a pattern or file type."""
+        """Find files matching a pattern or file type.
+
+        *pattern* supports:
+        - ``None`` — all files (subject to *file_type*)
+        - substring — case-insensitive match on full path or basename
+        - glob — ``*``, ``?``, ``[]`` matched with :func:`fnmatch.fnmatch` on path and basename
+        """
         G = self.graph.get_graph(repo_id)
         results = []
+        pat = pattern.strip() if pattern else None
+        glob_chars = frozenset("*?[]")
+        is_glob = bool(pat and any(c in glob_chars for c in pat))
+
+        def path_matches(path: str, basename: str) -> bool:
+            if not pat:
+                return True
+            path_n = path.replace("\\", "/")
+            base_n = basename.replace("\\", "/")
+            if is_glob:
+                if fnmatch.fnmatch(path_n, pat) or fnmatch.fnmatch(base_n, pat):
+                    return True
+                # Common case: pattern is ``*.py`` — match any path ending
+                if pat.startswith("*") and path_n.endswith(pat[1:]):
+                    return True
+                return fnmatch.fnmatch(path_n, f"*/{pat}") or fnmatch.fnmatch(path_n, f"**/{pat}")
+            pl = pat.lower()
+            return pl in path_n.lower() or pl in base_n.lower()
+
         for n, data in G.nodes(data=True):
             if data.get("type") == "File":
                 path = data.get("path", "")
-                name = data.get("label", "")
-                if pattern and pattern not in path: continue
-                if file_type and not path.endswith(file_type): continue
+                name = data.get("label", "") or ""
+                base = name or os.path.basename(path.replace("\\", "/"))
+                if pat and not path_matches(path, base):
+                    continue
+                if file_type and not path.endswith(file_type):
+                    continue
                 results.append({
                     "file_path": path,
                     "name": name,
@@ -53,45 +101,59 @@ class GraphQueryService:
         """Get all classes defined in a file."""
         file_path = self._normalize_path(file_path)
         G = self.graph.get_graph(repo_id)
-        file_id = f"file:{repo_id}:{file_path}"
-        
+
         results = []
-        if file_id in G:
+        file_id = self._find_file_node(G, repo_id, file_path)
+        if file_id:
             for u, v, edata in G.edges([file_id], data=True):
-               if edata.get("type") == "DECLARES":
-                   target = v if u == file_id else u
-                   data = G.nodes[target]
-                   if data.get("type") == "Class":
-                       results.append({
-                           "name": data.get("name"),
-                           "start_line": data.get("start_line", 0),
-                           "end_line": data.get("end_line", 0)
-                       })
+                if edata.get("type") in ("DECLARES", "DECLARES_CLASS"):
+                    target = v if u == file_id else u
+                    data = G.nodes[target]
+                    if data.get("type") in ("Class", "Struct", "Interface"):
+                        results.append({
+                            "name":       data.get("name") or data.get("label"),
+                            "start_line": data.get("start_line", 0),
+                            "end_line":   data.get("end_line", 0),
+                        })
+
+        # Fallback: scan by source_file (Graphify slug IDs)
+        if not results:
+            fp_lo = file_path.replace("\\", "/").lower()
+            for n, data in G.nodes(data=True):
+                if data.get("type") not in ("Class", "Struct", "Interface"):
+                    continue
+                sfp = self._node_file_path(data) or ""
+                if sfp.replace("\\", "/").lower().endswith(fp_lo):
+                    results.append({
+                        "name":       data.get("name") or data.get("label"),
+                        "start_line": data.get("start_line", 0),
+                        "end_line":   data.get("end_line", 0),
+                    })
         return results
 
     def get_functions_in_class(self, repo_id: str, class_name: str) -> list[dict]:
         G = self.graph.get_graph(repo_id)
         results = []
-        
+
         class_node = None
         for n, data in G.nodes(data=True):
             if data.get("type") == "Class" and data.get("name") == class_name:
                 class_node = n
                 break
-                
+
         if not class_node:
             return results
-            
+
         for u, v, edata in G.edges([class_node], data=True):
             if edata.get("type") == "HAS_METHOD":
                 target = v if u == class_node else u
                 data = G.nodes[target]
                 if data.get("type") == "Function":
                     results.append({
-                        "name": data.get("name"),
-                        "file_path": data.get("file_path"),
+                        "name":       data.get("name"),
+                        "file_path":  self._node_file_path(data),
                         "start_line": data.get("start_line", 0),
-                        "end_line": data.get("end_line", 0)
+                        "end_line":   data.get("end_line", 0),
                     })
         return results
 
@@ -106,62 +168,118 @@ class GraphQueryService:
         want_func = symbol_type is None or symbol_type.lower() in ("function", "method")
 
         for n, data in G.nodes(data=True):
-            if not data.get("name"): continue
-            
+            node_name = data.get("name") or data.get("label") or ""
+            if not node_name:
+                continue
             node_type = data.get("type")
-            if want_class and node_type == "Class" and name_lower in data.get("name", "").lower():
+            if want_class and node_type in ("Class", "Struct", "Interface") and name_lower in node_name.lower():
                 results.append({
-                    "name": data.get("name"), "file_path": data.get("file_path"),
-                    "start_line": data.get("start_line", 0), "end_line": data.get("end_line", 0),
-                    "type": "Class"
+                    "name":       node_name,
+                    "file_path":  self._node_file_path(data),
+                    "start_line": data.get("start_line", 0),
+                    "end_line":   data.get("end_line", 0),
+                    "type":       node_type or "Class",
                 })
-            elif want_func and node_type == "Function" and name_lower in data.get("name", "").lower():
+            elif want_func and node_type in ("Function", "Method") and name_lower in node_name.lower():
                 ctype = "Method" if data.get("parent_class") else "Function"
                 results.append({
-                    "name": data.get("name"), "file_path": data.get("file_path"),
-                    "start_line": data.get("start_line", 0), "end_line": data.get("end_line", 0),
-                    "type": ctype
+                    "name":       node_name,
+                    "file_path":  self._node_file_path(data),
+                    "start_line": data.get("start_line", 0),
+                    "end_line":   data.get("end_line", 0),
+                    "type":       ctype,
                 })
         return results
+
+    def _find_file_node(self, G: nx.Graph, repo_id: str, file_path: str) -> str | None:
+        """
+        Find the graph node ID for a file — handles both ID schemes:
+        - Legacy GraphBuilder: ``file:{repo_id}:{relative_path}``
+        - Graphify slugs: match against ``source_file`` / ``path`` attributes.
+        """
+        norm = self._normalize_path(file_path).replace("\\", "/").lower()
+        legacy_id = f"file:{repo_id}:{self._normalize_path(file_path)}"
+        if legacy_id in G:
+            return legacy_id
+        for n, data in G.nodes(data=True):
+            if data.get("type") != "File":
+                continue
+            fp = self._node_file_path(data) or ""
+            if fp.replace("\\", "/").lower().endswith(norm):
+                return n
+        return None
 
     def get_file_context(self, repo_id: str, file_path: str) -> dict[str, Any]:
         file_path = self._normalize_path(file_path)
         G = self.graph.get_graph(repo_id)
-        file_id = f"file:{repo_id}:{file_path}"
-        
-        classes = []
-        functions = []
-        methods = []
-        imports = []
-        
-        if file_id in G:
+
+        classes: list[dict] = []
+        functions: list[dict] = []
+        methods: list[dict]  = []
+        imports: list[str]   = []
+
+        file_id = self._find_file_node(G, repo_id, file_path)
+        if file_id:
             for u, v, edata in G.edges([file_id], data=True):
                 target = v if u == file_id else u
                 target_data = G.nodes[target]
                 etype = edata.get("type")
-                
-                if etype == "DECLARES" and target_data.get("type") == "Class":
-                    classes.append({"name": target_data.get("name"), "start_line": target_data.get("start_line", 0), "end_line": target_data.get("end_line", 0)})
+
+                if etype in ("DECLARES", "DECLARES_CLASS") and target_data.get("type") in ("Class", "Struct", "Interface"):
+                    classes.append({
+                        "name":       target_data.get("name") or target_data.get("label"),
+                        "start_line": target_data.get("start_line", 0),
+                        "end_line":   target_data.get("end_line", 0),
+                    })
                     for cu, cv, cedata in G.edges([target], data=True):
-                        if cedata.get("type") == "HAS_METHOD":
+                        if cedata.get("type") in ("HAS_METHOD", "DECLARES_FUNC"):
                             mtarget = cv if cu == target else cu
                             m_data = G.nodes[mtarget]
-                            methods.append({"class": target_data.get("name"), "name": m_data.get("name"), 
-                                          "start_line": m_data.get("start_line", 0), "end_line": m_data.get("end_line", 0)})
-                                          
-                elif etype == "DECLARES_FUNC" and target_data.get("type") == "Function":
-                    functions.append({"name": target_data.get("name"), "start_line": target_data.get("start_line", 0), "end_line": target_data.get("end_line", 0)})
-                
-                elif etype == "IMPORTS":
-                     if target_data.get("type") == "File":
-                         imports.append(target_data.get("path"))
+                            methods.append({
+                                "class":      target_data.get("name") or target_data.get("label"),
+                                "name":       m_data.get("name") or m_data.get("label"),
+                                "start_line": m_data.get("start_line", 0),
+                                "end_line":   m_data.get("end_line", 0),
+                            })
+
+                elif etype in ("DECLARES_FUNC", "DECLARES") and target_data.get("type") in ("Function", "Method"):
+                    functions.append({
+                        "name":       target_data.get("name") or target_data.get("label"),
+                        "start_line": target_data.get("start_line", 0),
+                        "end_line":   target_data.get("end_line", 0),
+                    })
+
+                elif etype == "IMPORTS" and target_data.get("type") == "File":
+                    imp = self._node_file_path(target_data)
+                    if imp:
+                        imports.append(imp)
+
+        # Graphify also has DECLARES edges from func nodes directly on file nodes
+        if file_id and not classes and not functions:
+            for n, data in G.nodes(data=True):
+                fp = self._node_file_path(data) or ""
+                if not fp.replace("\\", "/").lower().endswith(file_path.replace("\\", "/").lower()):
+                    continue
+                ntype = data.get("type")
+                if ntype in ("Class", "Struct", "Interface"):
+                    classes.append({
+                        "name":       data.get("name") or data.get("label"),
+                        "start_line": data.get("start_line", 0),
+                        "end_line":   data.get("end_line", 0),
+                    })
+                elif ntype in ("Function", "Method"):
+                    functions.append({
+                        "name":       data.get("name") or data.get("label"),
+                        "start_line": data.get("start_line", 0),
+                        "end_line":   data.get("end_line", 0),
+                    })
 
         return {
             "file_path": file_path,
-            "classes": classes,
+            "classes":   classes,
             "functions": functions,
-            "methods": methods,
-            "imports": imports,
+            "methods":   methods,
+            "imports":   imports,
         }
 
     def filter_by_structure(self, repo_id: str, filters: dict[str, Any]) -> list[str]:
@@ -191,51 +309,66 @@ class GraphQueryService:
     def get_callers(self, repo_id: str, func_name: str) -> list[dict]:
         G = self.graph.get_graph(repo_id)
         results = []
+        func_lo = func_name.lower()
         for u, v, edata in G.edges(data=True):
             if edata.get("type") == "CALLS":
-                caller = G.nodes[u]
                 callee = G.nodes[v]
-                if callee.get("name") == func_name:
-                    results.append({"name": caller.get("name"), "file_path": caller.get("file_path"), "line": edata.get("line", 0)})
+                if func_lo in (callee.get("name") or callee.get("label") or "").lower():
+                    caller = G.nodes[u]
+                    results.append({
+                        "name":      caller.get("name") or caller.get("label"),
+                        "file_path": self._node_file_path(caller),
+                        "line":      edata.get("line", 0),
+                    })
         return results
 
     def get_callees(self, repo_id: str, func_name: str) -> list[dict]:
         G = self.graph.get_graph(repo_id)
         results = []
+        func_lo = func_name.lower()
         for u, v, edata in G.edges(data=True):
             if edata.get("type") == "CALLS":
                 caller = G.nodes[u]
-                callee = G.nodes[v]
-                if caller.get("name") == func_name:
-                    results.append({"name": callee.get("name"), "file_path": callee.get("file_path"), "line": edata.get("line", 0)})
+                if func_lo in (caller.get("name") or caller.get("label") or "").lower():
+                    callee = G.nodes[v]
+                    results.append({
+                        "name":      callee.get("name") or callee.get("label"),
+                        "file_path": self._node_file_path(callee),
+                        "line":      edata.get("line", 0),
+                    })
         return results
 
     def get_dependency_chain(self, repo_id: str, file_path: str) -> list[dict]:
         file_path = self._normalize_path(file_path)
         G = self.graph.get_graph(repo_id)
-        file_id = f"file:{repo_id}:{file_path}"
         results = []
-        
-        if file_id in G:
+
+        file_id = self._find_file_node(G, repo_id, file_path)
+        if file_id:
             for u, v, edata in G.edges([file_id], data=True):
                 target = v if u == file_id else u
-                if edata.get("type") == "IMPORTS":
-                     if G.nodes[target].get("type") == "File":
-                         results.append({"file_path": G.nodes[target].get("path"), "module_name": edata.get("module_name", "")})
+                if edata.get("type") == "IMPORTS" and G.nodes[target].get("type") == "File":
+                    results.append({
+                        "file_path":   self._node_file_path(G.nodes[target]),
+                        "module_name": edata.get("module_name", ""),
+                    })
         return results
 
     def get_file_dependents(self, repo_id: str, file_path: str) -> list[dict]:
         file_path = self._normalize_path(file_path)
         G = self.graph.get_graph(repo_id)
-        file_id = f"file:{repo_id}:{file_path}"
         results = []
-        
+
+        file_id = self._find_file_node(G, repo_id, file_path)
+        if not file_id:
+            return results
+
         for u, v, edata in G.edges(data=True):
-            if edata.get("type") == "IMPORTS":
-                if v == file_id:
-                    results.append({"file_path": G.nodes[u].get("path"), "module_name": edata.get("module_name", "")})
-                elif u == file_id and not G.is_directed():
-                    pass 
+            if edata.get("type") == "IMPORTS" and v == file_id:
+                results.append({
+                    "file_path":   self._node_file_path(G.nodes[u]),
+                    "module_name": edata.get("module_name", ""),
+                })
         return results
 
     def get_dependents(self, repo_id: str, file_path: str) -> list[dict]:
@@ -272,13 +405,13 @@ class GraphQueryService:
         for caller_id, depth in callers:
             caller_data = G.nodes[caller_id]
             results.append({
-                "name": caller_data.get("name"),
-                "file_path": caller_data.get("file_path"),
-                "depth": depth,
-                "relation": "calls" if depth == 1 else "transitive_call"
+                "name":      caller_data.get("name") or caller_data.get("label"),
+                "file_path": self._node_file_path(caller_data),
+                "depth":     depth,
+                "relation":  "calls" if depth == 1 else "transitive_call",
             })
-            
-        file_path = G.nodes[target_id].get("file_path")
+
+        file_path = self._node_file_path(G.nodes[target_id])
         if file_path:
              deps = self.get_file_dependents(repo_id, file_path)
              for dep in deps:
@@ -320,15 +453,18 @@ class GraphQueryService:
                 return found
                 
             for parent_id in get_parents(target_id, 5):
-                parents.append({"name": G.nodes[parent_id].get("name"), "file_path": G.nodes[parent_id].get("file_path")})
-                
+                pdata = G.nodes[parent_id]
+                parents.append({"name": pdata.get("name"), "file_path": self._node_file_path(pdata)})
+
             for u, v, data in G.edges(data=True):
                 if data.get("type") == "INHERITS_FROM" and v == target_id:
-                    children.append({"name": G.nodes[u].get("name"), "file_path": G.nodes[u].get("file_path")})
-                    
+                    udata = G.nodes[u]
+                    children.append({"name": udata.get("name"), "file_path": self._node_file_path(udata)})
+
             for u, v, data in G.edges(data=True):
                 if data.get("type") == "IMPLEMENTS" and v == target_id:
-                    implementations.append({"name": G.nodes[u].get("name"), "file_path": G.nodes[u].get("file_path")})
+                    udata = G.nodes[u]
+                    implementations.append({"name": udata.get("name"), "file_path": self._node_file_path(udata)})
                     
         return {
             "class_name": class_name,
@@ -349,10 +485,10 @@ class GraphQueryService:
                         handler = G.nodes[target].get("name", "")
                 
                 results.append({
-                    "method": data.get("method"),
-                    "route": data.get("route"),
-                    "file_path": data.get("file_path"),
-                    "handler": handler
+                    "method":    data.get("method"),
+                    "route":     data.get("route"),
+                    "file_path": self._node_file_path(data),
+                    "handler":   handler,
                 })
         return results
 
@@ -363,3 +499,218 @@ class GraphQueryService:
             start_file = self._normalize_path(start_file)
             results.sort(key=lambda x: x["file_path"] != start_file)
         return results
+    def get_reachable_files(self, repo_id: str, anchor_file: str, hops: int = 2) -> set[str]:
+        """
+        Get files reachable within N hops from an anchor file in the graph.
+        Follows IMPORTS and CALLS edges in both directions.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G or len(G.nodes) == 0:
+            return set()
+
+        anchor_norm = self._normalize_path(anchor_file).replace("\\", "/").lower()
+
+        # Locate the anchor node — works with both Graphify slug IDs and
+        # legacy ``file:repo:path`` IDs by matching against source_file/path.
+        anchor_id: str | None = None
+        legacy_id = f"file:{repo_id}:{self._normalize_path(anchor_file)}"
+        if legacy_id in G:
+            anchor_id = legacy_id
+        else:
+            for n, data in G.nodes(data=True):
+                fp = self._node_file_path(data) or ""
+                if fp.replace("\\", "/").lower().endswith(anchor_norm):
+                    anchor_id = n
+                    break
+
+        if anchor_id is None:
+            return set()
+
+        reachable = {anchor_id}
+        frontier  = {anchor_id}
+
+        for _ in range(hops):
+            next_frontier: set[str] = set()
+            for node in frontier:
+                for neighbor in list(G.predecessors(node)) + list(G.successors(node)):
+                    if neighbor not in reachable:
+                        next_frontier.add(neighbor)
+            if not next_frontier:
+                break
+            reachable |= next_frontier
+            frontier = next_frontier
+
+        reachable_files: set[str] = set()
+        for node in reachable:
+            fp = self._node_file_path(G.nodes.get(node, {}))
+            if fp:
+                reachable_files.add(fp)
+        return reachable_files
+
+    def get_callers_for_node(self, repo_id: str, node_id: str) -> list[dict]:
+        """Efficiently get callers for a specific node ID."""
+        G = self.graph.get_graph(repo_id)
+        results = []
+        if node_id in G:
+            for u, v, edata in G.in_edges(node_id, data=True):
+                if edata.get("type") == "CALLS":
+                    caller = G.nodes[u]
+                    results.append({
+                        "name":      caller.get("name"),
+                        "file_path": self._node_file_path(caller),
+                        "line":      edata.get("line", 0),
+                    })
+        return results
+
+    def get_callees_for_node(self, repo_id: str, node_id: str) -> list[dict]:
+        """Efficiently get callees for a specific node ID."""
+        G = self.graph.get_graph(repo_id)
+        results = []
+        if node_id in G:
+            for u, v, edata in G.out_edges(node_id, data=True):
+                if edata.get("type") == "CALLS":
+                    callee = G.nodes[v]
+                    results.append({
+                        "name":      callee.get("name"),
+                        "file_path": self._node_file_path(callee),
+                        "line":      edata.get("line", 0),
+                    })
+        return results
+
+    # ── entry-point heuristics ────────────────────────────────────────────────
+
+    _ENTRY_POINT_FUNC_NAMES = frozenset({
+        "main", "run", "execute", "start", "serve", "app", "init",
+        "handle", "handler", "dispatch", "entrypoint", "entry",
+    })
+    _ENTRY_POINT_PATH_SIGNALS = (
+        "/main.go", "/main.py", "/main.ts", "/main.js",
+        "/app.py", "/app.ts", "/app.js",
+        "/server.py", "/server.ts", "/server.js",
+        "/cmd/", "/commands/", "/entrypoint",
+        "/__main__", "/manage.py", "/wsgi.py", "/asgi.py",
+        "index.js", "index.ts",
+    )
+    _ENTRY_POINT_TYPES = frozenset({"API", "Endpoint", "Route", "Command", "Handler"})
+
+    def _is_entry_point(self, data: dict) -> bool:
+        """Heuristically decide whether a graph node is an entry point."""
+        ntype  = (data.get("type") or "").lower()
+        name   = (data.get("name") or data.get("label") or "").lower()
+        fp     = (self._node_file_path(data) or "").replace("\\", "/").lower()
+
+        if data.get("type") in self._ENTRY_POINT_TYPES:
+            return True
+        if any(sig in fp for sig in self._ENTRY_POINT_PATH_SIGNALS):
+            return True
+        if name in self._ENTRY_POINT_FUNC_NAMES:
+            return True
+        # HTTP handler patterns: Handle*, Route*, Register*, ServeHTTP
+        if re.match(r"^(handle|route|register|serve|controller)", name):
+            return True
+        # CLI command patterns: RunE, Execute, AddCommand (cobra / click)
+        if name in ("rune", "execute", "addcommand", "runcommand"):
+            return True
+        # Route annotations / decorators in the label
+        if "controller" in fp or "handler" in fp or "router" in fp:
+            return True
+        return False
+
+    def get_architecture_map(self, repo_id: str, limit: int = 15) -> dict:
+        """
+        Get a high-level 'GPS' of the repository architecture.
+        Identifies high-degree nodes (most connected) and potential entry points.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G or len(G.nodes) == 0:
+            return {
+                "top_nodes": [], "entry_points": [],
+                "total_nodes": 0, "total_edges": 0,
+                "message": f"Graph for {repo_id} not found or empty.",
+            }
+
+        degrees = dict(G.degree())
+
+        top_nodes = sorted(degrees.items(), key=lambda x: x[1], reverse=True)[:limit]
+        node_summaries = []
+        for n_id, deg in top_nodes:
+            data = G.nodes[n_id]
+            node_summaries.append({
+                "id":          n_id,
+                "name":        data.get("name") or data.get("label") or n_id,
+                "type":        data.get("type"),
+                "file_path":   self._node_file_path(data),
+                "connections": deg,
+            })
+
+        # Entry-point detection using broad heuristics
+        entry_points: list[dict] = []
+        seen_fps: set[str] = set()
+        for n, data in G.nodes(data=True):
+            if not self._is_entry_point(data):
+                continue
+            fp = self._node_file_path(data) or ""
+            if fp and fp in seen_fps:
+                continue
+            if fp:
+                seen_fps.add(fp)
+            entry_points.append({
+                "name":      data.get("name") or data.get("label"),
+                "type":      data.get("type"),
+                "route":     data.get("route", ""),
+                "file_path": fp or None,
+            })
+
+        return {
+            "repo_id":      repo_id,
+            "top_nodes":    node_summaries,
+            "entry_points": entry_points[:15],
+            "total_nodes":  len(G.nodes),
+            "total_edges":  len(G.edges),
+        }
+
+    def _find_nodes_by_symbol(self, G: nx.Graph, symbol: str) -> list[str]:
+        """
+        Find node IDs whose name, label, file_path, source_file, or graph ID
+        contains *symbol* (case-insensitive).  Handles both Graphify slug IDs
+        and the legacy ``file:repo:path`` ID scheme.
+        """
+        sym_lo = symbol.lower()
+        matches: list[str] = []
+        for n, data in G.nodes(data=True):
+            name     = str(data.get("name")        or "").lower()
+            label    = str(data.get("label")       or "").lower()
+            fp       = str(self._node_file_path(data) or "").lower()
+            node_str = str(n).lower()
+            if (sym_lo in name or sym_lo in label
+                    or sym_lo in fp or sym_lo in node_str):
+                matches.append(n)
+        return matches
+
+    def trace_connectivity_path(self, repo_id: str, start_symbol: str, end_symbol: str) -> list[dict]:
+        """
+        Find the shortest path between two symbols/files to show data/call flows.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G:
+            return []
+
+        start_nodes = self._find_nodes_by_symbol(G, start_symbol)
+        end_nodes   = self._find_nodes_by_symbol(G, end_symbol)
+
+        if not start_nodes or not end_nodes:
+            return []
+
+        try:
+            path = nx.shortest_path(G, source=start_nodes[0], target=end_nodes[0])
+            return [
+                {
+                    "id":        node_id,
+                    "name":      G.nodes[node_id].get("name") or G.nodes[node_id].get("label"),
+                    "type":      G.nodes[node_id].get("type"),
+                    "file_path": self._node_file_path(G.nodes[node_id]),
+                }
+                for node_id in path
+            ]
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return []

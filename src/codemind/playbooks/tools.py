@@ -1,26 +1,53 @@
 """
-Playbook execution tools - Universal code retrieval.
-
-In the new prompt-based architecture, there's only ONE tool: search_codebase.
-Playbooks define HOW to process the retrieved code via their system prompts.
+Playbook execution tools - Universal code retrieval and structural discovery.
 """
 
+import fnmatch
+import os
+import re
+import stat
 from datetime import UTC, datetime
+from pathlib import Path
 import traceback
+
 from codemind.storage.database import CatalogStore
 from codemind.storage.models import RepositoryManifest
+
+# Max chars returned for repo file reads (protect LLM context)
+_DEFAULT_REPO_READ_MAX_CHARS = int(os.getenv("CODEMIND_REPO_READ_MAX_CHARS", "200000"))
+
+# Text search (grep_search): skip noisy dirs; max bytes per file to scan
+_SEARCH_SKIP_DIRS = frozenset({
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    "target",
+    ".gradle",
+    "Pods",
+    ".next",
+    "coverage",
+})
+_SEARCH_MAX_FILE_BYTES = int(os.getenv("CODEMIND_SEARCH_MAX_FILE_BYTES", str(2 * 1024 * 1024)))
 
 
 class PlaybookTools:
     """
     Universal code retrieval tool for playbooks.
     
-    All playbooks use search_codebase to fetch code, then the LLM processes it
-    according to the playbook's system prompt.
+    Playbooks use these tools to discover architectural patterns, trace paths,
+    and fetch code content for analysis.
     
     READ-ONLY operations on:
-    - LanceDB (semantic search)
-    - Kùzu (graph filters)
+    - Repository checkout on disk (primary for read_file / list_repo_directory)
+    - Graphify graph (structure, file discovery)
+    - LanceDB (semantic search and catalog vectors when enabled)
     - SQLite (catalog full content)
     """
     
@@ -38,6 +65,181 @@ class PlaybookTools:
         self.graph = graph_service
         self.embedder = embedder
         self.db = db
+
+    def _get_repo_root_sync(self, repo_id: str) -> Path | None:
+        """Resolve filesystem root for a repo_id via RepositoryManifest."""
+        if not self.db or not repo_id:
+            return None
+        session = getattr(self.db, "get_session", lambda: None)()
+        if not session:
+            return None
+        try:
+            manifest = session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
+            if manifest and manifest.repo_path:
+                return Path(manifest.repo_path).resolve()
+        finally:
+            if hasattr(session, "close"):
+                session.close()
+        return None
+
+    def _repo_graphify_out_dir(self, repo_id: str) -> Path:
+        """Resolve canonical graphify-out directory for an indexed repo_id."""
+        base_default = os.getenv("CODEMIND_BASE_PATH", "./tmp/")
+        repos_base = Path(os.getenv("CODEMIND_REPOS_PATH", os.path.join(base_default, "repos")))
+        return repos_base / repo_id / "graphify-out"
+
+    def _repo_graph_path(self, repo_id: str) -> Path:
+        """Resolve canonical graph.json path for an indexed repo_id."""
+        return self._repo_graphify_out_dir(repo_id) / "graph.json"
+
+    @staticmethod
+    def _is_under_root(candidate: Path, root: Path) -> bool:
+        try:
+            candidate.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def _safe_file_under_repo(self, repo_root: Path, relative: str) -> Path | None:
+        """Join relative path to repo root; return path only if it exists as a file and stays under root."""
+        rel = (relative or "").replace("\\", "/").lstrip("/")
+        if not rel:
+            return None
+        candidate = (repo_root / rel).resolve()
+        if not PlaybookTools._is_under_root(candidate, repo_root):
+            return None
+        return candidate if candidate.is_file() else None
+
+    def _safe_dir_under_repo(self, repo_root: Path, relative: str) -> Path | None:
+        """Resolve a directory under repo root (must stay inside root)."""
+        rel = (relative or ".").replace("\\", "/").strip()
+        if rel in (".", ""):
+            candidate = repo_root.resolve()
+        else:
+            candidate = (repo_root / rel.lstrip("/")).resolve()
+        if not PlaybookTools._is_under_root(candidate, repo_root):
+            return None
+        return candidate if candidate.is_dir() else None
+
+    @staticmethod
+    def _read_text_file_slice(
+        path: Path,
+        start_line: int | None,
+        end_line: int | None,
+        max_chars: int,
+    ) -> str:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if start_line is not None or end_line is not None:
+            s = max(0, (start_line - 1) if start_line else 0)
+            e = end_line if end_line is not None else len(lines)
+            lines = lines[s:e]
+        text = "".join(lines)
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n...[Truncated]"
+        return text
+
+    @staticmethod
+    def _search_includes_match(rel_posix: str, basename: str, includes: list[str]) -> bool:
+        """Glob filter (e.g. *.py); empty *includes* means all scannable files."""
+        if not includes:
+            return True
+        for pat in includes:
+            p = (pat or "").strip()
+            if not p:
+                continue
+            if fnmatch.fnmatch(rel_posix, p) or fnmatch.fnmatch(basename, p):
+                return True
+            if "/" not in p and fnmatch.fnmatch(rel_posix, f"**/{p}"):
+                return True
+        return False
+
+    @staticmethod
+    def _python_repo_text_search(
+        repo_root: Path,
+        regex: re.Pattern[str],
+        includes: list[str],
+        max_match_lines: int,
+    ) -> tuple[str, int, bool]:
+        """Pure-Python recursive search; output lines ``relpath:lineno:text`` (no subprocess)."""
+        root = repo_root.resolve()
+        matches: list[str] = []
+        truncated = False
+        max_bytes = _SEARCH_MAX_FILE_BYTES
+
+        for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in _SEARCH_SKIP_DIRS]
+            for fname in filenames:
+                if len(matches) >= max_match_lines:
+                    truncated = True
+                    break
+                fpath = Path(dirpath) / fname
+                try:
+                    st = fpath.stat()
+                except OSError:
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                if st.st_size > max_bytes:
+                    continue
+                try:
+                    rel = fpath.resolve().relative_to(root)
+                except ValueError:
+                    continue
+                rel_s = rel.as_posix()
+                base = rel.name
+                if not PlaybookTools._search_includes_match(rel_s, base, includes):
+                    continue
+                try:
+                    with open(fpath, "r", encoding="utf-8", errors="replace") as fh:
+                        for line_no, line in enumerate(fh, start=1):
+                            if regex.search(line):
+                                matches.append(f"{rel_s}:{line_no}:{line.rstrip('\r\n')}")
+                                if len(matches) >= max_match_lines:
+                                    truncated = True
+                                    break
+                except OSError:
+                    continue
+                if truncated:
+                    break
+            if truncated:
+                break
+
+        count = len(matches)
+        if count == 0:
+            return "", 0, False
+        out = "\n".join(matches)
+        if truncated:
+            out += (
+                f"\n\n...[Output truncated at {max_match_lines} matches; "
+                "narrow includes or query.]"
+            )
+        return out, count, truncated
+
+    def _pick_graph_file_match(self, file_path: str, graph_hits: list[dict]) -> str | None:
+        """Choose the best graph file_path string for a user-provided path hint."""
+        if not graph_hits:
+            return None
+        fp_norm = file_path.replace("\\", "/")
+        # Exact match
+        for f in graph_hits:
+            p = (f.get("file_path") or "").replace("\\", "/")
+            if p == fp_norm:
+                return f.get("file_path")
+        # Suffix match (user passed partial path)
+        for f in graph_hits:
+            p = (f.get("file_path") or "").replace("\\", "/")
+            if p.endswith(fp_norm) or fp_norm.endswith(p):
+                return f.get("file_path")
+        # Basename match preference
+        import os as _os
+
+        base = _os.path.basename(fp_norm)
+        for f in graph_hits:
+            p = (f.get("file_path") or "").replace("\\", "/")
+            if p.endswith("/" + base) or _os.path.basename(p) == base:
+                return f.get("file_path")
+        return graph_hits[0].get("file_path")
 
     async def _get_default_latest_repos(self) -> list[str]:
         """Fetch the most recently indexed repo_id for each repository."""
@@ -70,9 +272,10 @@ class PlaybookTools:
     
     async def search_codebase(self, params: dict) -> dict:
         """
-        Universal code retrieval: semantic search + graph filters.
+        Semantic/Vector search across the codebase.
         
-        This is the ONLY tool. All playbooks use this to fetch code.
+        NOTE: This tool is disabled in Graph-First (Zero-Vector) environments.
+        Use get_map and search_code instead for discovery.
         
         Args:
             params: {
@@ -92,6 +295,19 @@ class PlaybookTools:
             }
         """
         try:
+            import os
+            if os.getenv("EMBEDDING_PROVIDER") == "none":
+                return {
+                    "success": True,
+                    "results": [],
+                    "count": 0,
+                    "message": (
+                        "NOTE: Semantic/Vector search is disabled in this environment. "
+                        "You MUST use Graph-First tools (get_map, trace_path) for discovery "
+                        "and surgical search (search_code) for text matching. Do NOT stop the audit."
+                    )
+                }
+            
             repo_id = params.get("repo_id")
             if not repo_id:
                 repo_id = await self._get_default_latest_repos()
@@ -224,7 +440,11 @@ class PlaybookTools:
 
     async def read_file(self, params: dict) -> dict:
         """Read a specific file's content (or a line range).
-        
+
+        Prefers the **repository checkout on disk** (``RepositoryManifest.repo_path``),
+        using the Graphify graph to resolve ambiguous paths. Falls back to LanceDB
+        chunks only when embeddings are enabled and the file is not on disk.
+
         Args:
             params: {
                 repo_id: str,
@@ -237,37 +457,92 @@ class PlaybookTools:
             file_path = params["file_path"]
             start_line = params.get("start_line")
             end_line = params.get("end_line")
-
-            # Find file using graph to get full path
             repo_id = params["repo_id"]
-            files = self.graph.find_files_by_pattern(repo_id, pattern=file_path)
-            if not files:
-                return {"error": f"File not found: {file_path}", "content": ""}
+            max_chars = int(params.get("max_chars") or _DEFAULT_REPO_READ_MAX_CHARS)
 
-            # Read from LanceDB chunks
-            query_emb = self.embedder.encode_query(f"file content {file_path}")
-            results = self.lance.search(query_emb, repo_id=repo_id, limit=50)
+            repo_root = self._get_repo_root_sync(repo_id)
+            resolved_rel: str | None = None
+            disk_path: Path | None = None
 
-            # Filter to this file
-            file_chunks = [r for r in results if file_path in r.get("file_path", "")]
-            file_chunks.sort(key=lambda r: r.get("start_line", 0))
+            if repo_root:
+                graph_hits = self.graph.find_files_by_pattern(repo_id, pattern=file_path)
+                if not graph_hits:
+                    import os as _os
 
-            # Apply line range
-            if start_line and end_line:
-                file_chunks = [
-                    r for r in file_chunks
-                    if r.get("start_line", 0) <= end_line and r.get("end_line", 0) >= start_line
-                ]
+                    base = _os.path.basename(file_path.replace("\\", "/"))
+                    if base:
+                        graph_hits = self.graph.find_files_by_pattern(repo_id, pattern=base)
 
-            content = "\n".join(r.get("chunk_text", "") for r in file_chunks)
+                if graph_hits:
+                    resolved_rel = self._pick_graph_file_match(file_path, graph_hits)
+                    if resolved_rel:
+                        disk_path = self._safe_file_under_repo(repo_root, resolved_rel)
+
+                if not disk_path:
+                    disk_path = self._safe_file_under_repo(
+                        repo_root, file_path.replace("\\", "/").lstrip("/")
+                    )
+
+                if disk_path and disk_path.is_file():
+                    content = self._read_text_file_slice(
+                        disk_path, start_line, end_line, max_chars=max_chars
+                    )
+                    return {
+                        "success": True,
+                        "file_path": resolved_rel or file_path,
+                        "absolute_path": str(disk_path),
+                        "content": content,
+                        "source": "filesystem",
+                        "chunks": 1,
+                    }
+
+            # Legacy: LanceDB chunk reassembly when index + embedder exist
+            if (
+                self.embedder
+                and self.lance
+                and os.getenv("EMBEDDING_PROVIDER") != "none"
+            ):
+                files = self.graph.find_files_by_pattern(repo_id, pattern=file_path)
+                if not files:
+                    return {
+                        "error": f"File not found on disk or in graph: {file_path}",
+                        "content": "",
+                        "success": False,
+                    }
+
+                query_emb = self.embedder.encode_query(f"file content {file_path}")
+                results = self.lance.search(query_emb, repo_id=repo_id, limit=50)
+
+                file_chunks = [r for r in results if file_path in r.get("file_path", "")]
+                file_chunks.sort(key=lambda r: r.get("start_line", 0))
+
+                if start_line and end_line:
+                    file_chunks = [
+                        r
+                        for r in file_chunks
+                        if r.get("start_line", 0) <= end_line
+                        and r.get("end_line", 0) >= start_line
+                    ]
+
+                content = "\n".join(r.get("chunk_text", "") for r in file_chunks)
+                return {
+                    "success": True,
+                    "file_path": file_path,
+                    "content": content,
+                    "source": "lancedb",
+                    "chunks": len(file_chunks),
+                }
+
             return {
-                "success": True,
-                "file_path": file_path,
-                "content": content,
-                "chunks": len(file_chunks),
+                "error": (
+                    f"File not found or repo checkout unavailable for repo_id={repo_id!r}: "
+                    f"{file_path}"
+                ),
+                "content": "",
+                "success": False,
             }
         except Exception as e:
-            return {"error": str(e), "content": ""}
+            return {"error": str(e), "content": "", "success": False}
 
     async def get_file_outline(self, params: dict) -> dict:
         """Get structural outline (AST) of a file showing classes, methods, and functions.
@@ -406,9 +681,121 @@ class PlaybookTools:
             file_type = params.get("file_type")
 
             files = self.graph.find_files_by_pattern(repo_id, pattern=pattern, file_type=file_type)
-            return {"success": True, "files": files, "count": len(files)}
+            cap = max(1, min(int(os.getenv("CODEMIND_LIST_FILES_CAP", "500")), 5000))
+            truncated = len(files) > cap
+            if truncated:
+                files = files[:cap]
+            out = {"success": True, "files": files, "count": len(files)}
+            if truncated:
+                out["truncated"] = True
+                out["note"] = f"Results capped at {cap} files; narrow pattern or file_type."
+            return out
         except Exception as e:
             return {"error": str(e), "files": [], "count": 0}
+
+    async def list_repo_directory(self, params: dict) -> dict:
+        """List files and subdirectories under a path in the repository checkout.
+
+        Uses ``RepositoryManifest.repo_path`` (same root as ``search_code`` / ``grep_search``). Paths are
+        relative to the repo root and constrained to stay inside it.
+
+        Args:
+            params: {
+                repo_id: str,
+                relative_path: str (optional, default "."),
+                recursive: bool (optional, default False),
+                max_depth: int (optional, default 4 when recursive),
+                max_entries: int (optional, cap listed items, default 300),
+                include_dotfiles: bool (optional, default False),
+            }
+        """
+        try:
+            repo_id = params["repo_id"]
+            relative_path = (params.get("relative_path") or ".").strip()
+            recursive = bool(params.get("recursive", False))
+            max_depth = max(1, min(int(params.get("max_depth", 4)), 12))
+            max_entries = max(1, min(int(params.get("max_entries", 300)), 2000))
+            include_dotfiles = bool(params.get("include_dotfiles", False))
+
+            repo_root = self._get_repo_root_sync(repo_id)
+            if not repo_root:
+                return {
+                    "error": f"Physical repository path not found for {repo_id}",
+                    "entries": [],
+                    "count": 0,
+                }
+
+            base = self._safe_dir_under_repo(repo_root, relative_path)
+            if not base:
+                return {
+                    "error": f"Directory not found or outside repo: {relative_path!r}",
+                    "entries": [],
+                    "count": 0,
+                }
+
+            entries: list[dict] = []
+
+            def rel_to_repo(p: Path) -> str:
+                return str(p.resolve().relative_to(repo_root.resolve())).replace("\\", "/")
+
+            if not recursive:
+                for item in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+                    if not include_dotfiles and item.name.startswith("."):
+                        continue
+                    entries.append(
+                        {
+                            "path": rel_to_repo(item),
+                            "type": "directory" if item.is_dir() else "file",
+                        }
+                    )
+                    if len(entries) >= max_entries:
+                        break
+                return {
+                    "success": True,
+                    "repo_id": repo_id,
+                    "base": rel_to_repo(base),
+                    "entries": entries,
+                    "count": len(entries),
+                    "truncated": len(entries) >= max_entries,
+                }
+
+            # Recursive walk with depth limit (breadth-friendly: sort each level)
+            stack: list[tuple[Path, int]] = [(base, 0)]
+            while stack and len(entries) < max_entries:
+                current, depth = stack.pop()
+                try:
+                    children = sorted(current.iterdir(), key=lambda p: p.name.lower())
+                except OSError:
+                    continue
+                # Process files first, then dirs (dirs pushed in reverse so shallow names pop first)
+                dirs: list[Path] = []
+                for item in children:
+                    if not include_dotfiles and item.name.startswith("."):
+                        continue
+                    if item.is_file():
+                        entries.append(
+                            {"path": rel_to_repo(item), "type": "file"}
+                        )
+                        if len(entries) >= max_entries:
+                            break
+                    elif item.is_dir():
+                        dirs.append(item)
+                if len(entries) >= max_entries:
+                    break
+                if depth + 1 < max_depth:
+                    for d in reversed(dirs):
+                        stack.append((d, depth + 1))
+
+            return {
+                "success": True,
+                "repo_id": repo_id,
+                "base": rel_to_repo(base),
+                "entries": entries,
+                "count": len(entries),
+                "truncated": len(entries) >= max_entries,
+            }
+        except Exception as e:
+            return {"error": str(e), "entries": [], "count": 0}
 
     async def list_file_system(self, params: dict) -> dict:
         """List files directly from the physical host file system bypassing the database.
@@ -502,34 +889,445 @@ class PlaybookTools:
         except Exception as e:
             return {"error": str(e)}
 
-    async def grep_search(self, params: dict) -> dict:
-        """Find literal string matches across the codebase using exact or regex matching.
+    async def search_code(self, params: dict) -> dict:
+        """Surgical text search (pure Python regex scan over UTF-8 files under the repo checkout).
+
+        Best used in Phase C after narrowing down to specific files/communities.
         
         Args:
             params: {
                 query: str,
+                queries: list[str] (optional),
                 repo_id: str (optional),
-                includes: list[str] (optional, e.g. ["*.py"])
+                includes: list[str] (optional, e.g. ["*.py", "auth/*"]),
+                limit: int (optional, default: 500)
+            }
+        """
+        return await self.grep_search(params)
+
+    async def get_map(self, params: dict) -> dict:
+        """Phase A: Architecture Mapping (The 'GPS').
+
+        Produces a **reading roadmap**: high-degree nodes and entry points are hints for
+        *what to read next* and *where to trace*, before opening files. Use this to
+        drive direction; pair with trace/caller tools to order investigation.
+        """
+        repo_id = params.get("repo_id")
+        if not repo_id:
+            latest = await self._get_default_latest_repos()
+            repo_id = latest[0] if latest else None
+            
+        if not repo_id:
+            return {"error": "No repository defined"}
+
+        limit = params.get("limit")
+        if limit is not None:
+            try:
+                limit = max(5, min(int(limit), 50))
+            except (TypeError, ValueError):
+                limit = 15
+        else:
+            limit = 15
+        return self.graph.get_architecture_map(repo_id, limit=limit)
+
+    async def trace_path(self, params: dict) -> dict:
+        """Phase B: Targeted Exploration (Trace Hierarchy).
+
+        Refines the map into a **concrete sequence** of symbols/files to read along the
+        path from `start` to `end`. Use the returned path to prioritize `read_file`
+        calls in order, not alphabetically or by guesswork.
+        """
+        repo_id = params.get("repo_id")
+        start = params.get("start")
+        end = params.get("end")
+        
+        if not all([repo_id, start, end]):
+            return {"error": "Missing parameters: repo_id, start, or end required."}
+            
+        path = self.graph.trace_connectivity_path(repo_id, start, end)
+        return {
+            "success": True,
+            "path": path,
+            "length": len(path)
+        }
+
+    async def graphify_query(self, params: dict) -> dict:
+        """Run a Graphify traversal query over ``graphify-out/graph.json``.
+
+        Supports BFS (broad context) and DFS (path-focused context), with token budget.
+        """
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            question = (params.get("question") or "").strip()
+            if not question:
+                return {"success": False, "error": "Missing required parameter: question"}
+
+            mode = (params.get("mode") or ("dfs" if params.get("dfs") else "bfs")).lower()
+            if mode not in {"bfs", "dfs"}:
+                mode = "bfs"
+
+            depth = max(1, min(int(params.get("depth", 2)), 6))
+            budget = max(200, min(int(params.get("budget", 2000)), 20000))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            from codemind.graphify.serve import _load_graph, _score_nodes, _bfs, _dfs, _subgraph_to_text
+
+            G = _load_graph(graph_path)
+            terms = [t.lower() for t in question.split() if len(t) > 2]
+            scored = _score_nodes(G, terms)
+            start_nodes = [nid for _, nid in scored[:5]]
+            if not start_nodes:
+                return {
+                    "success": True,
+                    "question": question,
+                    "mode": mode,
+                    "depth": depth,
+                    "budget": budget,
+                    "context": "No matching nodes found.",
+                    "start_nodes": [],
+                    "node_count": 0,
+                    "edge_count": 0,
+                }
+
+            nodes, edges = (_dfs if mode == "dfs" else _bfs)(G, start_nodes, depth)
+            context = _subgraph_to_text(G, nodes, edges, token_budget=budget)
+            start_labels = [G.nodes[n].get("label", n) for n in start_nodes]
+
+            return {
+                "success": True,
+                "question": question,
+                "mode": mode,
+                "depth": depth,
+                "budget": budget,
+                "start_nodes": start_labels,
+                "node_count": len(nodes),
+                "edge_count": len(edges),
+                "context": context,
+                "repo_id": repo_id,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_path(self, params: dict) -> dict:
+        """Find shortest path between two concepts in Graphify graph."""
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            source = (params.get("source") or "").strip()
+            target = (params.get("target") or "").strip()
+            if not source or not target:
+                return {"success": False, "error": "Missing required parameters: source, target"}
+
+            max_hops = max(1, min(int(params.get("max_hops", 8)), 20))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            import networkx as nx
+            from codemind.graphify.serve import _load_graph, _score_nodes
+
+            G = _load_graph(graph_path)
+            src_scored = _score_nodes(G, [t.lower() for t in source.split() if len(t) > 1])
+            tgt_scored = _score_nodes(G, [t.lower() for t in target.split() if len(t) > 1])
+            if not src_scored:
+                return {"success": False, "error": f"No node matching source '{source}' found"}
+            if not tgt_scored:
+                return {"success": False, "error": f"No node matching target '{target}' found"}
+
+            src_nid = src_scored[0][1]
+            tgt_nid = tgt_scored[0][1]
+
+            try:
+                path_nodes = nx.shortest_path(G, src_nid, tgt_nid)
+            except (nx.NetworkXNoPath, nx.NodeNotFound):
+                return {
+                    "success": False,
+                    "error": (
+                        f"No path found between '{G.nodes[src_nid].get('label', src_nid)}' "
+                        f"and '{G.nodes[tgt_nid].get('label', tgt_nid)}'"
+                    ),
+                }
+
+            hops = len(path_nodes) - 1
+            if hops > max_hops:
+                return {"success": False, "error": f"Path exceeds max_hops={max_hops} ({hops} hops found)"}
+
+            segments = []
+            for i in range(len(path_nodes) - 1):
+                u, v = path_nodes[i], path_nodes[i + 1]
+                edata = G.edges[u, v]
+                segments.append(
+                    {
+                        "from": G.nodes[u].get("label", u),
+                        "to": G.nodes[v].get("label", v),
+                        "relation": edata.get("relation", ""),
+                        "confidence": edata.get("confidence", ""),
+                    }
+                )
+
+            return {
+                "success": True,
+                "repo_id": repo_id,
+                "hops": hops,
+                "nodes": [G.nodes[n].get("label", n) for n in path_nodes],
+                "segments": segments,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_explain(self, params: dict) -> dict:
+        """Explain a graph concept by node details + neighbors."""
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            term = (params.get("term") or params.get("label") or "").strip()
+            if not term:
+                return {"success": False, "error": "Missing required parameter: term"}
+
+            include_neighbors = bool(params.get("include_neighbors", True))
+            max_neighbors = max(1, min(int(params.get("max_neighbors", 25)), 200))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            from codemind.graphify.serve import _load_graph, _find_node
+
+            G = _load_graph(graph_path)
+            matches = _find_node(G, term)
+            if not matches:
+                return {"success": False, "error": f"No node matching '{term}' found"}
+
+            node_id = matches[0]
+            data = G.nodes[node_id]
+            result = {
+                "success": True,
+                "repo_id": repo_id,
+                "node": {
+                    "id": node_id,
+                    "label": data.get("label", node_id),
+                    "source_file": data.get("source_file", ""),
+                    "source_location": data.get("source_location", ""),
+                    "community": data.get("community"),
+                    "degree": G.degree(node_id),
+                },
+                "alternatives": [G.nodes[n].get("label", n) for n in matches[1:6]],
+            }
+
+            if include_neighbors:
+                neighbors = []
+                for neighbor in G.neighbors(node_id):
+                    edge = G.edges[node_id, neighbor]
+                    neighbors.append(
+                        {
+                            "label": G.nodes[neighbor].get("label", neighbor),
+                            "relation": edge.get("relation", ""),
+                            "confidence": edge.get("confidence", ""),
+                        }
+                    )
+                    if len(neighbors) >= max_neighbors:
+                        break
+                result["neighbors"] = neighbors
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_add(self, params: dict) -> dict:
+        """Ingest URL content into corpus (Python-only, no shell execution)."""
+        try:
+            url = (params.get("url") or "").strip()
+            if not url:
+                return {"success": False, "error": "Missing required parameter: url"}
+
+            target_dir = Path(params.get("target_dir", "./raw"))
+            author = params.get("author")
+            contributor = params.get("contributor")
+            update_graph = bool(params.get("update_graph", False))
+            graph_root = params.get("graph_root", ".")
+            deep_mode = bool(params.get("deep_mode", False))
+
+            from codemind.graphify.ingest import ingest
+
+            out_path = ingest(url, target_dir, author=author, contributor=contributor)
+            result = {
+                "success": True,
+                "url": url,
+                "saved_path": str(out_path),
+                "updated_graph": False,
+            }
+
+            if update_graph:
+                # Graph generation is owned by indexing flow.
+                # Keep backward-compatible params but do not execute CLI commands here.
+                result["warning"] = (
+                    "update_graph is deprecated/no-op: graph generation runs during indexing only."
+                )
+                result["graph_root_ignored"] = graph_root
+                result["deep_mode_ignored"] = deep_mode
+
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_run(self, params: dict) -> dict:
+        """Post-index graph artifacts from existing graph for a repo_id.
+
+        Note: graph extraction/generation happens during indexing. This tool only
+        regenerates derived outputs (report/html/obsidian) from existing graph.json.
+        """
+        try:
+            import json
+            from networkx.readwrite import json_graph
+
+            from codemind.graphify.cluster import cluster, score_all
+            from codemind.graphify.analyze import god_nodes, surprising_connections, suggest_questions
+            from codemind.graphify.report import generate
+            from codemind.graphify.export import to_json, to_html, to_obsidian
+
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            no_viz = bool(params.get("no_viz", False))
+            obsidian = bool(params.get("obsidian", False))
+            obsidian_dir = params.get("obsidian_dir")
+            repo_root = self._get_repo_root_sync(repo_id)
+            out_dir = self._repo_graphify_out_dir(repo_id)
+            graph_path = self._repo_graph_path(repo_id)
+            report_path = out_dir / "GRAPH_REPORT.md"
+            html_path = out_dir / "graph.html"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            if not graph_path.exists():
+                return {
+                    "success": False,
+                    "error": (
+                        f"Graph not found for repo_id={repo_id}. "
+                        "Graph generation runs during indexing only."
+                    ),
+                }
+
+            raw = json.loads(graph_path.read_text(encoding="utf-8"))
+            try:
+                G = json_graph.node_link_graph(raw, edges="links")
+            except TypeError:
+                G = json_graph.node_link_graph(raw)
+            G.graph["hyperedges"] = raw.get("hyperedges", [])
+
+            detection = {
+                "files": {"code": [], "document": [], "paper": [], "image": []},
+                "total_files": G.number_of_nodes(),
+                "total_words": 0,
+                "warning": "Artifacts regenerated from indexed graph (no extraction run).",
+            }
+
+            communities = cluster(G)
+            cohesion = score_all(G, communities)
+            labels = {cid: f"Community {cid}" for cid in communities}
+            gods = god_nodes(G)
+            surprises = surprising_connections(G, communities)
+            questions = suggest_questions(G, communities, labels)
+            token_cost = {"input": 0, "output": 0}
+
+            report = generate(
+                G,
+                communities,
+                cohesion,
+                labels,
+                gods,
+                surprises,
+                detection,
+                token_cost,
+                str(repo_root or out_dir.parent),
+                suggested_questions=questions,
+            )
+            report_path.write_text(report, encoding="utf-8")
+            to_json(G, communities, str(graph_path))
+
+            html_generated = False
+            html_error = None
+            if not no_viz:
+                try:
+                    to_html(G, communities, str(html_path), community_labels=labels)
+                    html_generated = True
+                except Exception as e:
+                    html_error = str(e)
+
+            obsidian_generated = False
+            obsidian_output = None
+            if obsidian:
+                obsidian_output = str(Path(obsidian_dir).expanduser().resolve()) if obsidian_dir else str((out_dir / "obsidian").resolve())
+                to_obsidian(
+                    G,
+                    communities,
+                    obsidian_output,
+                    community_labels=labels,
+                    cohesion=cohesion,
+                )
+                obsidian_generated = True
+
+            result = {
+                "success": True,
+                "repo_id": repo_id,
+                "repo_path": str(repo_root) if repo_root else None,
+                "graph_path": str(graph_path),
+                "report_path": str(report_path),
+                "nodes": G.number_of_nodes(),
+                "edges": G.number_of_edges(),
+                "communities": len(communities),
+                "directed": G.is_directed(),
+                "html_generated": html_generated,
+                "obsidian_generated": obsidian_generated,
+                "obsidian_dir": obsidian_output,
+            }
+            if html_error:
+                result["html_error"] = html_error
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def grep_search(self, params: dict) -> dict:
+        """Find matches across the repo checkout using pure Python (``re`` over UTF-8 text files).
+
+        No ``grep`` or ``rg`` binaries required—suitable for headless/server deployments.
+        Patterns use Python regex syntax (see :mod:`re`), not GNU grep/Rust regex.
+
+        Args:
+            params: {
+                query: str,
+                repo_id: str (optional),
+                includes: list[str] (optional, e.g. ["*.py"]),
+                limit: int (optional, max match lines),
             }
         """
         try:
-            import subprocess
             from codemind.storage.models import RepositoryManifest
-            
+
             repo_id = params.get("repo_id")
             if not repo_id:
                 latest = await self._get_default_latest_repos()
                 if not latest:
                     return {"error": "No repository defined", "results": "", "count": 0}
                 repo_id = latest[0] if isinstance(latest, list) else latest
-                
-            query = params.get("query", "")
-            if not query:
-                return {"error": "No query provided for grep", "results": "", "count": 0}
-                
-            includes = params.get("includes", [])
-            
-            # Fetch physical repo path
+
+            query = params.get("query")
+            queries = params.get("queries")
+
+            if queries and isinstance(queries, list):
+                escaped_queries = [re.escape(str(q)) for q in queries if q]
+                if not escaped_queries:
+                    return {"error": "No valid queries provided", "results": "", "count": 0}
+                search_pattern = f"({'|'.join(escaped_queries)})"
+            elif query:
+                search_pattern = str(query)
+            else:
+                return {"error": "No query or queries provided for grep", "results": "", "count": 0}
+
+            includes = params.get("includes") or []
+            if includes and not isinstance(includes, list):
+                includes = [str(includes)]
+
             repo_path = None
             if self.db:
                 session = getattr(self.db, "get_session", lambda: None)()
@@ -537,48 +1335,31 @@ class PlaybookTools:
                     manifest = session.query(RepositoryManifest).filter_by(repo_id=repo_id).first()
                     if manifest and manifest.repo_path:
                         repo_path = manifest.repo_path
-                    if hasattr(session, 'close'):
+                    if hasattr(session, "close"):
                         session.close()
-            
+
             if not repo_path:
                 return {"error": f"Physical repository path not found for {repo_id}", "results": "", "count": 0}
-                
-            # Build grep command
-            # -r = recursive, -n = line numbers, -I = ignore binary, -E = extended regex
-            cmd = ["grep", "-rnIE", query]
-            if includes:
-                for ext in includes:
-                    # Grep include syntax
-                    cmd.append(f"--include={ext}")
-            cmd.append(".")
-            
-            # Execute safely
-            result = subprocess.run(cmd, cwd=repo_path, capture_output=True, text=True)
-            output = result.stdout
-            
-            if not output:
-                if result.stderr:
-                    return {"error": result.stderr, "results": "", "count": 0}
+
+            try:
+                max_lines = max(10, min(int(params.get("limit", 500)), 5000))
+            except (TypeError, ValueError):
+                max_lines = 500
+
+            try:
+                regex = re.compile(search_pattern)
+            except re.error as ex:
+                return {"error": f"Invalid regex: {ex}", "results": "", "count": 0}
+
+            output, count, _truncated = PlaybookTools._python_repo_text_search(
+                Path(repo_path), regex, includes, max_lines
+            )
+
+            if count == 0:
                 return {"success": True, "results": "No matches found.", "count": 0}
-                
-            # Truncate to avoid context window explosion
-            lines = output.splitlines()
-            count = len(lines)
-            max_lines = 500
-            
-            if count > max_lines:
-                output = "\n".join(lines[:max_lines])
-                output += f"\n\n...[Output truncated, {count - max_lines} more matches found. Please refine your query.]"
-            else:
-                output = "\n".join(lines)
-                
-            return {
-                "success": True,
-                "results": output,
-                "count": count
-            }
+
+            return {"success": True, "results": output, "count": count}
         except Exception as e:
-            import traceback
             traceback.print_exc()
             return {"error": f"Grep execution failed: {str(e)}", "results": "", "count": 0}
 
@@ -1193,13 +1974,23 @@ class PlaybookTools:
             Tool result dict
         """
         tools = {
+            "get_map": self.get_map,
+            "trace_path": self.trace_path,
+            "graphify_query": self.graphify_query,
+            "graphify_path": self.graphify_path,
+            "graphify_explain": self.graphify_explain,
+            "graphify_add": self.graphify_add,
+            "graphify_run": self.graphify_run,
+            "search_code": self.search_code,
             "search_codebase": self.search_codebase,
             "read_file": self.read_file,
+            "get_file_outline": self.get_file_outline,
             "search_symbol": self.search_symbol,
             "get_callers": self.get_callers,
             "get_callees": self.get_callees,
             "get_dependencies": self.get_dependencies,
             "list_files": self.list_files,
+            "list_repo_directory": self.list_repo_directory,
             "search_catalogs": self.search_catalogs,
             "save_catalog_entry": self.save_catalog_entry,
         }
@@ -1214,18 +2005,73 @@ class PlaybookTools:
         """Return tool descriptions for LLM prompting."""
         return [
             {
-                "name": "search_codebase",
-                "description": "Semantic search across the codebase. Best for finding code related to a concept or feature.",
-                "parameters": "queries (list[str]), repo_id (str), limit (int), mode ('semantic'|'hybrid'), file_types (list[str])"
+                "name": "get_map",
+                "description": (
+                    "Phase A: Architectural GPS—your reading roadmap. Use FIRST. "
+                    "High-degree nodes and entry points prioritize *what to read next* before opening files."
+                ),
+                "parameters": "repo_id (str), limit (int, optional, default 15)"
+            },
+            {
+                "name": "trace_path",
+                "description": (
+                    "Phase B: Turn the map into an ordered path between two symbols/files. "
+                    "Use the path to sequence read_file calls along the real dependency/call chain."
+                ),
+                "parameters": "repo_id (str), start (str), end (str)"
+            },
+            {
+                "name": "graphify_query",
+                "description": "Graphify query over graph.json with BFS/DFS and token budget (maps to /graphify query ... [--dfs] [--budget]).",
+                "parameters": "repo_id (str), question (str), mode ('bfs'|'dfs', optional), depth (int, optional), budget (int, optional)"
+            },
+            {
+                "name": "graphify_path",
+                "description": "Find shortest path between two graph concepts (maps to /graphify path-like traversal).",
+                "parameters": "repo_id (str), source (str), target (str), max_hops (int, optional)"
+            },
+            {
+                "name": "graphify_explain",
+                "description": "Explain a graph node with metadata and neighbors (maps to /graphify explain).",
+                "parameters": "repo_id (str), term (str), include_neighbors (bool, optional), max_neighbors (int, optional)"
+            },
+            {
+                "name": "graphify_add",
+                "description": "Ingest URL content (paper/tweet/video/web) into corpus; graph generation is indexing-only.",
+                "parameters": "url (str), target_dir (str, optional), author (str, optional), contributor (str, optional), update_graph (bool, optional), deep_mode (bool, optional)"
+            },
+            {
+                "name": "graphify_run",
+                "description": "Regenerate graph-derived artifacts (report/html/obsidian) for an indexed repo_id using existing graph.json.",
+                "parameters": "repo_id (str), no_viz (bool, optional), obsidian (bool, optional), obsidian_dir (str, optional)"
+            },
+            {
+                "name": "search_code",
+                "description": (
+                    "Phase C: Surgical text search (Python regex scan; no external grep). "
+                    "Use ONLY after narrowing down to specific modules/files via graph tools."
+                ),
+                "parameters": "query (str), repo_id (str, optional), includes (list[str], optional), limit (int, optional)"
             },
             {
                 "name": "read_file",
-                "description": "Read content of a specific file. Use when you know the file path.",
+                "description": (
+                    "Read a file after the graph (get_map / trace_path / callers) has directed you here. "
+                    "Do not use for exploratory browsing—follow the roadmap."
+                ),
                 "parameters": "file_path (str), repo_id (str), start_line (int, optional), end_line (int, optional)"
             },
             {
+                "name": "get_file_outline",
+                "description": (
+                    "AST-level outline for one file (classes, methods, imports, line ranges). "
+                    "Use before read_file on large modules—like an IDE outline / Claude Code file peek."
+                ),
+                "parameters": "repo_id (str), file_path (str)"
+            },
+            {
                 "name": "search_symbol",
-                "description": "Find a class or function by name. Returns file locations.",
+                "description": "Find a class or function by name. Useful for mapping graph node IDs back to files.",
                 "parameters": "name (str), repo_id (str), symbol_type ('Class'|'Function', optional)"
             },
             {
@@ -1245,17 +2091,15 @@ class PlaybookTools:
             },
             {
                 "name": "list_files",
-                "description": "List files in the repository matching a pattern or file type.",
+                "description": (
+                    "Graph-backed file discovery: substring or glob (e.g. ``*service*.py``) on indexed paths, "
+                    "plus optional file_type (e.g. ``.py``). Prefer over blind directory walks when the graph is fresh."
+                ),
                 "parameters": "repo_id (str), pattern (str, optional), file_type (str, optional)"
             },
             {
-                "name": "search_catalogs",
-                "description": "Search across high-level documentation catalogs. Use to find relevant repositories or architectural summaries.",
-                "parameters": "query (str), repo_id (str, optional), limit (int, optional)"
-            },
-            {
-                "name": "save_catalog_entry",
-                "description": "Save a comprehensive catalog entry documenting a repository's purpose, architecture, quality, and metadata.",
-                "parameters": "repo_id (str), repo_name (str), repo_url (str), branch (str), description (str), summary_high_level (str), summary_detailed (str), category (str), quality_score (int 1-100), architecture (str), tech_stack (str), specification (str), topics (list[str]), pros (list[str]), cons (list[str])"
+                "name": "list_repo_directory",
+                "description": "List files and folders under a path in the repo checkout on disk (manifest path). Use to browse directories when graph coverage is incomplete.",
+                "parameters": "repo_id (str), relative_path (str, optional), recursive (bool, optional), max_entries (int, optional)"
             },
         ]

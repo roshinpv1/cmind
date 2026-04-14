@@ -55,6 +55,8 @@ class ASTExtractionResult:
     imports: list[Import]
     language: str
     success: bool
+    tree: any = None  # Raw Tree-Sitter tree for reuse
+    content: bytes | None = None  # Source content for reuse
     error: str | None = None
 
 
@@ -258,7 +260,8 @@ class ASTExtractor:
             imports = self._extract_imports(tree.root_node, content, language)
 
             return ASTExtractionResult(
-                symbols=symbols, imports=imports, language=language, success=True
+                symbols=symbols, imports=imports, language=language, success=True,
+                tree=tree, content=content
             )
 
         except (TimeoutError, ValueError) as e:

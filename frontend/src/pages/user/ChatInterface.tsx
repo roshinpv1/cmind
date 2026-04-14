@@ -406,7 +406,7 @@ export default function ChatInterface() {
                 body: JSON.stringify({
                     goal: goal,
                     repo_id: activePlaybook.requiresRepo ? selectedRepo : undefined,
-                    max_iterations: 10,
+                    max_iterations: 24,
                     allowed_playbooks: allowedPlaybooks
                 })
             });

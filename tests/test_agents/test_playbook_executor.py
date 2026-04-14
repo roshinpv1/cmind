@@ -188,3 +188,33 @@ class TestPlaybookExecutorToolCalls:
 
         assert isinstance(result, dict)
         assert "success" in result
+
+
+class TestRuntimeResultMapping:
+    """Regression tests for stable output envelope behavior."""
+
+    def test_mapper_keeps_none_data(self):
+        from codemind.playbooks.runtime_core import PlaybookResultMapper
+
+        mapper = PlaybookResultMapper()
+        mapped = mapper.map_result(
+            playbook_name="detect_pii_exposure",
+            success=True,
+            outputs={"result": "", "data": None},
+            logs=[],
+        )
+        assert "outputs" in mapped
+        assert mapped["outputs"]["data"] is None
+
+    def test_mapper_keeps_list_data(self):
+        from codemind.playbooks.runtime_core import PlaybookResultMapper
+
+        mapper = PlaybookResultMapper()
+        sample = [{"file": "a.py", "issue": "pii_candidate"}]
+        mapped = mapper.map_result(
+            playbook_name="detect_pii_exposure",
+            success=True,
+            outputs={"data": sample},
+            logs=[],
+        )
+        assert mapped["outputs"]["data"] == sample

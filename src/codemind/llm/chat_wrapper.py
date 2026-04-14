@@ -25,6 +25,7 @@ Usage:
 
 import asyncio
 import json
+import os
 import re
 import uuid
 from copy import deepcopy
@@ -43,9 +44,30 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.runnables import Runnable
 
 from .base import LLMDriver, LLMConfig
+from .token_counter import count_tokens, truncate_to_tokens
 
 
 # ─── Tool Call Parsing ────────────────────────────────────────────────────────
+
+def _extract_leading_json_dict(text: str) -> tuple[dict | None, str | None]:
+    """Parse the first complete JSON object from text using balanced decoding.
+
+    Regex-based extraction fails on nested objects (e.g. tool ``args``), which
+    caused the planner to treat raw ``{"tool_calls":[...]}`` as the final answer.
+    """
+    s = text.strip()
+    start = s.find("{")
+    if start < 0:
+        return None, None
+    dec = json.JSONDecoder()
+    try:
+        obj, end = dec.raw_decode(s[start:])
+        if isinstance(obj, dict):
+            return obj, s[start : start + end]
+    except json.JSONDecodeError:
+        return None, None
+    return None, None
+
 
 def _extract_tool_calls(text: str, available_tools: dict) -> tuple[str, list]:
     """Parse tool calls from LLM text output.
@@ -77,6 +99,14 @@ def _extract_tool_calls(text: str, available_tools: dict) -> tuple[str, list]:
     
     if tool_calls:
         return remaining_text, tool_calls
+
+    # Strategy 1b: Leading JSON object with nested args (regex below cannot match this)
+    data, matched = _extract_leading_json_dict(text)
+    if isinstance(data, dict):
+        calls = _parse_tool_json(data, available_tools)
+        if calls:
+            remaining_text = text.replace(matched, "", 1).strip() if matched else ""
+            return remaining_text, calls
     
     # Strategy 2: Look for raw JSON objects in text
     # Find all JSON-like objects
@@ -130,6 +160,22 @@ def _parse_tool_json(data: dict, available_tools: dict) -> list:
             "type": "tool_call",
         })
         return calls
+
+    # Format: {"action": "tool_name", ...}
+    # Common with "phase/action" planning JSON emitted by local models.
+    if "action" in data and isinstance(data["action"], str) and data["action"] in available_tools:
+        args = {
+            k: v
+            for k, v in data.items()
+            if k not in {"action", "phase", "tool", "name", "arguments", "args", "parameters"}
+        }
+        calls.append({
+            "name": data["action"],
+            "args": args,
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "tool_call",
+        })
+        return calls
     
     return calls
 
@@ -137,10 +183,21 @@ def _parse_tool_json(data: dict, available_tools: dict) -> list:
 def _render_tool_schemas(tools: list) -> str:
     """Render tool schemas as text for system prompt injection."""
     lines = ["You have access to the following tools:\n"]
+    max_schema_chars = int(os.getenv("CODEMIND_TOOL_SCHEMA_MAX_CHARS", "5000"))
+
+    def _compact_desc(desc: str) -> str:
+        d = " ".join((desc or "").split())
+        if not d:
+            return ""
+        # Keep first sentence (or first 180 chars) to avoid giant tool blocks.
+        first = d.split(". ", 1)[0]
+        if len(first) > 180:
+            first = first[:180].rstrip() + "..."
+        return first
     
     for t in tools:
         name = t.name
-        desc = t.description or ""
+        desc = _compact_desc(t.description or "")
         
         # Get input schema
         if hasattr(t, 'args_schema') and t.args_schema:
@@ -172,9 +229,13 @@ You may call multiple tools at once by adding more items to the tool_calls array
 If you don't need to call a tool, just respond normally with text.
 
 IMPORTANT: When you output a JSON block to call a tool, DO NOT output any text pretending to be the 'Tool Result'. Stop generating immediately after the tool call block and wait for the system to execute the tool and provide the real result.
+IMPORTANT: Limit each turn to a small number of tool calls (prefer <= 4). For repeated text searches, use ONE search_code call with a combined regex OR or a `queries` array instead of many separate calls.
 """)
-    
-    return "\n".join(lines)
+
+    rendered = "\n".join(lines)
+    if len(rendered) > max_schema_chars:
+        rendered = rendered[:max_schema_chars] + "\n...[tool schema instructions truncated]"
+    return rendered
 
 
 # ─── CmindChatModelWithTools ────────────────────────────────────────────────
@@ -231,6 +292,24 @@ class CmindChatModelWithTools(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         """Generate with tool schema injection and response parsing."""
+        # Prompt-based tool calls only need a short completion; passing the full model
+        # max_tokens (e.g. 25k) to local servers makes first-turn routing unnecessarily slow.
+        cfg = getattr(self.base_model.driver, "config", None)
+        cfg_max = int(getattr(cfg, "max_tokens", 8192) or 8192)
+        cap = int(os.getenv("CODEMIND_TOOL_CALL_MAX_TOKENS", "8192"))
+        cap = max(256, min(cap, cfg_max))
+        raw_mt = kwargs.get("max_tokens")
+        if raw_mt is not None:
+            try:
+                kwargs = {
+                    **kwargs,
+                    "max_tokens": max(256, min(int(raw_mt), cap)),
+                }
+            except (TypeError, ValueError):
+                kwargs = {**kwargs, "max_tokens": cap}
+        else:
+            kwargs = {**kwargs, "max_tokens": cap}
+
         # Inject tool schemas into system prompt
         augmented_messages = list(messages)
         
@@ -388,6 +467,48 @@ class CmindChatModel(BaseChatModel):
             
         if "temperature" in kwargs:
             driver_kwargs["temperature"] = kwargs["temperature"]
+
+        # Ensure request fits model context (critical for small local contexts, e.g., 4k).
+        if system_prompt or user_prompt:
+            cfg = getattr(self.driver, "config", None)
+            context_window = (
+                int(getattr(cfg, "effective_context_window", 0) or 0)
+                if cfg
+                else 0
+            )
+            explicit_ctx = os.getenv("LLM_CONTEXT_WINDOW")
+            if explicit_ctx:
+                context_window = int(explicit_ctx)
+            # Local providers often expose smaller true context than config.max_tokens*4.
+            # When no explicit window is configured, apply a conservative ceiling.
+            provider_name = str(getattr(getattr(cfg, "provider", ""), "value", getattr(cfg, "provider", ""))).lower()
+            if not explicit_ctx and ("local" in provider_name or "ollama" in provider_name):
+                local_ctx = int(os.getenv("LOCAL_PROVIDER_CONTEXT_WINDOW", "4096"))
+                context_window = min(context_window or local_ctx, local_ctx)
+            if context_window <= 0:
+                context_window = int(os.getenv("LLM_CONTEXT_WINDOW", "16384"))
+            out_tokens = int(driver_kwargs.get("max_tokens", getattr(cfg, "max_tokens", 4096) if cfg else 4096))
+            # Keep output allocation realistic relative to total context.
+            out_cap = max(256, context_window // 3)
+            if out_tokens > out_cap:
+                out_tokens = out_cap
+                driver_kwargs["max_tokens"] = out_tokens
+            # Keep safety headroom for provider/system overhead.
+            input_budget = max(512, context_window - out_tokens - 256)
+
+            sys_text = system_prompt or ""
+            usr_text = user_prompt or ""
+            total_in = count_tokens(sys_text + "\n\n" + usr_text)
+            if total_in > input_budget:
+                # Prefer preserving user text; shrink system prompt first.
+                usr_tokens = count_tokens(usr_text)
+                min_user_budget = min(max(256, usr_tokens), max(256, input_budget // 2))
+                sys_budget = max(128, input_budget - min_user_budget)
+                shrunk_sys = truncate_to_tokens(sys_text, sys_budget)
+                remaining_budget = max(128, input_budget - count_tokens(shrunk_sys))
+                shrunk_usr = truncate_to_tokens(usr_text, remaining_budget)
+                system_prompt = shrunk_sys
+                user_prompt = shrunk_usr
         
         # Call the existing driver
         result_text = await self.driver.generate(user_prompt, **driver_kwargs)

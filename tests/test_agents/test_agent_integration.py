@@ -231,7 +231,7 @@ class TestLangChainToolsIntegration:
 
         tools = create_langchain_tools(playbook_tools)
         assert isinstance(tools, list)
-        assert len(tools) >= 7  # At minimum: search, read, symbol, callers, callees, deps, list, catalogs, save
+        assert len(tools) >= 10  # Graph-first tools + search, read, catalogs, etc.
 
     def test_tool_names(self, playbook_tools):
         """All expected tool names are present."""
@@ -241,9 +241,20 @@ class TestLangChainToolsIntegration:
         tool_names = {t.name for t in tools}
 
         expected = {
-            "search_codebase", "read_file", "search_symbol",
-            "get_callers", "get_callees", "get_dependencies",
-            "list_files", "search_catalogs", "save_catalog_entry",
+            "get_map",
+            "trace_path",
+            "search_code",
+            "search_codebase",
+            "read_file",
+            "get_file_outline",
+            "search_symbol",
+            "get_callers",
+            "get_callees",
+            "get_dependencies",
+            "list_files",
+            "list_repo_directory",
+            "search_catalogs",
+            "save_catalog_entry",
         }
         assert expected.issubset(tool_names), f"Missing tools: {expected - tool_names}"
 

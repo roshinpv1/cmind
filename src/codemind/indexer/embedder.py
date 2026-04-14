@@ -254,6 +254,21 @@ class RemoteEmbeddingProvider(EmbeddingProvider):
             return [np.array(item["embedding"]) for item in results]
 
 
+class NoneEmbeddingProvider(EmbeddingProvider):
+    """Zero-vector provider for skipping vectorization."""
+
+    def __init__(self, dim: int = 768):
+        self.dim = dim
+        logger.info(f"[EMBEDDING] None provider initialized (dim={self.dim})")
+
+    def get_embedding_dim(self) -> int:
+        return self.dim
+
+    def encode_batch(self, texts: List[str]) -> List[np.ndarray]:
+        # Return zero vectors
+        return [np.zeros(self.dim) for _ in texts]
+
+
 class EmbeddingGenerator:
     """Generates embeddings using configurable provider (Local or Apigee)."""
 
@@ -289,6 +304,9 @@ class EmbeddingGenerator:
             self.provider = RemoteEmbeddingProvider(self.model_name, self.max_tokens)
         elif self.provider_type == "local":
             self.provider = LocalEmbeddingProvider(self.model_name, self.max_tokens)
+        elif self.provider_type == "none":
+            dim = int(os.getenv("EMBEDDING_DIMENSION", "768"))
+            self.provider = NoneEmbeddingProvider(dim)
         elif os.environ.get("EMBEDDING_API_URL"):
             # Fallback: use remote if API URL is set and provider type is unrecognized
             logger.info(f"[EMBEDDING] Unknown provider '{self.provider_type}', using remote (EMBEDDING_API_URL is set)")

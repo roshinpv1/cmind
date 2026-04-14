@@ -3,16 +3,31 @@ CodeMind MCP Server — exposes code intelligence via Model Context Protocol.
 
 Proxies requests to the running CodeMind FastAPI server.
 
-Tools:
-  Code Intelligence:
-    - catalog_search  — semantic search across all repo catalogs (search_catalogs playbook)
-    - code_search     — semantic/hybrid search over indexed code
-    - catalog_browse  — get full catalog for a specific repo
+**Graphify-first (recommended for repo analysis):** use ``graphify_*`` tools to
+query the pre-built AST/relationship graph — compact, structural, and
+token-efficient. Then use ``code_search`` / file reads only for line-level proof.
 
-  Autonomous Agent:
-    - agent_execute   — start autonomous agent with a goal
-    - agent_status    — poll agent job status
-    - agent_result    — get completed agent result
+Tools:
+  Graphify (structural / relational — from graphify-out graph):
+    - graphify_architecture_map — high-level GPS (hubs, entry points)
+    - graphify_file_outline — classes, functions, imports for one file
+    - graphify_find_files       — paths matching pattern or extension
+    - graphify_symbol           — locate symbol definitions
+    - graphify_callers / graphify_callees
+    - graphify_file_dependencies — imports or imported-by for a file
+    - graphify_trace_path — shortest path between two symbols/paths
+    - graphify_impact_radius    — callers + import dependents of a function
+    - graphify_reachable_files  — N-hop neighborhood from an anchor file
+
+  Code Intelligence:
+    - catalog_search  — semantic search across repository catalogs (LanceDB)
+    - code_search     — semantic/hybrid search over indexed code chunks
+    - catalog_browse  — full catalog entry for a repo
+
+  Playbooks & agents:
+    - playbook_run    — execute one named playbook synchronously (ReAct or linear)
+    - agent_execute   — autonomous planner (multi-playbook)
+    - agent_status / agent_result
 
 Resources:
     - codemind://repos  — list all indexed repositories
@@ -35,9 +50,11 @@ TIMEOUT = float(os.environ.get("CODEMIND_TIMEOUT", "120"))  # generous for agent
 mcp = FastMCP(
     "CodeMind",
     instructions=(
-        "CodeMind is an AI-powered code intelligence platform. "
-        "Use the tools to search indexed codebases, browse repository catalogs, "
-        "and run autonomous agents that reason over code."
+        "CodeMind: code intelligence with Graphify structural graphs + optional vector search.\n"
+        "For repository analysis, prefer graphify_* tools first (architecture_map, file_outline, "
+        "symbol, callers/callees, trace_path) — they return compact structural data from AST-backed "
+        "graphs, saving tokens. Use code_search for semantic discovery; catalog_search for catalog "
+        "entries only. Run playbook_run or agent_execute for full playbook workflows."
     ),
 )
 

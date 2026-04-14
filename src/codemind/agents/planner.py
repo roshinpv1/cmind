@@ -21,6 +21,7 @@ from langchain_core.messages import (
 )
 import asyncio
 import json
+import os
 import uuid
 
 from .planner_state import PlannerState
@@ -47,7 +48,7 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None, enfor
         
         # Create a tool for each playbook dynamically
         pb_name = name
-        pb_desc = playbook.when_to_use[:500] if playbook.when_to_use else f"Execute {name} playbook"
+        pb_desc = playbook.when_to_use if playbook.when_to_use else f"Execute {name} playbook"
         
         class PlaybookInput(BaseModel):
             """Input for playbook execution."""
@@ -98,80 +99,72 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None, enfor
 class PlannerAgent:
     """
     Autonomous planner that uses LangGraph ToolNode for action dispatch.
-    
-    The LLM decides what to do by making tool calls. Each tool call is 
-    automatically dispatched by ToolNode. Playbooks are exposed as 
-    "meta-tools" (playbook_search_catalogs, playbook_code_analyzer, etc.).
-    
-    This eliminates:
-    - _parse_action() regex parsing
-    - _CHANNEL_TO_TOOL / _CHANNEL_TO_PLAYBOOK mappings
-    - _format_tools_for_prompt() manual schema generation
-    - Model-native format handling
+
+    Parallel-execution safe: every call to execute() builds its own
+    workflow with its own llm_with_tools binding captured in a closure.
+    No per-execution state is stored on self.
     """
-    
+
     def __init__(self, registry, executor, llm_client):
         self.registry = registry
         self.executor = executor
-        self.llm = llm_client  # Legacy LLMDriver (kept for _finish synthesis)
-        
-        # CmindChatModel for tool calling — created lazily per execute() call
-        # because allowed_playbooks changes which tools are available
+        self.llm = llm_client  # raw LLMDriver (kept for _finish synthesis)
+        # CmindChatModel is a stateless wrapper — safe to share across calls.
         self._chat_model = None
-    
+
     def _get_chat_model(self):
-        """Get or create the CmindChatModel wrapper."""
         if self._chat_model is None:
             from ..llm.chat_wrapper import CmindChatModel
             self._chat_model = CmindChatModel(driver=self.llm)
         return self._chat_model
-    
+
     def _create_tools(self, allowed_playbooks=None, enforced_repo_id=None):
-        """Create all available tools (data tools + playbook meta-tools)."""
+        """Return the tool list for this execution (pure, no side-effects)."""
         from ..playbooks.langchain_tools import create_langchain_tools
-        
-        # Data tools (search_codebase, read_file, etc.)
-        data_tools = create_langchain_tools(self.executor.tools, enforced_repo_id=enforced_repo_id)
-        
-        # Playbook meta-tools
-        playbook_tools = create_playbook_meta_tools(
-            self.registry, self.executor, allowed_playbooks, enforced_repo_id=enforced_repo_id
+
+        data_tools = create_langchain_tools(
+            self.executor.tools, enforced_repo_id=enforced_repo_id
         )
-        
-        # If playbooks are constrained, we strictly enforce it by only providing the specified 
-        # playbook meta-tools. The planner relies on the playbooks' internal executors (which 
-        # have full data tool access) to perform any necessary codebase/catalog operations.
+        playbook_tools = create_playbook_meta_tools(
+            self.registry, self.executor, allowed_playbooks,
+            enforced_repo_id=enforced_repo_id,
+        )
+        # When playbooks are constrained, strip generic data tools so the
+        # planner cannot bypass the playbook-level context management.
         if allowed_playbooks:
             data_tools = []
-            
         return data_tools + playbook_tools
-    
-    def _build_workflow(self, tools):
-        """Build the LangGraph workflow with ToolNode."""
-        chat_model = self._get_chat_model()
-        self._llm_with_tools = chat_model.bind_tools(tools)
-        
+
+    def _build_workflow(self, tools, llm_with_tools, on_update=None):
+        """
+        Build a LangGraph workflow for ONE execution.
+
+        *llm_with_tools* and *on_update* are captured via closure so that
+        two concurrent calls each use their own binding — never each other's.
+        """
         graph = StateGraph(PlannerState)
-        
-        graph.add_node("think", self._think)
+
+        # ── think: captured per-call llm_with_tools, never touches self ──────
+        async def think_node(state: PlannerState) -> dict:
+            return await self._think(state, llm_with_tools, on_update=on_update)
+
+        async def finish_node(state: PlannerState) -> dict:
+            return await self._finish(state, on_update=on_update)
+
+        graph.add_node("think", think_node)
         graph.add_node("tools", ToolNode(tools))
-        graph.add_node("finish", self._finish)
-        
+        graph.add_node("finish", finish_node)
+
         graph.set_entry_point("think")
-        
         graph.add_conditional_edges(
             "think",
             self._route,
-            {"tools": "tools", "finish": "finish"}
+            {"tools": "tools", "finish": "finish"},
         )
-        
-        # After tool execution → back to think
         graph.add_edge("tools", "think")
         graph.add_edge("finish", END)
-        
-        # Compile with MemorySaver for checkpointing
-        self._checkpointer = MemorySaver()
-        return graph.compile(checkpointer=self._checkpointer)
+
+        return graph.compile(checkpointer=MemorySaver())
     
     def _route(self, state: PlannerState) -> Literal["tools", "finish"]:
         """Route based on LLM's decision."""
@@ -197,25 +190,26 @@ class PlannerAgent:
         # No tool calls means the LLM wants to finish
         return "finish"
     
-    async def _emit_update(self, state: PlannerState):
-        """Emit state update if callback is registered."""
-        if hasattr(self, "on_update") and self.on_update:
+    @staticmethod
+    async def _emit_update(state: PlannerState, on_update=None):
+        """Emit state update if callback is registered (per-call closure, not self)."""
+        if on_update:
             try:
-                await self.on_update(state)
-            except Exception as e:
-                print(f"[PLANNER] Callback error: {e}")
+                await on_update(state)
+            except Exception as exc:
+                print(f"[PLANNER] Callback error: {exc}")
     
-    async def _think(self, state: PlannerState) -> dict:
+    async def _think(self, state: PlannerState, llm_with_tools, on_update=None) -> dict:
         """
         Agent thinks about what to do next.
-        
-        Uses LLM with bound tools — the LLM's response will contain
-        either tool_calls (to act) or plain text (to finish).
+
+        *llm_with_tools* and *on_update* are passed explicitly (not from self)
+        so concurrent executions each use their own binding.
         """
         iteration = state.get("iteration", 0)
         print(f"\n[PLANNER] 🤔 Think (iteration {iteration})")
         await asyncio.sleep(0)
-        await self._emit_update(state)
+        await self._emit_update(state, on_update=on_update)
         
         # Count successful observations (legacy format)
         successful_runs = sum(
@@ -251,6 +245,9 @@ class PlannerAgent:
             # Catalog search & design_solution results
             "catalog_matches", "overall_confidence_score",
             "architecture_composition", "decomposition", "capabilities",
+            # Security audit results (sentinel_mythos)
+            "vulnerabilities", "security_findings", "audit_summary",
+            "cve_findings", "risk_score", "severity",
         ]
         if tool_messages:
             last_tool_content = tool_messages[-1].content or ""
@@ -326,8 +323,17 @@ class PlannerAgent:
             topo_hook = f"\n\nGRAPHIFY PRE-FLIGHT REPORT (God Nodes):\n{state['topology_context']}\n"
 
         system_msg = SystemMessage(content=(
-            "You are a code analysis agent. You have tools available to search code, "
-            "analyze repositories, and retrieve information.\n\n"
+            "You are an intelligent code analysis agent with access to specialized playbooks and data tools.\n\n"
+            "ROUTING RULES — always pick the MOST SPECIFIC playbook for the goal:\n"
+            "- Security analysis / audit / vulnerabilities / CVE / exploit → use sentinel_mythos_security_audit\n"
+            "- PII / data privacy / GDPR / personal data exposure → use detect_pii_exposure\n"
+            "- Resiliency / chaos / circuit breaker / fault tolerance → use detect_resiliency_patterns\n"
+            "- API endpoints / routes / REST / GraphQL discovery → use discover_api_endpoints\n"
+            "- Catalog search / find a library / reuse → use search_catalogs\n"
+            "- General code exploration / architecture questions → use explore_codebase\n"
+            "- Where authentication / authorization / login / sessions / permissions live → use explore_codebase "
+            "(use sentinel_mythos_security_audit only when the goal is security auditing, not general “where is auth”).\n"
+            "- NEVER use explore_codebase for security or PII goals — use the specialist playbook.\n\n"
             "Use the available tools to gather information needed to answer the user's goal.\n"
             + finish_instruction
             + topo_hook
@@ -345,28 +351,49 @@ class PlannerAgent:
         messages = [system_msg]
         
         # Add existing messages from state (previous tool calls/results)
-        existing = state.get("messages", [])
-        # Only add recent messages to avoid context overflow
-        if existing:
-            messages.extend(existing[-6:])  # Keep last 3 exchanges
+        from codemind.llm.context_manager import ContextCompactor
+        compactor = ContextCompactor(llm_driver=self.llm, threshold_ratio=0.6)
+        
+        # Use dynamic compaction instead of static truncation
+        messages.extend(await compactor.compact(state.get("messages", [])))
         
         messages.append(user_msg)
         
         try:
             # Invoke LLM with tools
             config = getattr(self.llm, 'config', None)
-            think_tokens = max(512, (config.max_tokens if config else 4096) // 4)
-            
-            response = await self._llm_with_tools.ainvoke(
+            cfg_mt = int(getattr(config, "max_tokens", 4096) or 4096) if config else 4096
+            # First-turn routing = small JSON tool_calls; avoid huge budgets (slow on local LM servers).
+            think_tokens = max(512, min(cfg_mt // 4, 4096))
+            _hard = os.getenv("CODEMIND_PLANNER_THINK_MAX_TOKENS")
+            if _hard and _hard.isdigit():
+                think_tokens = min(think_tokens, max(256, int(_hard)))
+
+            response = await llm_with_tools.ainvoke(
                 messages,
                 max_tokens=think_tokens,
-                temperature=0.1
+                temperature=0.1,
             )
             
             # response is an AIMessage (possibly with tool_calls)
             content = response.content or ""
-            has_tool_calls = hasattr(response, 'tool_calls') and response.tool_calls
-            
+            has_tool_calls = bool(
+                getattr(response, "tool_calls", None)
+            )
+
+            # Repair JSON tool_calls emitted as plain text (nested args break regex-only parse
+            # in chat_wrapper, which previously left the model "finishing" with raw JSON as the answer)
+            if not has_tool_calls and content:
+                tool_names = getattr(llm_with_tools, "tool_names", None)
+                if tool_names:
+                    from codemind.llm.chat_wrapper import _extract_tool_calls as _parse_tc_from_text
+                    rem, repaired = _parse_tc_from_text(content, tool_names)
+                    if repaired:
+                        from langchain_core.messages import AIMessage as AIM
+                        response = AIM(content=rem or "", tool_calls=repaired)
+                        has_tool_calls = True
+                        print(f"[PLANNER] Repaired {len(repaired)} tool call(s) from model JSON text")
+
             print(f"[PLANNER] Response: {content[:200]}...")
             if has_tool_calls:
                 for tc in response.tool_calls:
@@ -446,14 +473,14 @@ class PlannerAgent:
                 return preferred
         return available[0] if available else "search_catalogs"
     
-    async def _finish(self, state: PlannerState) -> dict:
+    async def _finish(self, state: PlannerState, on_update=None) -> dict:
         """
         Synthesize final answer from execution history.
         Uses playbook output directly when available, otherwise synthesizes.
         """
         print(f"\n[PLANNER] Finish")
         await asyncio.sleep(0)
-        await self._emit_update(state)
+        await self._emit_update(state, on_update=on_update)
         
         # Collect successful outputs from observations AND tool messages
         playbook_output = None
@@ -494,35 +521,45 @@ class PlannerAgent:
                             all_data.append(str(val[:10]))
         
         # Also collect data from tool messages in the message history
+        _STRUCTURED_KEYS = frozenset({
+            "catalog_matches", "summary", "comparison", "build_estimate",
+            "reuse_estimate", "report_markdown", "product_name",
+            "overall_confidence_score", "architecture_composition",
+        })
         for msg in state.get("messages", []):
             if isinstance(msg, ToolMessage):
                 content = msg.content
-                if isinstance(content, str) and len(content) > 20:
-                    # Check if it's a playbook result (JSON with schema keys)
+                if isinstance(content, str) and len(content) > 0:
                     try:
                         parsed = json.loads(content)
                         if isinstance(parsed, dict):
-                            # Prefer structured "data" dict if present
-                            struct_data = parsed.get("data")
-                            if isinstance(struct_data, dict) and any(
-                                k in struct_data for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")
-                            ):
-                                playbook_output = struct_data
+                            # ── New executor format: {success, outputs:{result, data, ...}} ──
+                            outputs_dict = parsed.get("outputs") if isinstance(parsed.get("outputs"), dict) else None
+                            if outputs_dict is not None:
+                                # Prefer structured "data" sub-dict (Pydantic-validated output)
+                                struct_data = outputs_dict.get("data")
+                                if isinstance(struct_data, dict) and any(k in struct_data for k in _STRUCTURED_KEYS):
+                                    playbook_output = struct_data
+                                else:
+                                    # Fall back to "result" string — this is the ReAct synthesis text
+                                    result_val = outputs_dict.get("result")
+                                    if result_val and str(result_val).strip():
+                                        try:
+                                            inner = json.loads(str(result_val))
+                                            playbook_output = inner if isinstance(inner, dict) else str(result_val)
+                                        except (json.JSONDecodeError, TypeError):
+                                            playbook_output = str(result_val)
+                            # ── Legacy flat format ──────────────────────────────────────────
+                            elif any(k in parsed for k in _STRUCTURED_KEYS):
+                                playbook_output = parsed
                             elif "result" in parsed:
                                 result_val = parsed["result"]
-                                if isinstance(result_val, str):
+                                if result_val and str(result_val).strip():
                                     try:
-                                        inner = json.loads(result_val)
-                                        if isinstance(inner, dict):
-                                            playbook_output = inner
-                                        else:
-                                            playbook_output = result_val
+                                        inner = json.loads(str(result_val))
+                                        playbook_output = inner if isinstance(inner, dict) else str(result_val)
                                     except (json.JSONDecodeError, TypeError):
-                                        playbook_output = result_val
-                                else:
-                                    playbook_output = result_val
-                            elif any(k in parsed for k in ("catalog_matches", "summary", "comparison", "build_estimate", "reuse_estimate", "report_markdown", "product_name", "overall_confidence_score", "architecture_composition")):
-                                playbook_output = parsed
+                                        playbook_output = str(result_val)
                     except (json.JSONDecodeError, TypeError):
                         pass
                     all_data.append(content[:8000])
@@ -605,11 +642,24 @@ class PlannerAgent:
                     }
                 }
         else:
+            fr = state.get("final_result") or ""
+            # Model sometimes emitted tool-call JSON as "final text" when parsing failed earlier
+            if isinstance(fr, str) and fr.strip().startswith("{"):
+                try:
+                    parsed = json.loads(fr.strip())
+                    if isinstance(parsed, dict) and "tool_calls" in parsed and len(parsed) <= 3:
+                        print("[PLANNER] final_result looks like unparsed tool JSON — not using as user answer")
+                        fr = (
+                            "The run stopped before a final synthesis. Tool calls were not executed. "
+                            "Retry the job; if this persists, increase max_iterations or check the LLM output format."
+                        )
+                except (json.JSONDecodeError, TypeError):
+                    pass
             print(f"[PLANNER] No data gathered, using final_result")
             return {
                 "final_answer": {
                     "goal": state["goal"],
-                    "answer": state.get("final_result", "Unable to gather information from the codebase."),
+                    "answer": fr if fr else "Unable to gather information from the codebase.",
                     "steps_taken": len(actions_used),
                     "iterations": state.get("iteration", 0),
                     "playbooks_used": actions_used,
@@ -667,8 +717,6 @@ class PlannerAgent:
         
         Same interface as before — drop-in replacement.
         """
-        self.on_update = on_update
-        
         print(f"\n{'='*60}")
         print(f"[PLANNER] Starting autonomous execution")
         print(f"[PLANNER] Goal: {goal}")
@@ -679,12 +727,13 @@ class PlannerAgent:
             print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
         print(f"{'='*60}")
         
-        # Create tools based on allowed_playbooks
-        tools = self._create_tools(allowed_playbooks, enforced_repo_id=repo_id)
+        # Create tools and bind them — both are per-call, never stored on self
+        tools          = self._create_tools(allowed_playbooks, enforced_repo_id=repo_id)
+        llm_with_tools = self._get_chat_model().bind_tools(tools)
         print(f"[PLANNER] Available tools: {[t.name for t in tools]}")
-        
-        # Build workflow with these tools
-        workflow = self._build_workflow(tools)
+
+        # Build workflow — llm_with_tools and on_update captured in closures, not on self
+        workflow = self._build_workflow(tools, llm_with_tools, on_update=on_update)
         
         # Build PRE-FLIGHT Graphify topology context
         topology_context = self._build_architecture_context(repo_id)
@@ -749,27 +798,55 @@ class PlannerAgent:
     def _build_architecture_context(self, repo_id: str | list[str] | None) -> str:
         """
         Executes a Graphify Pre-flight hook.
-        Retrieves Topology (Leiden Communities & God Nodes) directly from 
-        Küzü DB to prevent the LLM from hallucinating codebase structure during tool calls.
+        Retrieves Topology (Communities & Key Components) directly from 
+        Graphify DB to provide a high-level architectural map for the LLM.
         """
         if not repo_id or isinstance(repo_id, list):
             return ""
             
         try:
             from codemind.graph.graph_db import GraphifyAdapter
-            from codemind.graph.cluster_topology import TopologyClusterer
             db = GraphifyAdapter()
-            clusterer = TopologyClusterer(db)
-            
-            god_nodes = clusterer.get_god_nodes(repo_id, top_n=5)
-            if not god_nodes:
+            G = db.get_graph(repo_id)
+            if not G or len(G.nodes) == 0:
                 return ""
                 
-            report = "The codebase contains the following fundamental core components (God Nodes):\n"
-            for node in god_nodes:
-                report += f"- {node['node_id']} (in-degree edges: {node['in_degree']})\n"
+            # Group nodes by community/cluster
+            communities = {}
+            for n, data in G.nodes(data=True):
+                cid = data.get("community")
+                if cid is None: continue
+                if cid not in communities:
+                    communities[cid] = {"files": set(), "symbols": []}
                 
-            report += "\nUse this topological knowledge BEFORE searching raw files."
+                if data.get("type") == "File":
+                    communities[cid]["files"].add(data.get("label", n))
+                elif data.get("type") in ("Function", "Class"):
+                    communities[cid]["symbols"].append({
+                        "label": data.get("label", n),
+                        "degree": G.in_degree(n) if G.is_directed() else G.degree(n)
+                    })
+
+            if not communities:
+                return ""
+
+            report = "The codebase is organized into the following logical topological clusters:\n\n"
+            # Sort communities by size/importance
+            sorted_cids = sorted(communities.keys(), key=lambda c: len(communities[c]["files"]), reverse=True)
+            
+            for cid in sorted_cids[:5]:  # Top 5 communities
+                cdata = communities[cid]
+                files = sorted(list(cdata["files"]))[:5]
+                symbols = sorted(cdata["symbols"], key=lambda s: s["degree"], reverse=True)[:3]
+                
+                report += f"### Module/Cluster {cid}\n"
+                report += f"- Primary Files: {', '.join(files)}\n"
+                if symbols:
+                    sym_desc = ", ".join([f"{s['label']} (links: {s['degree']})" for s in symbols])
+                    report += f"- Structural Pillars: {sym_desc}\n"
+                report += "\n"
+                
+            report += "Use this topological map to orient your search towards the most relevant modules."
             return report
         except Exception as e:
             print(f"[PLANNER] Pre-flight Graphify hook failed: {e}")

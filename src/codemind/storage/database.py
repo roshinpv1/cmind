@@ -2,7 +2,7 @@
 Database setup and session management.
 
 Provides SQLAlchemy engine and session configuration.
-Graph storage has been moved to Kuzu — this file handles metadata only.
+Code-structure graphs use Graphify (see codemind.graph); this file handles relational metadata only.
 """
 
 from pathlib import Path

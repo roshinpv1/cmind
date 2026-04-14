@@ -295,8 +295,23 @@ class GitRepoManager:
         auth = self._cred_provider.resolve(repo_url, token=token)
         callbacks = auth.callbacks
 
-        repo_name = self._extract_repo_name(repo_url)
-        local_path = self.cache_dir / repo_name / branch
+        repo_id    = self._get_repo_id(repo_url, branch)
+        local_path = self.cache_dir / repo_id / "repo"
+
+        # Migrate legacy clone layout: {cache}/{repo_name}/{branch} → {cache}/{repo_id}/repo
+        repo_name   = self._extract_repo_name(repo_url)
+        legacy_path = self.cache_dir / repo_name / branch
+        if legacy_path.exists() and not local_path.exists():
+            logger.info(
+                "Migrating repo clone from legacy path %s → %s", legacy_path, local_path
+            )
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy_path), str(local_path))
+            # Clean up empty parent dir left behind
+            try:
+                legacy_path.parent.rmdir()
+            except OSError:
+                pass
 
         if local_path.exists():
             self._update_existing(local_path, repo_url, branch, callbacks, auth.token)
@@ -304,7 +319,7 @@ class GitRepoManager:
             self._clone_new(repo_url, branch, local_path, callbacks, auth.token)
 
         repo = pygit2.Repository(str(local_path))
-        return local_path, self._get_repo_id(repo_url, branch), str(repo.head.target)
+        return local_path, repo_id, str(repo.head.target)
 
     # --- Clone / Update ---
 
