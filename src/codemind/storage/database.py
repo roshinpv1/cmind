@@ -33,25 +33,6 @@ class IndexRun(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class SymbolRecord(Base):
-    """Queryable symbols table — classes, functions, methods, etc."""
-
-    __tablename__ = "symbols"
-
-    symbol_id: Mapped[str] = mapped_column(String, primary_key=True)  # hash(repo, file, type, name)
-    repo_id: Mapped[str] = mapped_column(String, index=True)
-    file_path: Mapped[str] = mapped_column(String, index=True)
-    symbol_name: Mapped[str] = mapped_column(String, index=True)
-    symbol_type: Mapped[str] = mapped_column(String, index=True)  # class|function|method|interface
-    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
-    language: Mapped[str | None] = mapped_column(String, nullable=True)
-    start_line: Mapped[int] = mapped_column(Integer, default=0)
-    end_line: Mapped[int] = mapped_column(Integer, default=0)
-    parent_symbol_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    docstring: Mapped[str | None] = mapped_column(Text, nullable=True)
-    commit_sha: Mapped[str | None] = mapped_column(String, nullable=True)
-
-
 class CommitSnapshot(Base):
     """Tracks commit history for each repository."""
 

@@ -209,8 +209,6 @@ class IndexingWorkflow:
                     self.storage.delete_chunks_by_file(state.repo_id, files_to_purge)
                     if getattr(self, "graph", None):
                         self.graph.delete_file_nodes(state.repo_id, files_to_purge)
-                    if getattr(self, "manifest", None):
-                        self.manifest.delete_symbols_by_file(state.repo_id, files_to_purge)
                 except Exception as purge_err:
                     print(f"[WORKFLOW] ⚠️ Non-fatal error purging old data: {purge_err}")
             # -----------------------------------------
@@ -496,70 +494,7 @@ class IndexingWorkflow:
             print(f"[MANIFEST] ❌ Repository creation/update failed: {e}")
             return state
 
-        # ── Phase 2: Persist symbols (OPTIONAL — failure is non-fatal) ───
-        try:
-            symbols_to_persist = []
-            graph_nodes = state.graphify_data.get("nodes", [])
-            
-            # Language map for manifest consistency
-            LANG_EXT_MAP = {
-                ".py": "python", ".js": "javascript", ".ts": "typescript", 
-                ".go": "go", ".java": "java", ".sol": "solidity", ".rs": "rust"
-            }
-            
-            for node in graph_nodes:
-                # Map Graphify types to manifest types
-                raw_type = node.get("type", "").lower()
-                if raw_type not in ("function", "method", "class", "interface", "struct", "trait", "enum"):
-                    continue
-                
-                symbol_type = raw_type
-                if raw_type in ("struct", "interface", "trait", "enum"):
-                    symbol_type = "class" # Down-sample for search consistency
-                
-                # Derive start_line from source_location ("L10")
-                loc = node.get("source_location", "L0")
-                start_line = 0
-                if loc.startswith("L"):
-                    try: start_line = int(loc[1:])
-                    except: pass
-                
-                # Clean up symbol name (strip '()' for functions/methods)
-                name = node["label"].rstrip("()")
-                if name.startswith("."): name = name[1:] # Method dot-prefix
-                
-                # Determine language from source_file
-                file_path = node.get("source_file", "")
-                ext = Path(file_path).suffix.lower()
-                language = LANG_EXT_MAP.get(ext, ext[1:] if ext else "unknown")
-
-                symbols_to_persist.append({
-                    "symbol_id": node["id"],
-                    "repo_id": state.repo_id,
-                    "file_path": file_path,
-                    "symbol_name": name,
-                    "symbol_type": symbol_type,
-                    "signature": node["label"], 
-                    "language": language,
-                    "start_line": start_line,
-                    "end_line": node.get("end_line", start_line),
-                    "docstring": node.get("docstring"),
-                    "parent_symbol_id": node.get("parent_id"),
-                    "commit_sha": state.commit_hash,
-                })
-            
-            if symbols_to_persist:
-                print(f"[MANIFEST] Syncing {len(symbols_to_persist)} symbols from Graphify results...")
-                count = self.manifest.upsert_symbols(state.repo_id, symbols_to_persist)
-                state.symbols_extracted = count
-                print(f"[MANIFEST] ✅ Persisted {count} symbols")
-
-        except Exception as e:
-            print(f"[MANIFEST] ⚠️ Symbol persistence failed (non-fatal): {e}")
-            import traceback
-            traceback.print_exc()
-
-        # ── Phase 3: Save commit snapshot (OPTIONAL) ─────────────────────
+        # ── Phase 2: Save commit snapshot (OPTIONAL) ─────────────────────
         if state.commit_hash:
             try:
                 self.manifest.save_commit_snapshot(

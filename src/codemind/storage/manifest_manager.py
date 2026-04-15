@@ -11,7 +11,7 @@ from pathlib import Path
 
 from codemind.indexer.models import FileChange
 
-from .database import CommitSnapshot, Database, IndexRun, SymbolRecord
+from .database import CommitSnapshot, Database, IndexRun
 from .db_factory import get_database
 from .models import RepositoryManifest
 
@@ -322,98 +322,6 @@ class ManifestManager:
                 .order_by(IndexRun.started_at.desc())
                 .all()
             )
-
-    # ── Symbol Operations ────────────────────────────────────────────────
-
-    def delete_symbols_by_file(self, repo_id: str, file_paths: list[str]) -> int:
-        """
-        Delete all symbols originating from specific files.
-        Use during delta indexing to purge old signatures before generating new ones.
-        """
-        if not file_paths:
-            return 0
-            
-        with self.db.get_session() as session:
-            deleted = session.query(SymbolRecord).filter(
-                SymbolRecord.repo_id == repo_id,
-                SymbolRecord.file_path.in_(file_paths)
-            ).delete(synchronize_session=False)
-            
-            if deleted:
-                session.commit()
-                print(f"[MANIFEST] ✅ Purged {deleted} old symbols for {len(file_paths)} files")
-            return deleted
-
-    def upsert_symbols(self, repo_id: str, symbols: list[dict]) -> int:
-        """Batch upsert symbols for a repository.
-        
-        Deletes existing symbols for the affected files to avoid UNIQUE conflicts
-        without wiping out symbols for unchanged files.
-        
-        Args:
-            repo_id: Repository ID
-            symbols: List of dicts with: symbol_id, file_path, symbol_name, 
-                     symbol_type, signature, language, start_line, end_line,
-                     parent_symbol_id, docstring, commit_sha
-        
-        Returns:
-            Number of symbols upserted
-        """
-        if not symbols:
-            return 0
-
-        # Deduplicate by symbol_id — large repos can produce duplicates
-        # (e.g., same file path via symlinks, re-exported symbols, etc.)
-        deduped: dict[str, dict] = {}
-        for sym in symbols:
-            deduped[sym["symbol_id"]] = sym
-        unique_symbols = list(deduped.values())
-        
-        if len(unique_symbols) < len(symbols):
-            print(f"[MANIFEST] Deduplicated {len(symbols)} → {len(unique_symbols)} symbols (removed {len(symbols) - len(unique_symbols)} duplicates)")
-
-        with self.db.get_session() as session:
-            # Drop old symbols only for exactly the files we are updating
-            affected_files = {sym.get("file_path") for sym in unique_symbols if sym.get("file_path")}
-            if affected_files:
-                deleted = session.query(SymbolRecord).filter(
-                    SymbolRecord.repo_id == repo_id,
-                    SymbolRecord.file_path.in_(list(affected_files))
-                ).delete(synchronize_session=False)
-                if deleted:
-                    print(f"[MANIFEST] Deleted {deleted} existing symbols for {len(affected_files)} affected files")
-
-            for sym in unique_symbols:
-                record = SymbolRecord(
-                    symbol_id=sym["symbol_id"],
-                    repo_id=repo_id,
-                    file_path=sym.get("file_path", ""),
-                    symbol_name=sym.get("symbol_name", ""),
-                    symbol_type=sym.get("symbol_type", ""),
-                    signature=sym.get("signature"),
-                    language=sym.get("language"),
-                    start_line=sym.get("start_line", 0),
-                    end_line=sym.get("end_line", 0),
-                    parent_symbol_id=sym.get("parent_symbol_id"),
-                    docstring=sym.get("docstring"),
-                    commit_sha=sym.get("commit_sha"),
-                )
-                session.add(record)
-        
-            session.commit()
-            return len(unique_symbols)
-
-    def get_symbols(
-        self, repo_id: str, file_path: str | None = None, symbol_type: str | None = None
-    ) -> list[SymbolRecord]:
-        """Query symbols for a repository."""
-        with self.db.get_session() as session:
-            query = session.query(SymbolRecord).filter_by(repo_id=repo_id)
-            if file_path:
-                query = query.filter_by(file_path=file_path)
-            if symbol_type:
-                query = query.filter_by(symbol_type=symbol_type)
-            return query.all()
 
     # ── Commit Snapshot Operations ───────────────────────────────────────
 
