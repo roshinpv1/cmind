@@ -44,6 +44,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.runnables import Runnable
 
 from .base import LLMDriver, LLMConfig
+from .content_guard import get_content_guard
 from .token_counter import count_tokens, truncate_to_tokens
 
 
@@ -627,6 +628,14 @@ class CmindChatModel(BaseChatModel):
                 system_prompt = shrunk_sys
                 user_prompt = shrunk_usr
         
+        # Mask sensitive patterns before sending to the LLM
+        guard = get_content_guard()
+        if guard.enabled:
+            if system_prompt:
+                system_prompt, _ = guard.mask(system_prompt)
+                driver_kwargs["system_prompt"] = system_prompt
+            user_prompt, _ = guard.mask(user_prompt)
+
         # Call the existing driver
         result_text = await self.driver.generate(user_prompt, **driver_kwargs)
         
