@@ -25,18 +25,22 @@ from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
+from .final_state import evaluate_final_state
 from .orchestration_controller import NextAction, OrchestrationController
 from .orchestration_policies import MIN_REPO_TOOL_CALLS, should_force_continuation
 
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-_MAX_ITER_DEFAULT = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "12"))
+_MAX_ITER_DEFAULT = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "50"))
 _THINK_FRACTION   = float(os.getenv("CODEMIND_THINK_FRACTION", "0.25"))
 _MAX_THINK_TOKENS = int(os.getenv("CODEMIND_MAX_THINK_TOKENS", "4096"))
 _MIN_THINK_TOKENS = int(os.getenv("CODEMIND_MIN_THINK_TOKENS", "512"))
 _SYNTH_MAX_TOKENS = int(os.getenv("CODEMIND_SYNTH_MAX_TOKENS", "8192"))
 _TRACE_DIR        = os.getenv("CODEMIND_TRACE_DIR", "/tmp")
+_MAX_FINALIZATION_RETRIES = max(
+    1, int(os.getenv("CODEMIND_FINALIZATION_MAX_RETRIES", "2"))
+)
 
 _AGENT_DIRECTIVE = """
 ### AGENT PROTOCOL
@@ -400,6 +404,8 @@ class ReActAgent:
         prefetch_block: str = "",
         max_iterations: int = _MAX_ITER_DEFAULT,
         playbook_name: str = "react",
+        output_type: str = "",
+        output_schema_model: object | None = None,
     ) -> AgentResult:
         """
         Run the ReAct loop to completion.
@@ -414,6 +420,7 @@ class ReActAgent:
         messages: list[BaseMessage] = [HumanMessage(content=goal)]
         tool_calls_made = 0
         generated_files: list[str] = []
+        finalization_retries = 0
         orchestration = OrchestrationController(
             repo_id=self._repo_id,
             dispatcher=self.dispatcher,
@@ -673,6 +680,27 @@ class ReActAgent:
                         f"  Iter {iteration}: empty response — synthesising from tool data"
                     )
                     answer = await self._synthesize(messages, goal, playbook_name, reason="empty_response")
+                decision = evaluate_final_state(
+                    response_text=answer,
+                    repo_id=self._repo_id,
+                    tool_calls_made=tool_calls_made,
+                    has_tool_history=orchestration.has_tool_history(messages),
+                    output_type=output_type,
+                    output_schema_model=output_schema_model,
+                )
+                if not decision.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
+                    finalization_retries += 1
+                    logs.append(
+                        f"  Iter {iteration}: final-state gate rejected response "
+                        f"({decision.reason}); retry {finalization_retries}/{_MAX_FINALIZATION_RETRIES}"
+                    )
+                    messages.append(
+                        HumanMessage(
+                            content=decision.continue_prompt
+                            or "Response is not final yet. Continue the task."
+                        )
+                    )
+                    continue
                 logs.append(f"ReAct finished naturally at iteration {iteration}")
                 return AgentResult(
                     answer=answer,

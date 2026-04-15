@@ -19,7 +19,7 @@ The agent exits the loop naturally when it produces a response with no
 new tool calls.  max_iterations is a safety net against infinite loops
 and runaway API cost — it is NOT a measure of how thorough the agent
 should be.  Playbooks do NOT need to specify max_iterations; the global
-default (CODEMIND_REACT_MAX_ITERATIONS, default 20) is intentionally
+default (CODEMIND_REACT_MAX_ITERATIONS, default 50) is intentionally
 generous so the agent always has room to explore fully.
 
 Parallel execution safety
@@ -58,12 +58,12 @@ logger = logging.getLogger(__name__)
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
 # Safety ceiling — agent exits naturally before this in normal operation.
-# Raised to 20 so deep-analysis playbooks are never cut off prematurely.
+# Raised to 50 so deep-analysis playbooks are never cut off prematurely.
 # Override per-deployment with the env var; playbooks should NOT hardcode this.
-_REACT_DEFAULT_ITERS   = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "20"))
+_REACT_DEFAULT_ITERS   = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "50"))
 # Seeded playbooks already have context injected — they typically finish in 2-4
 # turns, but give them a bit more room so they can still call tools if needed.
-_SEEDED_DEFAULT_ITERS  = int(os.getenv("CODEMIND_SEEDED_MAX_ITERATIONS", "8"))
+_SEEDED_DEFAULT_ITERS  = int(os.getenv("CODEMIND_SEEDED_MAX_ITERATIONS", "50"))
 # max chars to inject from pre-seeded vector search
 _SEED_MAX_CHARS        = int(os.getenv("CODEMIND_SEED_MAX_CHARS", "40000"))
 
@@ -237,6 +237,9 @@ class PlaybookExecutor:
             repo_id_for_prompt = None
         if isinstance(repo_id_for_prompt, list):
             repo_id_for_prompt = repo_id_for_prompt[0] if repo_id_for_prompt else None
+        output_schema_model = get_schema_for_playbook(
+            playbook.name, playbook_def=playbook
+        )
         sys_prompt = self._build_system_prompt(
             playbook, seed_context, repo_id=repo_id_for_prompt
         )
@@ -319,6 +322,8 @@ class PlaybookExecutor:
             prefetch_block=prefetch_block,
             max_iterations=max_iter,
             playbook_name=playbook_name,
+            output_type=getattr(playbook, "output_type", "") or "",
+            output_schema_model=output_schema_model,
         )
 
         logs = list(result.logs)
