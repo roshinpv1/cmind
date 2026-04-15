@@ -277,6 +277,8 @@ class AgentResult:
     tool_calls_made: int
     generated_files: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
+    quality_scorecards: list[dict] = field(default_factory=list)
+    quality_summary: dict = field(default_factory=dict)
     error: str | None = None
 
 
@@ -421,6 +423,8 @@ class ReActAgent:
         tool_calls_made = 0
         generated_files: list[str] = []
         finalization_retries = 0
+        quality_scorecards: list[dict] = []
+        cumulative_evidence_score = 0.0
         orchestration = OrchestrationController(
             repo_id=self._repo_id,
             dispatcher=self.dispatcher,
@@ -428,6 +432,80 @@ class ReActAgent:
             max_consecutive_parse_failures=_MAX_CONSECUTIVE_PARSE_FAILURES,
             max_forced_recovery_steps=_MAX_FORCED_RECOVERY_STEPS,
         )
+
+        def _append_quality_scorecard(
+            *,
+            iteration_idx: int,
+            response_text: str = "",
+            tool_calls_this_turn: int = 0,
+            turn_outcomes: list[dict] | None = None,
+            stage: str = "continue",
+            final_gate_reason: str = "",
+        ) -> None:
+            nonlocal cumulative_evidence_score
+            outcomes = turn_outcomes or []
+            turn_evidence = sum(
+                float(o.get("evidence_score", 0.0) or 0.0) for o in outcomes
+            )
+            cumulative_evidence_score += turn_evidence
+            parse_penalty = orchestration.parse_failure_streak * 8
+            no_evidence_penalty = orchestration.no_evidence_streak * 10
+            planning_penalty = 12 if should_force_continuation(response_text or "", tool_calls_made) else 0
+            base = (
+                40
+                + min(35, int(turn_evidence * 12))
+                + min(15, tool_calls_this_turn * 5)
+                - parse_penalty
+                - no_evidence_penalty
+                - planning_penalty
+            )
+            quality_score = max(0, min(100, int(base)))
+            quality_scorecards.append(
+                {
+                    "iteration": int(iteration_idx),
+                    "stage": stage,
+                    "tool_calls_this_turn": int(tool_calls_this_turn),
+                    "turn_evidence_score": round(turn_evidence, 3),
+                    "cumulative_evidence_score": round(cumulative_evidence_score, 3),
+                    "parse_failure_streak": int(orchestration.parse_failure_streak),
+                    "no_evidence_streak": int(orchestration.no_evidence_streak),
+                    "planning_or_giveup_detected": bool(
+                        should_force_continuation(response_text or "", tool_calls_made)
+                    ),
+                    "final_gate_reason": final_gate_reason or "",
+                    "quality_score": quality_score,
+                }
+            )
+
+        def _quality_summary() -> dict:
+            if not quality_scorecards:
+                return {
+                    "iterations_scored": 0,
+                    "avg_quality_score": 0.0,
+                    "final_quality_score": 0.0,
+                    "cumulative_evidence_score": round(cumulative_evidence_score, 3),
+                    "finalization_retries": int(finalization_retries),
+                }
+            avg_quality = sum(float(s.get("quality_score", 0.0)) for s in quality_scorecards) / len(quality_scorecards)
+            return {
+                "iterations_scored": len(quality_scorecards),
+                "avg_quality_score": round(avg_quality, 2),
+                "final_quality_score": float(quality_scorecards[-1].get("quality_score", 0.0)),
+                "cumulative_evidence_score": round(cumulative_evidence_score, 3),
+                "finalization_retries": int(finalization_retries),
+            }
+
+        def _result(*, answer: str, iterations: int, error: str | None = None) -> AgentResult:
+            return AgentResult(
+                answer=answer,
+                iterations=iterations,
+                tool_calls_made=tool_calls_made,
+                generated_files=generated_files,
+                logs=logs,
+                quality_scorecards=quality_scorecards,
+                quality_summary=_quality_summary(),
+                error=error,
+            )
 
         for iteration in range(max_iterations + 1):
 
@@ -456,13 +534,13 @@ class ReActAgent:
             if iteration >= max_iterations:
                 logs.append(f"Max iterations ({max_iterations}) reached — synthesising")
                 answer = await self._synthesize(messages, goal, playbook_name, reason="max_iterations")
-                return AgentResult(
-                    answer=answer,
-                    iterations=iteration,
-                    tool_calls_made=tool_calls_made,
-                    generated_files=generated_files,
-                    logs=logs,
+                _append_quality_scorecard(
+                    iteration_idx=iteration,
+                    response_text=answer,
+                    stage="max_iterations_synthesis",
+                    final_gate_reason="max_iterations",
                 )
+                return _result(answer=answer, iterations=iteration)
 
             # ── call LLM ──────────────────────────────────────────────────
             try:
@@ -474,14 +552,12 @@ class ReActAgent:
             except Exception as exc:
                 logger.error("LLM error at iteration %d: %s", iteration, exc)
                 logs.append(f"LLM error at iteration {iteration}: {exc}")
-                return AgentResult(
-                    answer="",
-                    iterations=iteration,
-                    tool_calls_made=tool_calls_made,
-                    generated_files=generated_files,
-                    logs=logs,
-                    error=str(exc),
+                _append_quality_scorecard(
+                    iteration_idx=iteration,
+                    stage="llm_error",
+                    final_gate_reason="llm_error",
                 )
+                return _result(answer="", iterations=iteration, error=str(exc))
 
             self._write_trace(playbook_name, iteration, response)
 
@@ -554,12 +630,28 @@ class ReActAgent:
                     tool_calls_made += 1
                     if decision.prompt:
                         messages.append(HumanMessage(content=decision.prompt))
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        tool_calls_this_turn=1,
+                        turn_outcomes=[
+                            orchestration.tool_outcome_meta(tm)
+                            for tm in tool_messages
+                            if isinstance(tm, ToolMessage)
+                        ],
+                        stage="forced_recovery_no_tool_turn",
+                    )
                     continue
                 if decision.action == NextAction.CONTINUE_PROMPT and decision.prompt:
                     logs.append(
                         f"  Iter {iteration}: orchestration requested continuation prompt"
                     )
                     messages.append(HumanMessage(content=decision.prompt))
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        response_text=str(response.content or ""),
+                        stage="continue_prompt_no_tool_turn",
+                        final_gate_reason="orchestration_continue_prompt",
+                    )
                     continue
                 if decision.action == NextAction.SYNTHESIZE and decision.synth_reason:
                     logs.append(
@@ -570,13 +662,13 @@ class ReActAgent:
                     answer = await self._synthesize(
                         messages, goal, playbook_name, reason=decision.synth_reason
                     )
-                    return AgentResult(
-                        answer=answer,
-                        iterations=iteration,
-                        tool_calls_made=tool_calls_made,
-                        generated_files=generated_files,
-                        logs=logs,
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        response_text=answer,
+                        stage="insufficient_evidence_synthesis",
+                        final_gate_reason=decision.synth_reason,
                     )
+                    return _result(answer=answer, iterations=iteration)
 
                 # Safety net: if the model produced code as prose but never
                 # called write_file_system, try to persist it.  This is a
@@ -619,13 +711,13 @@ class ReActAgent:
                             + str(response.content or "")
                         )
                         logs.append(f"ReAct finished with auto-manifest writes at iteration {iteration}")
-                        return AgentResult(
-                            answer=answer,
-                            iterations=iteration,
-                            tool_calls_made=tool_calls_made,
-                            generated_files=generated_files,
-                            logs=logs,
+                        _append_quality_scorecard(
+                            iteration_idx=iteration,
+                            response_text=answer,
+                            tool_calls_this_turn=len(synthetic_calls),
+                            stage="auto_manifest_write_final",
                         )
+                        return _result(answer=answer, iterations=iteration)
 
                     code_blocks = _extract_code_blocks_from_messages(messages)
                     if code_blocks:
@@ -664,13 +756,13 @@ class ReActAgent:
                             + str(response.content or "")
                         )
                         logs.append(f"ReAct finished with auto-extracted writes at iteration {iteration}")
-                        return AgentResult(
-                            answer=answer,
-                            iterations=iteration,
-                            tool_calls_made=tool_calls_made,
-                            generated_files=generated_files,
-                            logs=logs,
+                        _append_quality_scorecard(
+                            iteration_idx=iteration,
+                            response_text=answer,
+                            tool_calls_this_turn=len(synthetic_calls),
+                            stage="auto_codeblock_write_final",
                         )
+                        return _result(answer=answer, iterations=iteration)
 
                 # Normal finish — either the agent completed its analysis or
                 # there genuinely was nothing to do.
@@ -700,15 +792,21 @@ class ReActAgent:
                             or "Response is not final yet. Continue the task."
                         )
                     )
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        response_text=answer,
+                        stage="final_state_rejected",
+                        final_gate_reason=decision.reason,
+                    )
                     continue
+                if decision.is_final:
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        response_text=answer,
+                        stage="final_state_accepted",
+                    )
                 logs.append(f"ReAct finished naturally at iteration {iteration}")
-                return AgentResult(
-                    answer=answer,
-                    iterations=iteration,
-                    tool_calls_made=tool_calls_made,
-                    generated_files=generated_files,
-                    logs=logs,
-                )
+                return _result(answer=answer, iterations=iteration)
 
             # ── dispatch tool calls ───────────────────────────────────────
             messages.append(response)
@@ -764,14 +862,28 @@ class ReActAgent:
                 extra_tool_messages = await self.dispatcher.dispatch([decision.tool_call])
                 messages.extend(extra_tool_messages)
                 tool_calls_made += 1
+                _append_quality_scorecard(
+                    iteration_idx=iteration,
+                    tool_calls_this_turn=call_count + 1,
+                    turn_outcomes=turn_outcomes,
+                    stage="forced_recovery_after_tool_turn",
+                )
                 continue
+
+            _append_quality_scorecard(
+                iteration_idx=iteration,
+                response_text=str(response.content or ""),
+                tool_calls_this_turn=call_count,
+                turn_outcomes=turn_outcomes,
+                stage="tool_turn_complete",
+            )
 
         # Unreachable in practice (handled above), but kept as safety net
         answer = await self._synthesize(messages, goal, playbook_name, reason="max_iterations")
-        return AgentResult(
-            answer=answer,
-            iterations=max_iterations,
-            tool_calls_made=tool_calls_made,
-            generated_files=generated_files,
-            logs=logs,
+        _append_quality_scorecard(
+            iteration_idx=max_iterations,
+            response_text=answer,
+            stage="fallback_synthesis",
+            final_gate_reason="loop_fallback",
         )
+        return _result(answer=answer, iterations=max_iterations)

@@ -330,6 +330,8 @@ class PlaybookExecutor:
         logs.append(
             f"Completed: iterations={result.iterations} tool_calls={result.tool_calls_made}"
         )
+        quality_scorecards = list(result.quality_scorecards or [])
+        quality_summary = dict(result.quality_summary or {})
 
         generated_files = list(dict.fromkeys(result.generated_files))
         effective_error = result.error
@@ -356,6 +358,14 @@ class PlaybookExecutor:
                 "playbook":      playbook_name,
                 "generated_files": generated_files,
                 "claimed_changed_files": claimed_changed_files,
+                "quality_scorecards": quality_scorecards,
+                "quality_summary": quality_summary,
+                "context": {
+                    "sources": [],
+                    "evidence_count": quality_summary.get("cumulative_evidence_score", 0),
+                    "log_count": len(logs),
+                    "quality": quality_summary,
+                },
             },
             "error": effective_error,
             "logs":  logs,
