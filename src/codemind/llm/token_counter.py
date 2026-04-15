@@ -127,7 +127,7 @@ def get_context_window() -> int:
     explicit = os.environ.get("LLM_CONTEXT_WINDOW")
     if explicit:
         return int(explicit)
-    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+    max_tokens = int(os.environ.get("LLM_MAX_TOKENS", "30000"))
     return max_tokens * 4
 
 
@@ -137,4 +137,4 @@ def get_max_output_tokens() -> int:
     Returns:
         Max output tokens
     """
-    return int(os.environ.get("LLM_MAX_TOKENS", "4096"))
+    return int(os.environ.get("LLM_MAX_TOKENS", "30000"))

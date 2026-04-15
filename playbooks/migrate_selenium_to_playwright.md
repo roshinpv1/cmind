@@ -4,7 +4,6 @@ version: "2.0"
 description: Comprehensive Selenium-to-Playwright migration analyzer with success metrics, validation gates, rollback strategies, and phased rollout scoring. Maps browser initialization, locators, actions, waits, and assertions to Playwright-native equivalents while addressing critical mindset shifts.
 category: migration
 complexity: medium
-max_iterations: 10
 ---
 
 # Playbook: migrate_selenium_to_playwright

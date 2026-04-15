@@ -6,7 +6,6 @@ description: >
   IMPORTANT PLANNER INSTRUCTION: When invoking this playbook tool, you MUST pass the exact absolute path of the AccelQ files (e.g., /Users/roshinpv/Desktop/acclq) in the 'query' parameter. DO NOT omit the path!
 category: migration
 complexity: medium
-max_iterations: 1000
 ---
 
 # Playbook: migrate_accelq_to_playwright

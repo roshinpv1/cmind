@@ -4,7 +4,6 @@ version: "1.0"
 description: Deep multi-dimensional codebase analysis that answers any user query with evidence-backed findings
 category: analysis
 complexity: high
-max_iterations: 5
 ---
 
 # Playbook: analyze_codebase

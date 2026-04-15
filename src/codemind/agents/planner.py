@@ -27,7 +27,13 @@ import uuid
 from .planner_state import PlannerState
 
 
-def create_playbook_meta_tools(registry, executor, allowed_playbooks=None, enforced_repo_id=None):
+def create_playbook_meta_tools(
+    registry,
+    executor,
+    allowed_playbooks=None,
+    enforced_repo_id=None,
+    execution_context: dict | None = None,
+):
     """Create LangChain tools that wrap playbook execution.
     
     Each playbook becomes a callable tool that the planner LLM can invoke.
@@ -65,22 +71,36 @@ def create_playbook_meta_tools(registry, executor, allowed_playbooks=None, enfor
                     user_input["repo_id"] = enforced_repo_id
                 elif repo_id and repo_id != "latest":
                     user_input["repo_id"] = repo_id
+                if execution_context:
+                    user_input["execution_context"] = execution_context
                 
                 try:
                     result = await executor.execute(pb_name_inner, user_input)
                     if result.get("success"):
                         outputs = result.get("outputs", {})
+                        gen_files = outputs.get("generated_files") or []
                         # If a tool was executed (e.g. save_catalog_entry),
                         # return the human-readable result so the planner
                         # can detect completion and auto-finish.
                         if outputs.get("tool_executed"):
-                            return outputs.get("result", "Tool executed successfully.")
+                            res_text = outputs.get("result", "Tool executed successfully.")
+                            if gen_files:
+                                return json.dumps({
+                                    "result": str(res_text),
+                                    "outputs": {"generated_files": gen_files},
+                                }, default=str)
+                            return res_text
                         # Return the structured data if available so _finish parses it natively
                         if outputs.get("data"):
-                            # Pydantic dicts might have non-serializable objects (like dates), default=str
-                            return json.dumps(outputs["data"], default=str)
+                            data = outputs["data"]
+                            if gen_files and isinstance(data, dict):
+                                data["_generated_files"] = gen_files
+                            return json.dumps(data, default=str)
                         elif outputs.get("result"):
-                            return json.dumps({"result": str(outputs["result"])}, default=str)
+                            payload: dict = {"result": str(outputs["result"])}
+                            if gen_files:
+                                payload["outputs"] = {"generated_files": gen_files}
+                            return json.dumps(payload, default=str)
                         return json.dumps(outputs, default=str)
                     else:
                         return json.dumps({"error": result.get("error", "Playbook failed")})
@@ -118,7 +138,7 @@ class PlannerAgent:
             self._chat_model = CmindChatModel(driver=self.llm)
         return self._chat_model
 
-    def _create_tools(self, allowed_playbooks=None, enforced_repo_id=None):
+    def _create_tools(self, allowed_playbooks=None, enforced_repo_id=None, execution_context: dict | None = None):
         """Return the tool list for this execution (pure, no side-effects)."""
         from ..playbooks.langchain_tools import create_langchain_tools
 
@@ -128,6 +148,7 @@ class PlannerAgent:
         playbook_tools = create_playbook_meta_tools(
             self.registry, self.executor, allowed_playbooks,
             enforced_repo_id=enforced_repo_id,
+            execution_context=execution_context,
         )
         # When playbooks are constrained, strip generic data tools so the
         # planner cannot bypass the playbook-level context management.
@@ -712,7 +733,8 @@ class PlannerAgent:
     async def execute(self, goal: str, repo_id: str | list[str] | None = None,
                       max_iterations: int = 10, on_update=None,
                       allowed_playbooks: list[str] = None,
-                      thread_id: str | None = None) -> dict:
+                      thread_id: str | None = None,
+                      execution_context: dict | None = None) -> dict:
         """Execute planner for a goal.
         
         Same interface as before — drop-in replacement.
@@ -728,7 +750,11 @@ class PlannerAgent:
         print(f"{'='*60}")
         
         # Create tools and bind them — both are per-call, never stored on self
-        tools          = self._create_tools(allowed_playbooks, enforced_repo_id=repo_id)
+        tools          = self._create_tools(
+            allowed_playbooks,
+            enforced_repo_id=repo_id,
+            execution_context=execution_context,
+        )
         llm_with_tools = self._get_chat_model().bind_tools(tools)
         print(f"[PLANNER] Available tools: {[t.name for t in tools]}")
 

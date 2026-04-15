@@ -4,7 +4,6 @@ version: "1.0"
 description: Synthesizes multi-component architecture using catalog components
 category: generation
 complexity: high
-max_iterations: 5
 ---
 
 # Playbook: design_solution

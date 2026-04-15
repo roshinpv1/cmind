@@ -155,6 +155,59 @@ class PlaybookStoreModel(Base):
     created_at: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[int] = mapped_column(Integer, default=0)
 
+
+class AgentRun(Base):
+    """Persistent autonomous agent run record."""
+
+    __tablename__ = "agent_runs"
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    parent_run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    rerun_from_checkpoint: Mapped[str | None] = mapped_column(String, nullable=True)
+    goal: Mapped[str] = mapped_column(Text)
+    repo_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String, default="pending", index=True)  # pending|running|completed|failed
+    mirror_root: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String)  # ISO datetime
+    updated_at: Mapped[str] = mapped_column(String)  # ISO datetime
+    completed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    iterations: Mapped[int] = mapped_column(Integer, default=0)
+    steps_taken: Mapped[int] = mapped_column(Integer, default=0)
+    result_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class AgentStep(Base):
+    """Per-step status for a run (planner iteration/tool phase)."""
+
+    __tablename__ = "agent_steps"
+    __table_args__ = (UniqueConstraint("run_id", "step_index", name="uq_agent_steps_run_step"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    step_index: Mapped[int] = mapped_column(Integer, index=True)
+    step_name: Mapped[str] = mapped_column(String, default="iteration")
+    status: Mapped[str] = mapped_column(String, default="running", index=True)  # running|completed|failed
+    created_at: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[str] = mapped_column(String)
+    input_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    output_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class AgentCheckpoint(Base):
+    """Serialized point-in-time checkpoint for reruns/resume."""
+
+    __tablename__ = "agent_checkpoints"
+    __table_args__ = (UniqueConstraint("run_id", "checkpoint_key", name="uq_agent_checkpoints_run_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String, index=True)
+    checkpoint_key: Mapped[str] = mapped_column(String, index=True)
+    step_index: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[str] = mapped_column(String)
+    state_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
 class Database:
     """Database connection manager."""
 

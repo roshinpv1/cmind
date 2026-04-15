@@ -4,7 +4,6 @@ version: "1.0"
 description: Comprehensive PII exposure and data masking analyzer for web applications. Detects unmasked PII fields, improper redaction, and dangerous quasi-identifier combinations that enable re-identification on any page.
 category: analysis
 complexity: high
-max_iterations: 10
 ---
 
 # Playbook: detect_pii_exposure

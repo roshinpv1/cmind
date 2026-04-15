@@ -1,19 +1,18 @@
 """
-ReAct (Reason + Act) loop for code analysis playbooks.
+ReAct (Reason + Act) loop for playbooks.
 
 Design:
   - Plain async loop — no LangGraph StateGraph, making the flow transparent and debuggable.
-  - Three named phases:
-      Phase A  Architecture map    First turn. Inject graph prefetch; force get_map when the
-                                   model hasn't called any tool yet.
-      Phase B  Targeted exploration LLM-driven tool calls. We dispatch and feed results back.
-      Phase C  Synthesis           When the model stops calling tools, generate the final answer.
+  - The agent autonomously decides which tools to call based on the playbook instructions
+    and the user's goal.  There is NO static classification of playbooks (generation vs
+    analysis).  The agent figures out the right approach.
   - Stop conditions:
-      * Model issues no tool calls and tool history exists  → natural finish (Phase C).
-      * Model issues no tool calls and no tool history      → enforce get_map (Phase A guardrail).
+      * Model issues no tool calls and tool history exists  → natural finish.
+      * Model issues no tool calls and no tool history      → finish with prose answer.
       * iteration >= max_iterations                         → synthesise from collected evidence.
-      * LLM returns empty response with no tool calls       → synthesise.
   - Tool-call repair: plain-text JSON plans are parsed and converted to proper tool_calls.
+  - Safety net: if the model outputs code as prose instead of calling write_file_system,
+    we attempt to persist it automatically (applies to any playbook, not just "generators").
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,25 +36,250 @@ _MIN_THINK_TOKENS = int(os.getenv("CODEMIND_MIN_THINK_TOKENS", "512"))
 _SYNTH_MAX_TOKENS = int(os.getenv("CODEMIND_SYNTH_MAX_TOKENS", "8192"))
 _TRACE_DIR        = os.getenv("CODEMIND_TRACE_DIR", "/tmp")
 
-_STRATEGIC_DIRECTIVE = """
-### DISCOVERY PROTOCOL (follow A → B → C)
+_AGENT_DIRECTIVE = """
+### AGENT PROTOCOL
 
-Phase A – ARCHITECTURE MAP (first turn always)
-  Call `get_map` to get the repository's structural GPS: high-degree nodes, entry points.
-  Read the map to build a prioritised reading list before opening any file.
+You are an autonomous agent. Decide what tools to call based on the task at hand.
 
-Phase B – TARGETED EXPLORATION
-  Use `trace_path`, `get_callers`, `get_callees`, `get_dependencies` to plan a concrete
-  path (entry → sink). Call `get_file_outline` before `read_file` on large modules.
-  Use `search_code` only for specific patterns found via Phase A/B — one call per turn
-  with a combined regex or `queries` array.
-
-Phase C – SYNTHESIS
-  Once you have enough evidence, respond with your final analysis — no more tool calls.
-  Base every claim on the tool data you observed. Do not hallucinate.
-
-RESILIENCE: If a tool reports a feature is disabled, adapt using other tools. Never stop early.
+- Examine the user goal and the playbook instructions to determine the right approach.
+- **For repository analysis tasks**: start by calling `get_map` with the provided repo_id to
+  understand the codebase structure, then use `search_code`, `read_file`, `trace_path`,
+  `get_callers`, `get_callees` etc. to explore deeply before drawing conclusions.
+- **For code generation tasks**: call `write_file_system` to save each generated file to disk.
+- **For general tasks without a repo**: use `write_file_system`, `read_file_system`,
+  `list_file_system` as appropriate, or simply respond with prose if no tool is needed.
+- If a tool returns an error (e.g. missing repo_id), adapt — try a different tool or approach.
+- When you have enough evidence or have completed the task, provide your final answer.
+- Base every claim on the tool data you observed. Do not hallucinate.
+- **IMPORTANT**: Do NOT return a planning summary as your final answer. If you write
+  "next I will explore X", you must IMMEDIATELY call the tools to do so — do not stop.
 """
+
+# Minimum tool calls before we accept a prose response as a final conclusion
+# for repo-scoped analysis tasks.  Set via env var to allow tuning.
+_MIN_REPO_TOOL_CALLS = int(os.getenv("CODEMIND_MIN_REPO_TOOL_CALLS", "3"))
+
+# Phrases that indicate the LLM is writing a planning/transition paragraph
+# rather than a final conclusion.  If we see these in a prose-only response
+# after very few tool calls, we force the agent to keep executing.
+_PLANNING_PHRASES = (
+    "next phase",
+    "next step",
+    "next, i will",
+    "next i will",
+    "will now",
+    "will explore",
+    "will search",
+    "will investigate",
+    "will read",
+    "will proceed",
+    "will focus",
+    "will examine",
+    "phase 2",
+    "phase 3",
+    "phase two",
+    "phase three",
+    "plan to",
+    "plan is to",
+    "my plan",
+    "continue by",
+    "proceed to",
+    "the following steps",
+    "i'll now",
+    "i'll proceed",
+    "i'll explore",
+    "initial step",
+    "initial analysis",
+    "has been initiated",
+    "has been executed",
+    "next steps",
+    "moving on to",
+    "in the next iteration",
+    "the next phase",
+    "the next step",
+    "involves deep",
+    "involves reading",
+    "involves exploring",
+    "focuses on",
+    "phase involves",
+)
+
+# Phrases that indicate the LLM gave up after one or two failing tool calls
+# instead of trying alternative approaches.  When tool_calls_made is very low
+# we treat these the same as planning phrases — the agent must keep going.
+_GIVING_UP_PHRASES = (
+    "not possible to identify",
+    "it is not possible",
+    "cannot identify",
+    "no results were returned",
+    "no results",
+    "no file content",
+    "no endpoints",
+    "no api",
+    "could not find",
+    "unable to find",
+    "unable to determine",
+    "cannot determine",
+    "no data was",
+    "not enough information",
+    "insufficient data",
+    "insufficient information",
+    "without access",
+    "no output was",
+    "nothing was returned",
+    "returned no",
+    "did not return",
+    "does not contain",
+    "no matching",
+    "could not be identified",
+    "cannot be identified",
+    "cannot be determined",
+)
+
+
+def _looks_like_planning(text: str) -> bool:
+    """Return True if *text* reads as an interim plan rather than a final conclusion."""
+    t = text.lower()
+    return any(phrase in t for phrase in _PLANNING_PHRASES)
+
+
+def _should_force_continuation(text: str, tool_calls_made: int) -> bool:
+    """Return True if the agent should be forced to keep exploring.
+
+    Two situations warrant a retry:
+    1. Planning prose — the agent described future work instead of doing it.
+    2. Premature give-up — the agent tried one tool, got no results, and stopped.
+       Only applies when very few tools have been called (< 2), because a genuine
+       conclusion after thorough exploration is fine.
+    """
+    if _looks_like_planning(text):
+        return True
+    if tool_calls_made < 2:
+        t = text.lower()
+        return any(phrase in t for phrase in _GIVING_UP_PHRASES)
+    return False
+
+# ── Code-from-prose extraction ────────────────────────────────────────────────
+
+# Map language hints from code fences to default file names.
+# Only includes actual source/code file types — data/markup formats (JSON, YAML,
+# XML, Markdown) are excluded because the safety net should not auto-save them;
+# those are typically the agent's analysis output, not files to persist.
+_LANG_EXT_MAP = {
+    "html": "index.html",
+    "htm": "index.html",
+    "python": "main.py",
+    "py": "main.py",
+    "javascript": "index.js",
+    "js": "index.js",
+    "typescript": "index.ts",
+    "ts": "index.ts",
+    "css": "styles.css",
+    "java": "Main.java",
+    "go": "main.go",
+    "rust": "main.rs",
+    "c": "main.c",
+    "cpp": "main.cpp",
+    "ruby": "main.rb",
+    "php": "index.php",
+    "sql": "schema.sql",
+    "sh": "script.sh",
+    "bash": "script.sh",
+    "shell": "script.sh",
+}
+
+# Languages that are data/markup formats, not source files.
+# The prose-extraction safety net skips these — they are almost always the
+# agent's final analysis output (e.g. a JSON audit report), not files to save.
+# If the agent genuinely wants to persist JSON/YAML it should call write_file_system.
+_DATA_ONLY_LANGS = frozenset({
+    "json", "yaml", "yml", "xml", "text", "txt", "markdown", "md", "csv", "toml",
+})
+
+_CODE_BLOCK_RE = re.compile(
+    r"```(\w*)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+
+_INLINE_HTML_RE = re.compile(
+    r"(<!DOCTYPE\s+html[^>]*>.*?</html>)",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _extract_code_blocks_from_messages(messages: list[BaseMessage]) -> list[tuple[str, str]]:
+    """Scan AI messages for code blocks (fenced or inline) and return (filename, content) pairs.
+
+    Handles:
+    - Standard fenced code blocks (```lang ... ```)
+    - Inline HTML documents (<!DOCTYPE html> ... </html>)
+    - Code wrapped in model-specific thought tags (<|channel>thought ... <channel|>)
+    """
+    results: list[tuple[str, str]] = []
+    seen_content: set[int] = set()
+
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+        text = str(msg.content or "")
+
+        # Strip model-specific thought channel tags
+        text_clean = re.sub(
+            r"<\|channel\>thought.*?<channel\|>",
+            lambda m: m.group(0),  # keep the inner text
+            text,
+            flags=re.DOTALL,
+        )
+
+        # Strategy 1: fenced code blocks — skip data/markup formats
+        for m in _CODE_BLOCK_RE.finditer(text_clean):
+            lang = (m.group(1) or "").strip().lower()
+            code = m.group(2).strip()
+            if not code or len(code) < 20:
+                continue
+            if lang in _DATA_ONLY_LANGS:
+                continue  # analysis output, not a file to persist
+            content_hash = hash(code)
+            if content_hash in seen_content:
+                continue
+            seen_content.add(content_hash)
+            filename = _LANG_EXT_MAP.get(lang, f"output.{lang}" if lang else "output.txt")
+            existing_names = {fn for fn, _ in results}
+            if filename in existing_names:
+                base, ext = os.path.splitext(filename)
+                for i in range(2, 20):
+                    candidate = f"{base}_{i}{ext}"
+                    if candidate not in existing_names:
+                        filename = candidate
+                        break
+            results.append((filename, code))
+
+        if results:
+            continue  # prefer fenced blocks if found
+
+        # Strategy 2: inline HTML documents without fences
+        for m in _INLINE_HTML_RE.finditer(text_clean):
+            html = m.group(1).strip()
+            if len(html) < 50:
+                continue
+            content_hash = hash(html)
+            if content_hash in seen_content:
+                continue
+            seen_content.add(content_hash)
+            filename = "index.html"
+            existing_names = {fn for fn, _ in results}
+            if filename in existing_names:
+                for i in range(2, 20):
+                    candidate = f"page_{i}.html"
+                    if candidate not in existing_names:
+                        filename = candidate
+                        break
+            results.append((filename, html))
+
+    return results
+
+
 
 
 # ── Result contract ───────────────────────────────────────────────────────────
@@ -65,6 +290,7 @@ class AgentResult:
     answer: str
     iterations: int
     tool_calls_made: int
+    generated_files: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
     error: str | None = None
 
@@ -108,20 +334,6 @@ class ReActAgent:
         tokens  = max(_MIN_THINK_TOKENS, int(cfg_max * _THINK_FRACTION))
         return min(tokens, _MAX_THINK_TOKENS)
 
-    def _forced_get_map(self, iteration: int) -> AIMessage:
-        args: dict[str, Any] = {}
-        if self._repo_id:
-            args["repo_id"] = self._repo_id
-        return AIMessage(
-            content="Collecting architecture map before proceeding.",
-            tool_calls=[{
-                "name": "get_map",
-                "args": args,
-                "id": f"forced_get_map_{iteration}",
-                "type": "tool_call",
-            }],
-        )
-
     @staticmethod
     def _has_tool_history(messages: list[BaseMessage]) -> bool:
         return any(isinstance(m, ToolMessage) for m in messages)
@@ -147,6 +359,7 @@ class ReActAgent:
         messages: list[BaseMessage],
         goal: str,
         playbook_name: str,
+        reason: str = "max_iterations",
     ) -> str:
         parts = [
             str(m.content)[:20_000]
@@ -155,9 +368,16 @@ class ReActAgent:
         ]
         bundle = "\n\n---\n\n".join(parts[-16:])
         if not bundle.strip():
+            if reason == "empty_response":
+                return (
+                    "The agent produced no output and called no tools. "
+                    "This usually means the model could not parse the tool schemas or "
+                    "the prompt was too large.  Try a narrower goal or a different playbook."
+                )
             return (
-                "No tool data was collected before the step limit was reached. "
-                "Try increasing max_iterations or narrowing the goal."
+                "The agent reached its iteration ceiling without calling any tools. "
+                "This is unexpected — the agent should stop naturally once it has enough data. "
+                "Check the trace log for LLM errors, or try a more specific goal."
             )
 
         cfg       = getattr(self.llm, "config", None)
@@ -202,19 +422,18 @@ class ReActAgent:
         """
         Run the ReAct loop to completion.
 
-        Parameters
-        ----------
-        goal            User goal / question forwarded as the first HumanMessage.
-        system_prompt   Base playbook system prompt (anti-patterns, rubric, etc.).
-        prefetch_block  Pre-fetched graph context block injected into iteration-0 system prompt.
-        max_iterations  Hard cap; on overflow the agent synthesises from collected evidence.
-        playbook_name   Used for trace log filenames.
+        The agent autonomously decides which tools to call.  There is no
+        static classification of playbooks — the playbook's own system prompt
+        plus the user goal guide the agent's behaviour.
         """
         logs: list[str] = [
             f"ReAct start | playbook={playbook_name} | max_iter={max_iterations}"
         ]
         messages: list[BaseMessage] = [HumanMessage(content=goal)]
         tool_calls_made = 0
+        generated_files: list[str] = []
+        repo_exploration_retry_used = False
+        shallow_analysis_retry_used = False
 
         for iteration in range(max_iterations + 1):
 
@@ -222,19 +441,19 @@ class ReActAgent:
             messages = await self.compactor.compact(messages)
 
             # ── build per-turn system prompt ───────────────────────────────
-            # Inject the full strategy only on the first two iterations.
-            # Later turns get a short reminder to save context budget on small models.
             if iteration < 2:
-                local_sys = system_prompt + _STRATEGIC_DIRECTIVE
+                local_sys = system_prompt + _AGENT_DIRECTIVE
             else:
-                local_sys = system_prompt + "\n\n### REMINDER\nContinue Phase B→C. Call tools or synthesize."
+                local_sys = system_prompt + (
+                    "\n\n### REMINDER\n"
+                    "Continue working. Call tools as needed, or provide your final answer."
+                )
             if iteration == 0 and prefetch_block:
                 local_sys += prefetch_block
             if self._repo_id:
                 local_sys += (
-                    f"\n\n### STRICT ENFORCEMENT\n"
-                    f"Always pass repo_id='{self._repo_id}' to every tool call. "
-                    "Never search globally."
+                    f"\n\n### REPO CONTEXT\n"
+                    f"repo_id='{self._repo_id}' — pass this to repo-scoped tool calls."
                 )
 
             full_messages = [SystemMessage(content=local_sys)] + messages
@@ -242,11 +461,12 @@ class ReActAgent:
             # ── max iterations: synthesise from collected evidence ─────────
             if iteration >= max_iterations:
                 logs.append(f"Max iterations ({max_iterations}) reached — synthesising")
-                answer = await self._synthesize(messages, goal, playbook_name)
+                answer = await self._synthesize(messages, goal, playbook_name, reason="max_iterations")
                 return AgentResult(
                     answer=answer,
                     iterations=iteration,
                     tool_calls_made=tool_calls_made,
+                    generated_files=generated_files,
                     logs=logs,
                 )
 
@@ -264,13 +484,25 @@ class ReActAgent:
                     answer="",
                     iterations=iteration,
                     tool_calls_made=tool_calls_made,
+                    generated_files=generated_files,
                     logs=logs,
                     error=str(exc),
                 )
 
             self._write_trace(playbook_name, iteration, response)
 
-            # ── Phase A: repair plain-text tool plans ─────────────────────
+            tc_from_wrapper = getattr(response, "tool_calls", None) or []
+            content_len = len(str(response.content or ""))
+            print(
+                f"[REACT] iter={iteration} | content_chars={content_len} | "
+                f"tool_calls_from_wrapper={len(tc_from_wrapper)} | "
+                f"repo_id={self._repo_id}"
+            )
+            if tc_from_wrapper:
+                for tc in tc_from_wrapper:
+                    print(f"[REACT]   tool_call: {tc.get('name')}")
+
+            # ── repair plain-text tool plans ──────────────────────────────
             has_calls = bool(getattr(response, "tool_calls", None))
 
             if not has_calls and response.content:
@@ -282,29 +514,168 @@ class ReActAgent:
                         f"  Iter {iteration}: repaired {len(repaired)} tool call(s) from text"
                     )
 
-            # ── Phase A guardrail: force get_map if no tool history yet ───
-            if not has_calls and not self._has_tool_history(messages):
-                response  = self._forced_get_map(iteration)
-                has_calls = True
-                logs.append(f"  Iter {iteration}: forced get_map (no tool history yet)")
-
-            # ── Phase C: no tool calls → natural finish ───────────────────
+            # ── no tool calls → natural finish (with safety-net write) ────
             if not has_calls:
+                if response.content:
+                    messages.append(AIMessage(content=str(response.content)))
+
+                # Repo-exploration guard: agent has a repo but hasn't called ANY
+                # tool yet.  Rather than just asking the LLM again (which often
+                # gets ignored), automatically dispatch `get_map` so the agent
+                # has real architecture data to work with on the next turn.
+                if (
+                    self._repo_id
+                    and not self._has_tool_history(messages)
+                    and not repo_exploration_retry_used
+                ):
+                    repo_exploration_retry_used = True
+                    logs.append(
+                        f"  Iter {iteration}: no tools called — "
+                        f"auto-dispatching get_map for repo_id='{self._repo_id}'"
+                    )
+                    forced_call = [{
+                        "name": "get_map",
+                        "args": {"repo_id": self._repo_id},
+                        "id": f"forced_get_map_{iteration}",
+                        "type": "tool_call",
+                    }]
+                    forced_ai_msg = AIMessage(content="", tool_calls=forced_call)
+                    messages.append(forced_ai_msg)
+                    tool_messages = await self.dispatcher.dispatch(forced_call)
+                    messages.extend(tool_messages)
+                    tool_calls_made += 1
+                    messages.append(HumanMessage(content=(
+                        f"The repository architecture map has been retrieved above.\n"
+                        f"Now use `read_file`, `search_code`, `grep_search`, `get_callers`, "
+                        f"`get_callees`, `trace_path` etc. to examine actual code.\n"
+                        f"Do NOT produce a final answer until you have read real source files."
+                    )))
+                    continue
+
+                # Shallow-analysis / premature-give-up guard.
+                #
+                # Fires when:
+                #  a) agent wrote a planning paragraph instead of calling tools, OR
+                #  b) agent tried one approach, got no results, and immediately gave up
+                #     (e.g. "No results were returned, it is not possible to identify...")
+                #
+                # In both cases, if we've made fewer than _MIN_REPO_TOOL_CALLS total
+                # tool calls, push the agent to try alternative approaches.
+                _response_text = str(response.content or "")
+                if (
+                    self._repo_id
+                    and self._has_tool_history(messages)
+                    and tool_calls_made < _MIN_REPO_TOOL_CALLS
+                    and _should_force_continuation(_response_text, tool_calls_made)
+                    and not shallow_analysis_retry_used
+                ):
+                    shallow_analysis_retry_used = True
+                    is_giving_up = (
+                        not _looks_like_planning(_response_text)
+                        and tool_calls_made < 2
+                    )
+                    if is_giving_up:
+                        retry_msg = (
+                            f"You called {tool_calls_made} tool(s) and got no useful results, "
+                            f"then gave up. That is NOT an acceptable conclusion.\n\n"
+                            f"One tool returning empty results means **try a different approach**, "
+                            f"not that the task is impossible.\n\n"
+                            f"Try these alternatives in order:\n"
+                            f"1. `get_map(repo_id='{self._repo_id}')` — get the full architecture and "
+                            f"   file list to understand what types of files exist\n"
+                            f"2. `grep_search(query='route\\|endpoint\\|handler\\|controller', "
+                            f"   repo_id='{self._repo_id}')` — search raw source for routing patterns\n"
+                            f"3. `search_code(queries=['router', 'handler', 'endpoint'], "
+                            f"   repo_id='{self._repo_id}')` — semantic search for API code\n"
+                            f"4. `list_repo_directory(repo_id='{self._repo_id}')` — walk the actual "
+                            f"   filesystem instead of the graph index\n\n"
+                            f"CALL TOOLS NOW — do not return a conclusion yet."
+                        )
+                    else:
+                        retry_msg = (
+                            f"You have only made {tool_calls_made} tool call(s). "
+                            f"This is NOT enough for a thorough analysis.\n\n"
+                            f"Your last response described what you plan to do — "
+                            f"NOW ACTUALLY DO IT by calling tools.\n\n"
+                            f"Use `read_file`, `search_code`, `grep_search`, `get_callers`, "
+                            f"`get_callees`, `trace_path` etc. to read actual code before "
+                            f"writing any conclusion.\n\n"
+                            f"CONTINUE EXECUTING — call tools now."
+                        )
+                    logs.append(
+                        f"  Iter {iteration}: {'premature give-up' if is_giving_up else 'shallow-analysis'} "
+                        f"detected after {tool_calls_made} tool call(s) — forcing retry"
+                    )
+                    messages.append(HumanMessage(content=retry_msg))
+                    continue
+
+                # Safety net: if the model produced code as prose but never
+                # called write_file_system, try to persist it.  This is a
+                # model-limitation workaround, not playbook-specific.
+                if not self._has_tool_history(messages):
+                    code_blocks = _extract_code_blocks_from_messages(messages)
+                    if code_blocks:
+                        logs.append(
+                            f"  Iter {iteration}: extracted {len(code_blocks)} code block(s) "
+                            f"from prose — auto-persisting via write_file_system"
+                        )
+                        synthetic_calls = []
+                        for fname, content in code_blocks:
+                            call_id = f"auto_write_{fname.replace('/', '_')}_{iteration}"
+                            synthetic_calls.append({
+                                "name": "write_file_system",
+                                "args": {"file_path": fname, "content": content},
+                                "id": call_id,
+                                "type": "tool_call",
+                            })
+                        synth_msg = AIMessage(
+                            content="Auto-persisting extracted code blocks.",
+                            tool_calls=synthetic_calls,
+                        )
+                        messages.append(synth_msg)
+                        tool_messages = await self.dispatcher.dispatch(synthetic_calls)
+                        messages.extend(tool_messages)
+                        tool_calls_made += len(synthetic_calls)
+                        for tm in tool_messages:
+                            try:
+                                payload = json.loads(str(tm.content or "{}"))
+                                fp = payload.get("file_path")
+                                if fp and payload.get("success") and payload.get("bytes_written"):
+                                    generated_files.append(str(fp))
+                            except Exception:
+                                continue
+                        file_list = ", ".join(fn for fn, _ in code_blocks)
+                        answer = (
+                            f"Generated and saved {len(code_blocks)} file(s): {file_list}\n\n"
+                            + str(response.content or "")
+                        )
+                        logs.append(f"ReAct finished with auto-extracted writes at iteration {iteration}")
+                        return AgentResult(
+                            answer=answer,
+                            iterations=iteration,
+                            tool_calls_made=tool_calls_made,
+                            generated_files=generated_files,
+                            logs=logs,
+                        )
+
+                # Normal finish — either the agent completed its analysis or
+                # there genuinely was nothing to do.
                 answer = str(response.content or "")
                 if not answer.strip():
                     logs.append(
                         f"  Iter {iteration}: empty response — synthesising from tool data"
                     )
-                    answer = await self._synthesize(messages, goal, playbook_name)
+                    answer = await self._synthesize(messages, goal, playbook_name, reason="empty_response")
                 logs.append(f"ReAct finished naturally at iteration {iteration}")
                 return AgentResult(
                     answer=answer,
                     iterations=iteration,
                     tool_calls_made=tool_calls_made,
+                    generated_files=generated_files,
                     logs=logs,
                 )
 
-            # ── Phase B: dispatch tool calls ───────────────────────────────
+            # ── dispatch tool calls ───────────────────────────────────────
             messages.append(response)
             call_count  = len(response.tool_calls)
             call_names  = [tc.get("name") for tc in response.tool_calls]
@@ -315,12 +686,29 @@ class ReActAgent:
             tool_messages = await self.dispatcher.dispatch(response.tool_calls)
             messages.extend(tool_messages)
             tool_calls_made += call_count
+            for idx, tm in enumerate(tool_messages):
+                try:
+                    raw = str(tm.content or "{}")
+                    payload = json.loads(raw)
+                    if not isinstance(payload, dict):
+                        continue
+                    fp = payload.get("file_path")
+                    is_write = (
+                        getattr(tm, "name", "") == "write_file_system"
+                        or (fp and payload.get("success") and payload.get("bytes_written"))
+                    )
+                    if is_write and fp:
+                        generated_files.append(str(fp))
+                        print(f"[REACT] ✅ File written: {fp}")
+                except Exception:
+                    continue
 
         # Unreachable in practice (handled above), but kept as safety net
-        answer = await self._synthesize(messages, goal, playbook_name)
+        answer = await self._synthesize(messages, goal, playbook_name, reason="max_iterations")
         return AgentResult(
             answer=answer,
             iterations=max_iterations,
             tool_calls_made=tool_calls_made,
+            generated_files=generated_files,
             logs=logs,
         )

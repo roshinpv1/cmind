@@ -4,7 +4,6 @@ version: "2.0"
 description: Comprehensive SSIS-to-Azure Data Factory migration analyzer. Maps every Control Flow task, Data Flow component, Connection Manager, and Event Handler to ADF-native equivalents.
 category: migration
 complexity: high
-max_iterations: 10
 ---
 
 # Playbook: migrate_ssis_to_adf

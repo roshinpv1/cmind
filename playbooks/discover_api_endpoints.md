@@ -4,7 +4,6 @@ version: "1.0"
 description: An ultra-strict, hallucination-free API endpoint discovery tool. Scans raw source code to extract exposed API endpoints, methods, and protocols purely from implemented logic while ignoring documentation files.
 category: analysis
 complexity: high
-max_iterations: 20
 ---
 
 # Playbook: discover_api_endpoints

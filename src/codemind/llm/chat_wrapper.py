@@ -49,6 +49,99 @@ from .token_counter import count_tokens, truncate_to_tokens
 
 # ─── Tool Call Parsing ────────────────────────────────────────────────────────
 
+def _repair_truncated_json(text: str) -> dict | None:
+    """Try to repair JSON truncated by token limits (missing closing brackets).
+
+    Local models often emit valid tool_calls JSON but run out of tokens before
+    closing all brackets.  We detect the last complete string value and close
+    any outstanding brackets/braces.
+    """
+    s = text.strip()
+    if not s.startswith("{"):
+        return None
+
+    # Count open brackets/braces
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+    escape = False
+    last_good = -1
+
+    for i, c in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth_brace += 1
+        elif c == '}':
+            depth_brace -= 1
+        elif c == '[':
+            depth_bracket += 1
+        elif c == ']':
+            depth_bracket -= 1
+
+        if depth_brace == 0 and depth_bracket == 0:
+            last_good = i
+            break
+
+    if last_good > 0:
+        return None  # already complete, no repair needed
+
+    # Try appending missing closers
+    # First, find the last valid string boundary to truncate at
+    # Then close any open structures
+    repair = s
+    # If the last non-whitespace is an unfinished string, close it
+    stripped = repair.rstrip()
+    if stripped and stripped[-1] not in ('"', '}', ']', ',', ':'):
+        # Likely mid-string; close the string
+        repair = stripped + '"'
+
+    # Recount and add missing closers
+    depth_brace = 0
+    depth_bracket = 0
+    in_string = False
+    escape = False
+    for c in repair:
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth_brace += 1
+        elif c == '}':
+            depth_brace -= 1
+        elif c == '[':
+            depth_bracket += 1
+        elif c == ']':
+            depth_bracket -= 1
+
+    repair += ']' * depth_bracket + '}' * depth_brace
+
+    try:
+        obj = json.loads(repair)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    return None
+
+
 def _extract_leading_json_dict(text: str) -> tuple[dict | None, str | None]:
     """Parse the first complete JSON object from text using balanced decoding.
 
@@ -65,51 +158,130 @@ def _extract_leading_json_dict(text: str) -> tuple[dict | None, str | None]:
         if isinstance(obj, dict):
             return obj, s[start : start + end]
     except json.JSONDecodeError:
-        return None, None
+        # Try repair for truncated JSON (common with local models)
+        repaired = _repair_truncated_json(s[start:])
+        if repaired:
+            return repaired, s[start:]
     return None, None
+
+
+def _resolve_tool_name(data: dict, available_tools: dict) -> str:
+    """Return the canonical tool name from any of the common name-key aliases, or ''."""
+    for key in ("name", "tool_name", "tool", "action"):
+        raw = data.get(key)
+        if raw and isinstance(raw, str) and raw in available_tools:
+            return raw
+    return ""
+
+
+def _resolve_args(data: dict) -> dict:
+    """Return the args dict from any of the common arg-key aliases."""
+    for key in ("args", "arguments", "parameters", "params"):
+        v = data.get(key)
+        if isinstance(v, dict):
+            return v
+    # Fallback: strip all known meta-keys and treat the remainder as args
+    meta = {"name", "tool_name", "tool", "action", "phase",
+            "args", "arguments", "parameters", "params", "id", "type"}
+    return {k: v for k, v in data.items() if k not in meta}
+
+
+def _parse_tool_json(data: dict, available_tools: dict) -> list:
+    """Try to interpret a JSON object as tool call(s).
+
+    Handles every format that local models commonly emit:
+      {"tool_calls": [...]}                            — standard wrapper
+      {"name": "...", "args": {...}}                   — direct single call
+      {"tool_name": "...", "params": {...}}            — alternate naming
+      {"tool": "...", "args": {...}}                   — tool key
+      {"action": "...", ...}                           — planning JSON
+    """
+    calls = []
+
+    # Format: {"tool_calls": [...]}
+    if "tool_calls" in data:
+        for tc in data["tool_calls"]:
+            if not isinstance(tc, dict):
+                continue
+            name = _resolve_tool_name(tc, available_tools)
+            if name:
+                calls.append({
+                    "name": name,
+                    "args": _resolve_args(tc),
+                    "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "type": "tool_call",
+                })
+        return calls
+
+    # Single call object — any combo of (name|tool_name|tool|action) + (args|params|...)
+    name = _resolve_tool_name(data, available_tools)
+    if name:
+        calls.append({
+            "name": name,
+            "args": _resolve_args(data),
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "tool_call",
+        })
+
+    return calls
 
 
 def _extract_tool_calls(text: str, available_tools: dict) -> tuple[str, list]:
     """Parse tool calls from LLM text output.
-    
-    Looks for JSON blocks that match tool call patterns:
-    1. ```json { "tool": "name", "args": {...} } ```
-    2. {"tool_calls": [{"name": "...", "args": {...}}]}
-    3. {"name": "tool_name", "arguments": {...}}
-    4. Direct tool invocation: TOOL_CALL: tool_name(args)
-    
-    Returns:
-        Tuple of (remaining_text, list_of_tool_calls)
-        Each tool call is {"name": str, "args": dict, "id": str}
+
+    Handles JSON objects AND top-level JSON arrays, in both fenced code blocks
+    and raw text.  Recognises all common field-name variants produced by local
+    models (name/tool_name/tool/action, args/params/arguments/parameters).
     """
     tool_calls = []
     remaining_text = text
-    
-    # Strategy 1: Look for ```json blocks containing tool calls
-    json_block_pattern = r'```(?:json)?\s*(\{.*?\})\s*```'
-    for match in re.finditer(json_block_pattern, text, re.DOTALL):
+
+    def _calls_from_value(parsed) -> list:
+        """Extract calls from a parsed JSON value (dict or list of dicts)."""
+        result = []
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict):
+                    result.extend(_parse_tool_json(item, available_tools))
+        elif isinstance(parsed, dict):
+            result.extend(_parse_tool_json(parsed, available_tools))
+        return result
+
+    # Strategy 1: fenced ```json ... ``` blocks (object OR array)
+    for match in re.finditer(r'```(?:json)?\s*([{\[].*?[}\]])\s*```', text, re.DOTALL):
         try:
-            data = json.loads(match.group(1))
-            calls = _parse_tool_json(data, available_tools)
+            parsed = json.loads(match.group(1))
+            calls = _calls_from_value(parsed)
             if calls:
                 tool_calls.extend(calls)
                 remaining_text = remaining_text.replace(match.group(0), "").strip()
         except json.JSONDecodeError:
             continue
-    
+
     if tool_calls:
         return remaining_text, tool_calls
 
-    # Strategy 1b: Leading JSON object with nested args (regex below cannot match this)
+    # Strategy 1b: leading balanced JSON — try array first, then object
+    stripped = text.strip()
+    if stripped.startswith("["):
+        try:
+            dec = json.JSONDecoder()
+            parsed, end = dec.raw_decode(stripped)
+            calls = _calls_from_value(parsed)
+            if calls:
+                remaining_text = stripped[end:].strip()
+                return remaining_text, calls
+        except json.JSONDecodeError:
+            pass
+
     data, matched = _extract_leading_json_dict(text)
     if isinstance(data, dict):
         calls = _parse_tool_json(data, available_tools)
         if calls:
             remaining_text = text.replace(matched, "", 1).strip() if matched else ""
             return remaining_text, calls
-    
-    # Strategy 2: Look for raw JSON objects in text
-    # Find all JSON-like objects
+
+    # Strategy 2: every JSON object in the text
     brace_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
     for match in re.finditer(brace_pattern, text, re.DOTALL):
         try:
@@ -120,64 +292,8 @@ def _extract_tool_calls(text: str, available_tools: dict) -> tuple[str, list]:
                 remaining_text = remaining_text.replace(match.group(0), "").strip()
         except json.JSONDecodeError:
             continue
-    
+
     return remaining_text, tool_calls
-
-
-def _parse_tool_json(data: dict, available_tools: dict) -> list:
-    """Try to interpret a JSON object as tool call(s)."""
-    calls = []
-    
-    # Format: {"tool_calls": [{"name": "...", "args": {...}}]}
-    if "tool_calls" in data:
-        for tc in data["tool_calls"]:
-            name = tc.get("name", "")
-            if name in available_tools:
-                calls.append({
-                    "name": name,
-                    "args": tc.get("args", tc.get("arguments", {})),
-                    "id": tc.get("id", f"call_{uuid.uuid4().hex[:8]}"),
-                    "type": "tool_call",
-                })
-        return calls
-    
-    # Format: {"tool": "name", "args": {...}}
-    if "tool" in data and data["tool"] in available_tools:
-        calls.append({
-            "name": data["tool"],
-            "args": data.get("args", data.get("arguments", data.get("parameters", {}))),
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "type": "tool_call",
-        })
-        return calls
-    
-    # Format: {"name": "tool_name", "arguments": {...}}
-    if "name" in data and data["name"] in available_tools:
-        calls.append({
-            "name": data["name"],
-            "args": data.get("arguments", data.get("args", data.get("parameters", {}))),
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "type": "tool_call",
-        })
-        return calls
-
-    # Format: {"action": "tool_name", ...}
-    # Common with "phase/action" planning JSON emitted by local models.
-    if "action" in data and isinstance(data["action"], str) and data["action"] in available_tools:
-        args = {
-            k: v
-            for k, v in data.items()
-            if k not in {"action", "phase", "tool", "name", "arguments", "args", "parameters"}
-        }
-        calls.append({
-            "name": data["action"],
-            "args": args,
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "type": "tool_call",
-        })
-        return calls
-    
-    return calls
 
 
 def _render_tool_schemas(tools: list) -> str:
@@ -226,10 +342,11 @@ To call a tool, respond with a JSON block:
 ```
 
 You may call multiple tools at once by adding more items to the tool_calls array.
-If you don't need to call a tool, just respond normally with text.
 
-IMPORTANT: When you output a JSON block to call a tool, DO NOT output any text pretending to be the 'Tool Result'. Stop generating immediately after the tool call block and wait for the system to execute the tool and provide the real result.
-IMPORTANT: Limit each turn to a small number of tool calls (prefer <= 4). For repeated text searches, use ONE search_code call with a combined regex OR or a `queries` array instead of many separate calls.
+RULES:
+- When you output a JSON block to call a tool, STOP generating immediately after the tool call block. Do NOT output any text pretending to be the 'Tool Result' — wait for the system to execute the tool and provide the real result.
+- Limit each turn to a small number of tool calls (prefer <= 4).
+- If a tool returns an error, adapt your approach — try a different tool or provide your answer based on what you know.
 """)
 
     rendered = "\n".join(lines)

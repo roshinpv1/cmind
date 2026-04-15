@@ -4,7 +4,6 @@ version: "1.0"
 description: Searches the software catalog to find components for a given requirement
 category: evaluation
 complexity: medium
-max_iterations: 5
 ---
 
 # Playbook: search_catalogs

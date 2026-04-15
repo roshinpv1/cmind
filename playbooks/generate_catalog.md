@@ -4,7 +4,6 @@ version: "1.0"
 description: Generates a comprehensive catalog entry for a repository
 category: generation
 complexity: medium
-max_iterations: 5
 ---
 
 # Playbook: generate_catalog

@@ -46,6 +46,10 @@ def _next_seq() -> str:
 def _write(filename: str, data: dict):
     path = SESSION_DIR / filename
     try:
+        # The temp folder can be cleaned while the process is running.
+        # Recreate trace directories on each write to keep observability resilient.
+        TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, default=str)
     except Exception as e:

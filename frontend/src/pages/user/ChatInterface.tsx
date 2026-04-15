@@ -28,6 +28,19 @@ interface AgentJob {
     logs: string[];
 }
 
+interface RunSummary {
+    run_id: string;
+    goal: string;
+    repo_id?: string | null;
+    status: "pending" | "running" | "completed" | "failed" | string;
+    created_at: string;
+    updated_at: string;
+    iterations: number;
+    steps_taken: number;
+    mirror_root?: string | null;
+    generated_files_count?: number;
+}
+
 /* ─── Playbook Definitions ─────────────────────────────────────── */
 
 interface PlaybookDef {
@@ -309,10 +322,14 @@ export default function ChatInterface() {
     const [isPolling, setIsPolling] = useState(false);
     const [playbooks, setPlaybooks] = useState<PlaybookDef[]>([AUTO_PILOT]);
     const [isPlaybookDropdownOpen, setIsPlaybookDropdownOpen] = useState(false);
+    const [continueMode, setContinueMode] = useState(false);
+    const [continuationJobId, setContinuationJobId] = useState("");
+    const [recentRuns, setRecentRuns] = useState<RunSummary[]>([]);
     const logsEndRef = useRef<HTMLDivElement>(null);
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     const activePlaybook = playbooks.find(p => selectedPlaybooks.includes(p.id)) || playbooks[0];
+    const latestFailedRun = recentRuns.find(r => r.status === "failed");
 
     // Close dropdown on outside click
     useEffect(() => {
@@ -350,13 +367,21 @@ export default function ChatInterface() {
                         status: r.status || "unknown",
                     }));
                 setRepos(mapped);
-                // Default to the first indexed repo
-                const indexed = mapped.find(r => r.status === "indexed");
-                if (indexed) setSelectedRepo(indexed.id);
-                else if (mapped.length > 0) setSelectedRepo(mapped[0].id);
+                // Keep repository optional by default.
+                setSelectedRepo("");
             })
             .catch(err => console.error("Failed to load repos", err));
     }, []);
+
+    // Load recent autonomous runs (for continuation)
+    useEffect(() => {
+        fetch("/api/v1/agents/autonomous/runs?limit=30", { headers: { ...authService.getAuthHeader() } })
+            .then(res => res.json())
+            .then((data: RunSummary[]) => {
+                setRecentRuns(Array.isArray(data) ? data : []);
+            })
+            .catch(err => console.error("Failed to load autonomous runs", err));
+    }, [jobStatus?.status]);
 
     // Poll status
     useEffect(() => {
@@ -389,7 +414,7 @@ export default function ChatInterface() {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!goal.trim()) return;
-        if (activePlaybook.requiresRepo && !selectedRepo) return;
+        if (continueMode && !continuationJobId) return;
 
         setJobStatus(null);
         setIsPolling(true);
@@ -405,14 +430,34 @@ export default function ChatInterface() {
                 },
                 body: JSON.stringify({
                     goal: goal,
-                    repo_id: activePlaybook.requiresRepo ? selectedRepo : undefined,
+                    job_id: continueMode ? continuationJobId : undefined,
+                    repo_id: selectedRepo || undefined,
                     max_iterations: 24,
                     allowed_playbooks: allowedPlaybooks
                 })
             });
 
             const data = await res.json();
+            if (!res.ok || !data?.job_id) {
+                const msg = data?.detail || data?.error || "Failed to start job";
+                setJobStatus({
+                    job_id: "failed",
+                    status: "failed",
+                    logs: [msg],
+                });
+                setIsPolling(false);
+                return;
+            }
             setCurrentJobId(data.job_id);
+            if (data.status === "failed") {
+                setJobStatus({
+                    job_id: data.job_id,
+                    status: "failed",
+                    logs: ["Execution blocked: no repository selected for a codebase-specific request."],
+                });
+                setIsPolling(false);
+                return;
+            }
             setJobStatus({ job_id: data.job_id, status: "pending", logs: ["Initializing..."] });
         } catch (err) {
             console.error("Failed to start job", err);
@@ -505,19 +550,24 @@ export default function ChatInterface() {
                     )}
                 </div>
 
-                {/* Strategy Description + Repo Selector */}
+                    {/* Strategy Description + Repo Selector */}
                 <div className="px-5 py-3 flex items-center justify-between gap-4">
                     <div className="flex-1">
                         <p className="text-xs text-gray-500">{activePlaybook.description}</p>
+                        {continueMode && continuationJobId && (
+                            <p className="text-[10px] text-indigo-600 mt-1">
+                                Continuing run: <span className="font-mono">{continuationJobId}</span>
+                            </p>
+                        )}
                     </div>
-                    {activePlaybook.requiresRepo && (
                         <div className="flex items-center gap-2">
-                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Repository</label>
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Repository (Optional)</label>
                             <select
                                 value={selectedRepo}
                                 onChange={e => setSelectedRepo(e.target.value)}
                                 className="text-xs border-gray-200 rounded-lg shadow-sm focus:border-violet-300 focus:ring-violet-300 py-1.5 pr-8"
                             >
+                                <option value="">No repository selected</option>
                                 {repos.map(r => (
                                     <option key={r.id} value={r.id}>
                                         {r.name}{r.branch ? ` (${r.branch})` : ""}
@@ -526,12 +576,47 @@ export default function ChatInterface() {
                                 ))}
                             </select>
                         </div>
-                    )}
-                    {!activePlaybook.requiresRepo && (
-                        <span className="text-[10px] font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
-                            No repository needed
-                        </span>
-                    )}
+                        <div className="flex items-center gap-2">
+                            <label className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Continue</label>
+                            <input
+                                type="checkbox"
+                                checked={continueMode}
+                                onChange={e => {
+                                    const enabled = e.target.checked;
+                                    setContinueMode(enabled);
+                                    if (!enabled) setContinuationJobId("");
+                                }}
+                                className="h-3.5 w-3.5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-300"
+                            />
+                            {continueMode && (
+                                <>
+                                    <select
+                                        value={continuationJobId}
+                                        onChange={e => setContinuationJobId(e.target.value)}
+                                        className="text-xs border-gray-200 rounded-lg shadow-sm focus:border-indigo-300 focus:ring-indigo-300 py-1.5 pr-8 max-w-[280px]"
+                                    >
+                                        <option value="">Select existing run</option>
+                                        {recentRuns.map(r => (
+                                            <option key={r.run_id} value={r.run_id}>
+                                                {r.run_id.slice(0, 8)}... · {r.status} · {r.goal.slice(0, 35)}
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (!latestFailedRun) return;
+                                            setContinuationJobId(latestFailedRun.run_id);
+                                        }}
+                                        disabled={!latestFailedRun}
+                                        className="text-[10px] px-2 py-1 rounded border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        title={latestFailedRun ? `Continue ${latestFailedRun.run_id}` : "No failed runs available"}
+                                    >
+                                        Continue latest failed
+                                    </button>
+                                </>
+                            )}
+                        </div>
                 </div>
             </div>
 
@@ -580,7 +665,7 @@ export default function ChatInterface() {
                             <span className="text-[10px] text-gray-400">Shift+Enter for new line</span>
                             <button
                                 type="submit"
-                                disabled={isPolling || !goal.trim() || (activePlaybook.requiresRepo && !selectedRepo)}
+                                disabled={isPolling || !goal.trim() || (continueMode && !continuationJobId)}
                                 className="bg-gradient-to-r from-violet-600 to-indigo-600 text-white px-5 py-2 rounded-lg text-xs font-bold hover:from-violet-700 hover:to-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2 transition-all shadow-sm"
                             >
                                 {isPolling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}

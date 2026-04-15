@@ -4,7 +4,6 @@ version: "1.0"
 description: Multi-hop code exploration agent that iteratively searches, reads, and traces code
 category: exploration
 complexity: high
-max_iterations: 18
 ---
 
 # Playbook: explore_codebase

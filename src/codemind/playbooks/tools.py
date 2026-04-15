@@ -122,6 +122,18 @@ class PlaybookTools:
         return candidate if candidate.is_dir() else None
 
     @staticmethod
+    def _resolve_mirror_root(params: dict) -> Path | None:
+        """Resolve mirror root from execution context params."""
+        mirror = params.get("_mirror_root")
+        if not mirror:
+            return None
+        try:
+            p = Path(str(mirror)).resolve()
+            return p if p.exists() and p.is_dir() else None
+        except Exception:
+            return None
+
+    @staticmethod
     def _read_text_file_slice(
         path: Path,
         start_line: int | None,
@@ -310,7 +322,13 @@ class PlaybookTools:
             
             repo_id = params.get("repo_id")
             if not repo_id:
-                repo_id = await self._get_default_latest_repos()
+                return {
+                    "success": False,
+                    "error": "repo_id is required for search_codebase",
+                    "results": [],
+                    "count": 0,
+                    "queries_used": [],
+                }
                 
             queries = params.get("queries", [])
             limit = params.get("limit", 10)
@@ -459,10 +477,14 @@ class PlaybookTools:
             end_line = params.get("end_line")
             repo_id = params["repo_id"]
             max_chars = int(params.get("max_chars") or _DEFAULT_REPO_READ_MAX_CHARS)
+            mirror_root = self._resolve_mirror_root(params)
+            prefer_mirror_reads = bool(params.get("_prefer_mirror_reads", False))
 
             repo_root = self._get_repo_root_sync(repo_id)
             resolved_rel: str | None = None
             disk_path: Path | None = None
+            source_kind = "filesystem"
+            mirror_miss_fallback = False
 
             if repo_root:
                 graph_hits = self.graph.find_files_by_pattern(repo_id, pattern=file_path)
@@ -476,12 +498,27 @@ class PlaybookTools:
                 if graph_hits:
                     resolved_rel = self._pick_graph_file_match(file_path, graph_hits)
                     if resolved_rel:
-                        disk_path = self._safe_file_under_repo(repo_root, resolved_rel)
+                        if prefer_mirror_reads and mirror_root:
+                            disk_path = self._safe_file_under_repo(mirror_root, resolved_rel)
+                            if disk_path:
+                                source_kind = "mirror_filesystem"
+                            else:
+                                mirror_miss_fallback = True
+                        if not disk_path:
+                            disk_path = self._safe_file_under_repo(repo_root, resolved_rel)
 
                 if not disk_path:
-                    disk_path = self._safe_file_under_repo(
-                        repo_root, file_path.replace("\\", "/").lstrip("/")
-                    )
+                    rel_candidate = file_path.replace("\\", "/").lstrip("/")
+                    if prefer_mirror_reads and mirror_root:
+                        disk_path = self._safe_file_under_repo(mirror_root, rel_candidate)
+                        if disk_path:
+                            source_kind = "mirror_filesystem"
+                        else:
+                            mirror_miss_fallback = True
+                    if not disk_path:
+                        disk_path = self._safe_file_under_repo(
+                            repo_root, rel_candidate
+                        )
 
                 if disk_path and disk_path.is_file():
                     content = self._read_text_file_slice(
@@ -492,8 +529,11 @@ class PlaybookTools:
                         "file_path": resolved_rel or file_path,
                         "absolute_path": str(disk_path),
                         "content": content,
-                        "source": "filesystem",
+                        "source": source_kind,
                         "chunks": 1,
+                        "mirror_root": str(mirror_root) if mirror_root else None,
+                        "mirror_preferred": prefer_mirror_reads,
+                        "mirror_fallback_to_repo": mirror_miss_fallback and source_kind != "mirror_filesystem",
                     }
 
             # Legacy: LanceDB chunk reassembly when index + embedder exist
@@ -603,7 +643,7 @@ class PlaybookTools:
         try:
             repo_id = params.get("repo_id")
             if not repo_id:
-                repo_id = await self._get_default_latest_repos()
+                return {"error": "repo_id is required for search_symbol", "symbols": [], "count": 0}
                 
             name = params["name"]
             symbol_type = params.get("symbol_type")
@@ -676,7 +716,13 @@ class PlaybookTools:
             }
         """
         try:
-            repo_id = params["repo_id"]
+            repo_id = params.get("repo_id") or params.get("repo_id", "")
+            if not repo_id:
+                return {
+                    "error": "repo_id is required for list_files. Use list_file_system for non-repo paths.",
+                    "files": [],
+                    "count": 0,
+                }
             pattern = params.get("pattern")
             file_type = params.get("file_type")
 
@@ -689,6 +735,14 @@ class PlaybookTools:
             if truncated:
                 out["truncated"] = True
                 out["note"] = f"Results capped at {cap} files; narrow pattern or file_type."
+            if len(files) == 0:
+                out["hint"] = (
+                    "No files matched in the graph index. "
+                    "The graph may not have File nodes for this pattern. "
+                    "Try: list_repo_directory (walks the actual filesystem), "
+                    "grep_search (searches raw source text), or "
+                    "get_map (shows architecture hubs regardless of file index)."
+                )
             return out
         except Exception as e:
             return {"error": str(e), "files": [], "count": 0}
@@ -716,6 +770,8 @@ class PlaybookTools:
             max_depth = max(1, min(int(params.get("max_depth", 4)), 12))
             max_entries = max(1, min(int(params.get("max_entries", 300)), 2000))
             include_dotfiles = bool(params.get("include_dotfiles", False))
+            mirror_root = self._resolve_mirror_root(params)
+            prefer_mirror_reads = bool(params.get("_prefer_mirror_reads", False))
 
             repo_root = self._get_repo_root_sync(repo_id)
             if not repo_root:
@@ -725,7 +781,20 @@ class PlaybookTools:
                     "count": 0,
                 }
 
-            base = self._safe_dir_under_repo(repo_root, relative_path)
+            listing_root = repo_root
+            listing_mode = "repo"
+            mirror_fallback = False
+            if prefer_mirror_reads and mirror_root:
+                candidate = self._safe_dir_under_repo(mirror_root, relative_path)
+                if candidate:
+                    listing_root = mirror_root
+                    listing_mode = "mirror"
+                    base = candidate
+                else:
+                    mirror_fallback = True
+                    base = self._safe_dir_under_repo(repo_root, relative_path)
+            else:
+                base = self._safe_dir_under_repo(repo_root, relative_path)
             if not base:
                 return {
                     "error": f"Directory not found or outside repo: {relative_path!r}",
@@ -736,7 +805,7 @@ class PlaybookTools:
             entries: list[dict] = []
 
             def rel_to_repo(p: Path) -> str:
-                return str(p.resolve().relative_to(repo_root.resolve())).replace("\\", "/")
+                return str(p.resolve().relative_to(listing_root.resolve())).replace("\\", "/")
 
             if not recursive:
                 for item in sorted(base.iterdir(), key=lambda p: p.name.lower()):
@@ -757,6 +826,9 @@ class PlaybookTools:
                     "entries": entries,
                     "count": len(entries),
                     "truncated": len(entries) >= max_entries,
+                    "listing_mode": listing_mode,
+                    "mirror_root": str(mirror_root) if mirror_root else None,
+                    "mirror_fallback_to_repo": mirror_fallback and listing_mode != "mirror",
                 }
 
             # Recursive walk with depth limit (breadth-friendly: sort each level)
@@ -793,6 +865,9 @@ class PlaybookTools:
                 "entries": entries,
                 "count": len(entries),
                 "truncated": len(entries) >= max_entries,
+                "listing_mode": listing_mode,
+                "mirror_root": str(mirror_root) if mirror_root else None,
+                "mirror_fallback_to_repo": mirror_fallback and listing_mode != "mirror",
             }
         except Exception as e:
             return {"error": str(e), "entries": [], "count": 0}
@@ -861,17 +936,19 @@ class PlaybookTools:
         
         Args:
             params: {
-                path: str (absolute path),
+                path or file_path: str (accepts either key),
                 content: str
             }
         """
         import os
         try:
-            path = params.get("path")
+            # Accept both 'path' and 'file_path' — models often use file_path
+            path = params.get("path") or params.get("file_path")
             content = params.get("content", "")
+            mirrored_from = params.get("_mirrored_from_path")
             
             if not path:
-                return {"error": "Path cannot be empty"}
+                return {"error": "Path cannot be empty (provide 'path' or 'file_path')"}
                 
             # Ensure folder structure exists systematically
             directory = os.path.dirname(path)
@@ -884,7 +961,8 @@ class PlaybookTools:
             return {
                 "success": True,
                 "file_path": path,
-                "bytes_written": len(content)
+                "bytes_written": len(content),
+                "mirrored_from_path": mirrored_from,
             }
         except Exception as e:
             return {"error": str(e)}
@@ -914,11 +992,7 @@ class PlaybookTools:
         """
         repo_id = params.get("repo_id")
         if not repo_id:
-            latest = await self._get_default_latest_repos()
-            repo_id = latest[0] if latest else None
-            
-        if not repo_id:
-            return {"error": "No repository defined"}
+            return {"error": "repo_id is required for get_map"}
 
         limit = params.get("limit")
         if limit is not None:
@@ -1306,10 +1380,7 @@ class PlaybookTools:
 
             repo_id = params.get("repo_id")
             if not repo_id:
-                latest = await self._get_default_latest_repos()
-                if not latest:
-                    return {"error": "No repository defined", "results": "", "count": 0}
-                repo_id = latest[0] if isinstance(latest, list) else latest
+                return {"error": "repo_id is required for search_code", "results": "", "count": 0}
 
             query = params.get("query")
             queries = params.get("queries")
@@ -1327,6 +1398,8 @@ class PlaybookTools:
             includes = params.get("includes") or []
             if includes and not isinstance(includes, list):
                 includes = [str(includes)]
+            mirror_root = self._resolve_mirror_root(params)
+            prefer_mirror_reads = bool(params.get("_prefer_mirror_reads", False))
 
             repo_path = None
             if self.db:
@@ -1341,6 +1414,16 @@ class PlaybookTools:
             if not repo_path:
                 return {"error": f"Physical repository path not found for {repo_id}", "results": "", "count": 0}
 
+            scan_root = Path(repo_path)
+            mirror_mode = False
+            mirror_fallback = False
+            if prefer_mirror_reads and mirror_root:
+                if mirror_root.exists() and mirror_root.is_dir():
+                    scan_root = mirror_root
+                    mirror_mode = True
+                else:
+                    mirror_fallback = True
+
             try:
                 max_lines = max(10, min(int(params.get("limit", 500)), 5000))
             except (TypeError, ValueError):
@@ -1352,13 +1435,27 @@ class PlaybookTools:
                 return {"error": f"Invalid regex: {ex}", "results": "", "count": 0}
 
             output, count, _truncated = PlaybookTools._python_repo_text_search(
-                Path(repo_path), regex, includes, max_lines
+                scan_root, regex, includes, max_lines
             )
 
             if count == 0:
-                return {"success": True, "results": "No matches found.", "count": 0}
+                return {
+                    "success": True,
+                    "results": "No matches found.",
+                    "count": 0,
+                    "search_root": str(scan_root),
+                    "mirror_mode": mirror_mode,
+                    "mirror_fallback_to_repo": mirror_fallback and not mirror_mode,
+                }
 
-            return {"success": True, "results": output, "count": count}
+            return {
+                "success": True,
+                "results": output,
+                "count": count,
+                "search_root": str(scan_root),
+                "mirror_mode": mirror_mode,
+                "mirror_fallback_to_repo": mirror_fallback and not mirror_mode,
+            }
         except Exception as e:
             traceback.print_exc()
             return {"error": f"Grep execution failed: {str(e)}", "results": "", "count": 0}
@@ -1984,6 +2081,9 @@ class PlaybookTools:
             "search_code": self.search_code,
             "search_codebase": self.search_codebase,
             "read_file": self.read_file,
+            "list_file_system": self.list_file_system,
+            "read_file_system": self.read_file_system,
+            "write_file_system": self.write_file_system,
             "get_file_outline": self.get_file_outline,
             "search_symbol": self.search_symbol,
             "get_callers": self.get_callers,

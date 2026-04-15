@@ -4,7 +4,6 @@ version: "1.0"
 description: Automatically generates enterprise load testing scenarios (BlazeMeter/Taurus YAML, JMeter JMX, or LoadRunner Enterprise C-VuGen) by parsing OpenAPI/Swagger specs, Postman collections, or cURL commands.
 category: automation
 complexity: medium
-max_iterations: 10
 ---
 
 # Playbook: generate_load_test_scenarios

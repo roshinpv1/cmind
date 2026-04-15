@@ -119,8 +119,8 @@ class ReadFileSystemInput(BaseModel):
 
 class WriteFileSystemInput(BaseModel):
     """Input for writing a physical file across the entire host."""
-    path: str = Field(description="Absolute path to save the physical file")
-    content: str = Field(description="Text content to write to the file")
+    file_path: str = Field(description="Path (relative or absolute) to save the file, e.g. 'index.html' or 'src/main.py'")
+    content: str = Field(description="Full text content to write to the file")
 
 
 class GrepSearchInput(BaseModel):
@@ -630,10 +630,11 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
         return json.dumps(result, default=str)
     
     @tool(args_schema=WriteFileSystemInput)
-    async def write_file_system(path: str, content: str) -> str:
-        """Write text to a physical file system path (bypassing the Vector DB).
-        Use this to save generated migrations securely to disk. Automatically creates required folder structures."""
-        result = await playbook_tools.write_file_system({"path": path, "content": content})
+    async def write_file_system(file_path: str, content: str) -> str:
+        """Write text content to a file on disk. Use this to save any generated file.
+        Provide file_path as a relative path like 'index.html' or 'src/app.py'.
+        The runtime will place it in the correct workspace location automatically."""
+        result = await playbook_tools.write_file_system({"path": file_path, "content": content})
         return json.dumps(result, default=str)
     
     @tool(args_schema=GrepSearchInput)

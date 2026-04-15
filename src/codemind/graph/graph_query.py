@@ -714,3 +714,194 @@ class GraphQueryService:
             ]
         except (nx.NetworkXNoPath, nx.NodeNotFound):
             return []
+
+    # ── goal-to-entity mapping ────────────────────────────────────────────────
+
+    def find_entities_by_terms(
+        self,
+        repo_id: str,
+        terms: list[str],
+        max_per_term: int = 6,
+        entity_types: tuple[str, ...] = ("Function", "Method", "Class", "Interface", "Struct"),
+    ) -> list[dict]:
+        """
+        Map a list of goal keywords to specific code entities (Functions, Classes).
+
+        Returns deduplicated matches ranked by degree (most connected first),
+        including their community ID so callers can scope by cluster.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G or not terms:
+            return []
+
+        degrees = dict(G.degree())
+        seen: set[str] = set()
+        results: list[dict] = []
+
+        for term in terms:
+            term_lo = term.lower()
+            matches: list[tuple[str, int]] = []
+            for n, data in G.nodes(data=True):
+                if data.get("type") not in entity_types:
+                    continue
+                name = (data.get("name") or data.get("label") or "").lower()
+                if not name or term_lo not in name:
+                    continue
+                if n in seen:
+                    continue
+                matches.append((n, degrees.get(n, 0)))
+
+            # Keep top N by degree
+            matches.sort(key=lambda x: x[1], reverse=True)
+            for n, deg in matches[:max_per_term]:
+                seen.add(n)
+                data = G.nodes[n]
+                results.append({
+                    "node_id":    n,
+                    "name":       data.get("name") or data.get("label"),
+                    "type":       data.get("type"),
+                    "file_path":  self._node_file_path(data),
+                    "start_line": data.get("start_line", 0),
+                    "end_line":   data.get("end_line", 0),
+                    "community":  data.get("community"),
+                    "degree":     deg,
+                })
+
+        # Sort globally by degree
+        results.sort(key=lambda x: x["degree"], reverse=True)
+        return results
+
+    def get_nodes_in_community(
+        self,
+        repo_id: str,
+        community_id: int,
+        entity_types: tuple[str, ...] | None = None,
+        limit: int = 30,
+    ) -> list[dict]:
+        """
+        Return all nodes belonging to a Graphify community cluster.
+
+        Used to restrict analysis scope to the cluster that contains
+        the matched entities.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G:
+            return []
+
+        degrees = dict(G.degree())
+        results: list[dict] = []
+
+        for n, data in G.nodes(data=True):
+            if data.get("community") != community_id:
+                continue
+            ntype = data.get("type")
+            if entity_types and ntype not in entity_types:
+                continue
+            results.append({
+                "node_id":   n,
+                "name":      data.get("name") or data.get("label"),
+                "type":      ntype,
+                "file_path": self._node_file_path(data),
+                "degree":    degrees.get(n, 0),
+            })
+
+        results.sort(key=lambda x: x["degree"], reverse=True)
+        return results[:limit]
+
+    def get_entity_signatures(
+        self,
+        repo_id: str,
+        entity_node_ids: list[str],
+    ) -> list[dict]:
+        """
+        Return lightweight signatures for a list of entity node IDs:
+        name, type, file, line range, immediate callers/callees count,
+        and parent class (for methods).
+
+        This is the "minimal context" — enough for the LLM to understand
+        the entity without fetching full source code.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G:
+            return []
+
+        results: list[dict] = []
+        for node_id in entity_node_ids:
+            if node_id not in G:
+                continue
+            data = G.nodes[node_id]
+
+            # Count direct callers and callees
+            callers_count = sum(
+                1 for u, v, ed in G.in_edges(node_id, data=True)
+                if ed.get("type") == "CALLS"
+            )
+            callees_count = sum(
+                1 for u, v, ed in G.out_edges(node_id, data=True)
+                if ed.get("type") == "CALLS"
+            )
+
+            # Immediate callees (top 5 by name)
+            callees = [
+                G.nodes[v].get("name") or G.nodes[v].get("label")
+                for u, v, ed in G.out_edges(node_id, data=True)
+                if ed.get("type") == "CALLS"
+            ][:5]
+
+            results.append({
+                "node_id":      node_id,
+                "name":         data.get("name") or data.get("label"),
+                "type":         data.get("type"),
+                "file_path":    self._node_file_path(data),
+                "start_line":   data.get("start_line", 0),
+                "end_line":     data.get("end_line", 0),
+                "community":    data.get("community"),
+                "parent_class": data.get("parent_class"),
+                "callers":      callers_count,
+                "callees":      callees_count,
+                "calls":        [c for c in callees if c],
+            })
+
+        return results
+
+    def get_immediate_neighborhood(
+        self,
+        repo_id: str,
+        node_ids: list[str],
+        edge_types: tuple[str, ...] = ("CALLS", "IMPORTS"),
+    ) -> list[dict]:
+        """
+        Expand a set of anchor nodes by one hop along the given edge types.
+
+        Returns the neighbor nodes (deduplicated), including their type,
+        file path, and community — so the caller can decide whether to
+        stay in-cluster or follow cross-community edges.
+        """
+        G = self.graph.get_graph(repo_id)
+        if not G:
+            return []
+
+        seen: set[str] = set(node_ids)
+        neighbors: list[dict] = []
+
+        for nid in node_ids:
+            if nid not in G:
+                continue
+            for u, v, ed in list(G.out_edges(nid, data=True)) + list(G.in_edges(nid, data=True)):
+                other = v if u == nid else u
+                if other in seen:
+                    continue
+                if ed.get("type") not in edge_types:
+                    continue
+                seen.add(other)
+                d = G.nodes[other]
+                neighbors.append({
+                    "node_id":   other,
+                    "name":      d.get("name") or d.get("label"),
+                    "type":      d.get("type"),
+                    "file_path": self._node_file_path(d),
+                    "community": d.get("community"),
+                    "edge_type": ed.get("type"),
+                })
+
+        return neighbors

@@ -15,6 +15,8 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -39,6 +41,13 @@ _NOISE_PATTERNS = (
     ".min.js",
     ".min.css",
 )
+_TRACE_DIR = os.getenv("CODEMIND_TRACE_DIR", "/tmp")
+
+# Local models often emit near-miss tool names. Map them to canonical tools.
+_TOOL_NAME_ALIASES = {
+    "write_file": "write_file_system",
+    "write_file_to_disk": "write_file_system",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,6 +68,23 @@ def _to_str(v: Any) -> str:
 
 def _make_call_id() -> str:
     return f"call_{uuid.uuid4().hex[:8]}"
+
+
+def _canonical_tool_name(name: Any) -> str:
+    raw = _to_str(name).strip()
+    if not raw:
+        return ""
+    return _TOOL_NAME_ALIASES.get(raw, raw)
+
+
+def _safe_filename_part(value: str) -> str:
+    keep = []
+    for ch in value:
+        if ch.isalnum() or ch in ("-", "_", "."):
+            keep.append(ch)
+        else:
+            keep.append("_")
+    return "".join(keep)[:120] or "unknown"
 
 
 # ── ToolCallRepair ────────────────────────────────────────────────────────────
@@ -84,20 +110,42 @@ class ToolCallRepair:
 
         calls: list[dict] = []
 
-        # Strategy A: ```json { ... } ``` fenced blocks
-        for m in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL):
-            obj = _try_parse_json(m.group(1))
-            if obj:
-                calls.extend(self._extract_calls(obj))
+        # Strategy A: ```json { ... } ``` or ```json [ ... ] ``` fenced blocks
+        for m in re.finditer(r"```(?:json)?\s*([{\[].*?[}\]])\s*```", content, re.DOTALL):
+            parsed = _try_parse_json(m.group(1))
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, dict):
+                        calls.extend(self._extract_calls(item))
+            elif isinstance(parsed, dict):
+                calls.extend(self._extract_calls(parsed))
         if calls:
             return calls
 
-        # Strategy B: leading balanced JSON object
-        obj = _leading_json(content)
-        if obj:
-            calls = self._extract_calls(obj)
-            if calls:
-                return calls
+        # Strategy B: leading balanced JSON object or array
+        raw = content.strip()
+        leading = None
+        if raw.startswith("["):
+            # Try to parse a leading JSON array
+            try:
+                import json as _json
+                dec = _json.JSONDecoder()
+                arr, _ = dec.raw_decode(raw)
+                if isinstance(arr, list):
+                    leading = arr
+            except Exception:
+                pass
+        if leading is None:
+            leading = _leading_json(content)
+
+        if isinstance(leading, list):
+            for item in leading:
+                if isinstance(item, dict):
+                    calls.extend(self._extract_calls(item))
+        elif isinstance(leading, dict):
+            calls = self._extract_calls(leading)
+        if calls:
+            return calls
 
         # Strategy C: every JSON object in the text
         for m in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", content, re.DOTALL):
@@ -108,49 +156,55 @@ class ToolCallRepair:
         return calls
 
     def _extract_calls(self, data: dict) -> list[dict]:
+        """Extract tool calls from a single JSON object in any recognised format."""
         calls: list[dict] = []
+
+        def _resolve_args(tc: dict) -> dict:
+            """Return args dict from any of the common arg-key aliases."""
+            return (
+                tc.get("args")
+                or tc.get("arguments")
+                or tc.get("parameters")
+                or tc.get("params")
+                or {}
+            )
+
+        def _resolve_name(tc: dict) -> str:
+            """Return canonical tool name from any of the common name-key aliases."""
+            raw = tc.get("name") or tc.get("tool_name") or tc.get("tool") or tc.get("action") or ""
+            return _canonical_tool_name(raw)
 
         # {"tool_calls": [...]}
         if "tool_calls" in data:
             for tc in data["tool_calls"]:
-                name = tc.get("name", "")
+                name = _resolve_name(tc)
                 if name in self._tools:
                     calls.append({
                         "name": name,
-                        "args": tc.get("args") or tc.get("arguments") or {},
+                        "args": _resolve_args(tc),
                         "id": tc.get("id") or _make_call_id(),
                         "type": "tool_call",
                     })
             return calls
 
-        # {"tool": "name", "args": {...}}
-        if "tool" in data and _to_str(data.get("tool")) in self._tools:
-            name = _to_str(data["tool"])
+        # Single-call object: any combination of (name|tool_name|tool|action) + (args|params|arguments|parameters)
+        name = _resolve_name(data)
+        if name in self._tools:
             calls.append({
                 "name": name,
-                "args": data.get("args") or data.get("arguments") or data.get("parameters") or {},
-                "id": _make_call_id(),
-                "type": "tool_call",
-            })
-            return calls
-
-        # {"name": "tool_name", ...}
-        if "name" in data and _to_str(data.get("name")) in self._tools:
-            name = _to_str(data["name"])
-            calls.append({
-                "name": name,
-                "args": data.get("args") or data.get("arguments") or data.get("parameters") or {},
+                "args": _resolve_args(data),
                 "id": _make_call_id(),
                 "type": "tool_call",
             })
             return calls
 
         # {"action": "tool_name", ...} — "planning JSON" common in local models
-        if "action" in data and isinstance(data["action"], str) and data["action"] in self._tools:
+        canonical_action = _canonical_tool_name(data.get("action"))
+        if canonical_action and canonical_action in self._tools:
             skip = {"action", "phase", "tool", "name", "arguments", "args", "parameters"}
             args = {k: v for k, v in data.items() if k not in skip}
             calls.append({
-                "name": data["action"],
+                "name": canonical_action,
                 "args": args,
                 "id": _make_call_id(),
                 "type": "tool_call",
@@ -177,6 +231,8 @@ class ToolDispatcher:
         playbook_tools,
         available_tool_names: set[str],
         enforced_repo_id: str | list[str] | None = None,
+        enforced_mirror_root: str | None = None,
+        prefer_mirror_reads: bool = False,
     ) -> None:
         self.tools = playbook_tools
         self._repair = ToolCallRepair(available_tool_names)
@@ -185,6 +241,17 @@ class ToolDispatcher:
             self._repo_id: str | None = enforced_repo_id[0] if enforced_repo_id else None
         else:
             self._repo_id = enforced_repo_id or None
+        self._mirror_root = str(Path(enforced_mirror_root).resolve()) if enforced_mirror_root else None
+        self._prefer_mirror_reads = bool(prefer_mirror_reads)
+        # Pre-create execution trace directory so it is always visible on disk.
+        # This avoids confusion when no tool calls have been executed yet.
+        self._exec_trace_dir: Path | None = None
+        try:
+            trace_root = Path(_TRACE_DIR) / "codemind_executed_tool_calls"
+            trace_root.mkdir(parents=True, exist_ok=True)
+            self._exec_trace_dir = trace_root
+        except Exception:
+            logger.debug("Failed to initialize executed tool call trace directory", exc_info=True)
 
     # ── public repair entry point ─────────────────────────────────────────────
 
@@ -339,6 +406,93 @@ class ToolDispatcher:
             result.append(tc)
         return result
 
+    def _rewrite_write_path_to_mirror(self, args: dict) -> dict:
+        """
+        Rewrite write_file_system path into run-scoped mirror root.
+
+        Guarantees generated files never mutate original source paths.
+        """
+        if not self._mirror_root:
+            return args
+
+        # Accept both 'path' and 'file_path' — models commonly use file_path
+        raw_path = _to_str(args.get("path") or args.get("file_path")).strip()
+        if not raw_path:
+            return args
+
+        mirror_root = Path(self._mirror_root)
+        mirror_root.mkdir(parents=True, exist_ok=True)
+        path_obj = Path(raw_path)
+        target_path: Path
+
+        # If path is absolute and belongs to repo root, preserve repo-relative structure.
+        if path_obj.is_absolute() and self._repo_id and hasattr(self.tools, "_get_repo_root_sync"):
+            repo_root = self.tools._get_repo_root_sync(self._repo_id)  # internal helper usage by design
+            if repo_root:
+                try:
+                    rel = path_obj.resolve().relative_to(repo_root.resolve())
+                    target_path = mirror_root / rel
+                except ValueError:
+                    # External absolute path: keep under _external with safe flattening.
+                    safe_rel = str(path_obj).lstrip("/").replace(":", "_")
+                    target_path = mirror_root / "_external" / safe_rel
+            else:
+                safe_rel = str(path_obj).lstrip("/").replace(":", "_")
+                target_path = mirror_root / "_external" / safe_rel
+        elif path_obj.is_absolute():
+            safe_rel = str(path_obj).lstrip("/").replace(":", "_")
+            target_path = mirror_root / "_external" / safe_rel
+        else:
+            target_path = mirror_root / path_obj
+
+        patched = dict(args)
+        patched["_mirrored_from_path"] = raw_path
+        patched["path"] = str(target_path.resolve())
+        return patched
+
+    def _inject_execution_context(self, args: dict) -> dict:
+        """Attach mirror execution context so read/search tools can prefer mirror files."""
+        if not self._mirror_root:
+            return args
+        patched = dict(args)
+        patched.setdefault("_mirror_root", self._mirror_root)
+        if self._prefer_mirror_reads:
+            patched.setdefault("_prefer_mirror_reads", True)
+        return patched
+
+    def _write_executed_tool_call_trace(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        args: dict,
+        result: dict | None = None,
+        error: str | None = None,
+    ) -> None:
+        """
+        Persist one JSON file per executed tool call for post-run debugging.
+        """
+        try:
+            trace_root = self._exec_trace_dir or (Path(_TRACE_DIR) / "codemind_executed_tool_calls")
+            trace_root.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+            fname = f"{ts}_{_safe_filename_part(call_id)}_{_safe_filename_part(name)}.json"
+            payload = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "call_id": call_id,
+                "tool_name": name,
+                "args": args,
+                "result": result,
+                "error": error,
+                "repo_id_enforced": self._repo_id,
+                "mirror_root": self._mirror_root,
+            }
+            with open(trace_root / fname, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, default=str)
+        except Exception:
+            # tracing is best-effort and must never break tool execution
+            logger.debug("Failed to write executed tool call trace", exc_info=True)
+
     # ── dispatch ──────────────────────────────────────────────────────────────
 
     async def dispatch(self, raw_calls: list[dict]) -> list[ToolMessage]:
@@ -356,6 +510,9 @@ class ToolDispatcher:
         for tc in calls:
             name = _to_str(tc.get("name"))
             args = tc.get("args") or {}
+            args = self._inject_execution_context(args)
+            if name == "write_file_system":
+                args = self._rewrite_write_path_to_mirror(args)
             call_id = tc.get("id") or _make_call_id()
 
             try:
@@ -364,9 +521,23 @@ class ToolDispatcher:
                 content = sanitize_tool_output_for_tool(
                     name, json.dumps(result, default=str)
                 )
+                self._write_executed_tool_call_trace(
+                    call_id=call_id,
+                    name=name,
+                    args=args,
+                    result=result,
+                    error=None,
+                )
             except Exception as exc:
                 logger.exception("Tool '%s' execution failed: %s", name, exc)
                 content = json.dumps({"error": str(exc), "tool": name})
+                self._write_executed_tool_call_trace(
+                    call_id=call_id,
+                    name=name,
+                    args=args,
+                    result=None,
+                    error=str(exc),
+                )
 
             messages.append(
                 ToolMessage(content=content, tool_call_id=call_id, name=name)

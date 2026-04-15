@@ -9,7 +9,6 @@ description: >
   canonical Ab Initio equivalents in GDE Graphs, Conduct>It Plans, and the broader EME/Co>Op ecosystem.
 category: migration
 complexity: high
-max_iterations: 15
 ---
 
 # Playbook: migrate_ssis_to_abinitio v2.0

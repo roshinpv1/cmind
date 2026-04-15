@@ -4,7 +4,6 @@ version: "1.0"
 description: Evaluates build-from-scratch vs reuse-existing-components with cost/effort comparison
 category: evaluation
 complexity: medium
-max_iterations: 5
 ---
 
 # Playbook: evaluate_build_vs_reuse

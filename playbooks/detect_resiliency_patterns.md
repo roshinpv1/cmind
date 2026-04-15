@@ -4,7 +4,6 @@ version: "1.0"
 description: Comprehensive Resiliency & Chaos Engineering readiness analyzer. Detects stability patterns, decomposition strategies, integration patterns, database patterns, observability, and cross-cutting concerns across application code AND CI/CD pipelines.
 category: analysis
 complexity: high
-max_iterations: 10
 ---
 
 # Playbook: detect_resiliency_patterns

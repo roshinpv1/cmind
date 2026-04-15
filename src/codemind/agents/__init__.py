@@ -10,5 +10,6 @@ Provides:
 from .planner_state import PlannerState
 from .planner import PlannerAgent
 from .playbook_selector import PlaybookSelector
+from .run_orchestrator import RunOrchestrator
 
-__all__ = ["PlannerState", "PlannerAgent", "PlaybookSelector"]
+__all__ = ["PlannerState", "PlannerAgent", "PlaybookSelector", "RunOrchestrator"]

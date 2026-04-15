@@ -5,14 +5,22 @@ All playbooks run through the same ReAct loop regardless of their
 search_strategy.mode.  The mode only influences two things:
 
   react          The agent starts with an empty context and discovers
-                 code via graph/search tools (full exploration, high
-                 max_iterations).
+                 code via graph/search tools.  The agent stops when it
+                 has enough evidence — max_iterations is just a safety
+                 ceiling, not a behavioral target.
 
   catalog /      The executor pre-seeds the system prompt with vector-
   semantic /     search results so the agent has immediate context and
-  hybrid         can synthesise in 1-3 turns (low max_iterations).
+  hybrid         typically finishes in fewer turns.
 
-There is no separate "linear" code path.  No conditionals per playbook.
+Stopping behaviour
+──────────────────
+The agent exits the loop naturally when it produces a response with no
+new tool calls.  max_iterations is a safety net against infinite loops
+and runaway API cost — it is NOT a measure of how thorough the agent
+should be.  Playbooks do NOT need to specify max_iterations; the global
+default (CODEMIND_REACT_MAX_ITERATIONS, default 20) is intentionally
+generous so the agent always has room to explore fully.
 
 Parallel execution safety
 ─────────────────────────
@@ -49,10 +57,13 @@ from .tool_dispatch import ToolDispatcher
 logger = logging.getLogger(__name__)
 
 # ── Tuning ────────────────────────────────────────────────────────────────────
-# max_iterations when the playbook YAML doesn't set one explicitly
-_REACT_DEFAULT_ITERS   = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "12"))
-# for seeded (catalog/hybrid/semantic) playbooks the agent only needs a few turns
-_SEEDED_DEFAULT_ITERS  = int(os.getenv("CODEMIND_SEEDED_MAX_ITERATIONS", "3"))
+# Safety ceiling — agent exits naturally before this in normal operation.
+# Raised to 20 so deep-analysis playbooks are never cut off prematurely.
+# Override per-deployment with the env var; playbooks should NOT hardcode this.
+_REACT_DEFAULT_ITERS   = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "20"))
+# Seeded playbooks already have context injected — they typically finish in 2-4
+# turns, but give them a bit more room so they can still call tools if needed.
+_SEEDED_DEFAULT_ITERS  = int(os.getenv("CODEMIND_SEEDED_MAX_ITERATIONS", "8"))
 # max chars to inject from pre-seeded vector search
 _SEED_MAX_CHARS        = int(os.getenv("CODEMIND_SEED_MAX_CHARS", "40000"))
 
@@ -90,6 +101,32 @@ def _log_llm_error(
         logger.warning("LLM error logged to %s/llm_error_%s.json", error_dir, ts)
     except Exception as log_err:
         logger.warning("Failed to log LLM error: %s", log_err)
+
+
+
+
+def _extract_changed_files_claim(answer: str) -> list[str]:
+    """Best-effort parse of claimed changed files from final JSON-style answer."""
+    text = (answer or "").strip()
+    if not text:
+        return []
+
+    candidates: list[str] = []
+    fenced = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        candidates.append(fenced.group(1))
+    candidates.append(text)
+
+    for raw in candidates:
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            changed = obj.get("changed_files")
+            if isinstance(changed, list):
+                return [str(p) for p in changed if str(p).strip()]
+    return []
 
 
 # ── PlaybookExecutor ──────────────────────────────────────────────────────────
@@ -177,9 +214,17 @@ class PlaybookExecutor:
         is_seeded = mode in _SEED_MODES
 
         # ── 1. max_iterations ───────────────────────────────────────────────
-        max_iter = int(getattr(playbook, "max_iterations", 0) or 0)
-        if not max_iter:
+        # The agent exits naturally (no-tool-call response) in normal operation.
+        # max_iterations is only a safety ceiling — playbooks don't need to set it.
+        # If a playbook does set it, honour it; otherwise use the global default.
+        _pb_max = int(getattr(playbook, "max_iterations", 0) or 0)
+        if _pb_max:
+            max_iter = _pb_max
+            logger.debug("max_iterations from playbook: %d", max_iter)
+        else:
             max_iter = _SEEDED_DEFAULT_ITERS if is_seeded else _REACT_DEFAULT_ITERS
+            logger.debug("max_iterations from default (%s): %d",
+                         "seeded" if is_seeded else "react", max_iter)
 
         # ── 2. pre-seed context (catalog / semantic / hybrid playbooks) ──────
         seed_context = ""
@@ -187,7 +232,14 @@ class PlaybookExecutor:
             seed_context = await self._build_seed_context(playbook, user_input)
 
         # ── 3. system prompt ─────────────────────────────────────────────────
-        sys_prompt = self._build_system_prompt(playbook, seed_context)
+        repo_id_for_prompt = user_input.get("repo_id")
+        if repo_id_for_prompt in ("latest", ["latest"]):
+            repo_id_for_prompt = None
+        if isinstance(repo_id_for_prompt, list):
+            repo_id_for_prompt = repo_id_for_prompt[0] if repo_id_for_prompt else None
+        sys_prompt = self._build_system_prompt(
+            playbook, seed_context, repo_id=repo_id_for_prompt
+        )
 
         # ── 4. per-call isolated objects ─────────────────────────────────────
         from .langchain_tools import create_langchain_tools
@@ -196,12 +248,26 @@ class PlaybookExecutor:
         enforced_repo_id = user_input.get("repo_id")
         if enforced_repo_id in ("latest", ["latest"]):
             enforced_repo_id = None
+        execution_context = user_input.get("execution_context") if isinstance(user_input, dict) else None
+        enforced_mirror_root = None
+        prefer_mirror_reads = False
+        if isinstance(execution_context, dict):
+            enforced_mirror_root = execution_context.get("mirror_root")
+            prefer_mirror_reads = bool(
+                execution_context.get("prefer_mirror_reads", bool(enforced_mirror_root))
+            )
 
         lc_tools       = create_langchain_tools(self.tools, enforced_repo_id=enforced_repo_id)
         tool_names     = {t.name for t in lc_tools}
         llm_with_tools = self._get_chat_model().bind_tools(lc_tools)  # new instance per call
         compactor      = ContextCompactor(llm_driver=self.llm, threshold_ratio=0.6)
-        dispatcher     = ToolDispatcher(self.tools, tool_names, enforced_repo_id=enforced_repo_id)
+        dispatcher     = ToolDispatcher(
+            self.tools,
+            tool_names,
+            enforced_repo_id=enforced_repo_id,
+            enforced_mirror_root=enforced_mirror_root,
+            prefer_mirror_reads=prefer_mirror_reads,
+        )
         agent          = ReActAgent(
             llm_driver=self.llm,
             llm_with_tools=llm_with_tools,
@@ -224,9 +290,12 @@ class PlaybookExecutor:
             goal += f"\n\nRepository info: {json.dumps(ctx, default=str)}"
         goal = privacy_filter.mask(goal)
 
-        # ── 6. graph prefetch (exploration playbooks only) ───────────────────
+        # ── 6. graph prefetch (ALL repo-scoped playbooks) ────────────────────
+        # Run for both exploration (react) and seeded (catalog/semantic/hybrid)
+        # playbooks whenever a repo_id is available, so every repo analysis
+        # starts with concrete graph data rather than a cold start.
         prefetch_block = ""
-        if not is_seeded and repo_id_str:
+        if repo_id_str:
             goal_hint = user_input.get("goal") or user_input.get("query") or ""
             try:
                 prefetch = self._data_fetcher.build_graph_prefetch(
@@ -257,8 +326,22 @@ class PlaybookExecutor:
             f"Completed: iterations={result.iterations} tool_calls={result.tool_calls_made}"
         )
 
+        generated_files = list(dict.fromkeys(result.generated_files))
+        effective_error = result.error
+        claimed_changed_files = _extract_changed_files_claim(result.answer)
+
+        # Integrity check: only flag if the model explicitly claims file writes in its
+        # answer but none actually landed on disk (i.e. false success narrative).
+        # This preserves agent autonomy — we do NOT force writes for non-write tasks.
+        if claimed_changed_files and not generated_files and not effective_error:
+            logs.append(
+                f"Note: model claimed {len(claimed_changed_files)} changed file(s) "
+                "but no write tool calls were observed. "
+                "Files may not have been persisted to mirror workspace."
+            )
+
         return {
-            "success": result.error is None,
+            "success": effective_error is None,
             "outputs": {
                 "result":        result.answer,
                 "data":          None,
@@ -266,8 +349,10 @@ class PlaybookExecutor:
                 "tool_result":   None,
                 "iterations":    result.iterations,
                 "playbook":      playbook_name,
+                "generated_files": generated_files,
+                "claimed_changed_files": claimed_changed_files,
             },
-            "error": result.error,
+            "error": effective_error,
             "logs":  logs,
         }
 
@@ -348,7 +433,42 @@ class PlaybookExecutor:
 
     # ── system prompt builder ─────────────────────────────────────────────────
 
-    def _build_system_prompt(self, playbook, seed_context: str = "") -> str:
+    # Grouped descriptions of available repository analysis tools.
+    _REPO_TOOLS_HINT = """
+### AVAILABLE REPOSITORY ANALYSIS TOOLS
+When a repo_id is provided you have access to the following tools. Use them to
+gather real evidence before drawing conclusions.
+
+**Architecture & Graph**
+- `get_map` — high-level architecture map: top-connected nodes, entry points, clusters.
+  Start here for any repo-scoped analysis.
+- `get_file_outline` — class/function outline of a file without reading the full source.
+- `get_dependencies` — imports and reverse-imports for a file (`direction=imports|imported_by`).
+- `get_callers` — all callers of a function (who calls it).
+- `get_callees` — all callees of a function (what it calls).
+- `trace_path` — shortest call/import path between two symbols.
+
+**Code Search**
+- `search_code` — semantic + keyword hybrid search across the indexed codebase.
+  Use targeted queries; batch multiple patterns in one call.
+- `search_symbol` — find a class or function by exact name.
+- `grep_search` — regex search across the raw source files.
+
+**File Reading**
+- `read_file` — read a file by path and repo_id (supports line ranges).
+  Call `get_file_outline` first on large files to pick the right range.
+- `list_files` — list files in the repo matching a glob pattern.
+
+**Tip:** build a mental map with `get_map` → identify suspects → confirm with
+`read_file` + `get_callers`/`get_callees` → synthesise findings.
+"""
+
+    def _build_system_prompt(
+        self,
+        playbook,
+        seed_context: str = "",
+        repo_id: str | None = None,
+    ) -> str:
         """
         Assemble the base system prompt.
         Applies to ALL playbooks through the unified path.
@@ -411,6 +531,11 @@ class PlaybookExecutor:
                 "provided in the pre-retrieved context below. Do NOT invent, guess, or "
                 "recall anything from training data.\n"
             )
+
+        # Repo analysis tools hint — tell the agent what tools are available
+        # and how to use them effectively for deep codebase exploration.
+        if repo_id:
+            prompt += self._REPO_TOOLS_HINT
 
         # Pre-seeded context (catalog / semantic / hybrid playbooks)
         if seed_context:
