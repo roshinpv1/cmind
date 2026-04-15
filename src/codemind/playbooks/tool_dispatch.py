@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,13 @@ logger = logging.getLogger(__name__)
 _MAX_CALLS_PER_TURN = int(os.getenv("CODEMIND_MAX_TOOL_CALLS_PER_TURN", "8"))
 _ONE_SEARCH_PER_TURN = (
     os.getenv("CODEMIND_ONE_SEARCH_PER_TURN", "1").lower() not in ("0", "false", "no")
+)
+_ENFORCE_MIRROR_WRITES = (
+    os.getenv("CODEMIND_ENFORCE_MIRROR_WRITES", "0").lower() in ("1", "true", "yes")
+)
+_MAX_IDENTICAL_CALLS_PER_RUN = max(
+    2,
+    int(os.getenv("CODEMIND_MAX_IDENTICAL_CALLS_PER_RUN", "4")),
 )
 _NOISE_TOOLS = frozenset({"search_codebase", "search_code"})
 _NOISE_PATTERNS = (
@@ -48,6 +56,100 @@ _TOOL_NAME_ALIASES = {
     "write_file": "write_file_system",
     "write_file_to_disk": "write_file_system",
 }
+
+# Tools that operate on repository-scoped graph/index data and therefore require
+# a repo_id (either provided in args or enforced by dispatcher context).
+_REPO_REQUIRED_TOOLS = frozenset({
+    "get_map",
+    "trace_path",
+    "graphify_query",
+    "graphify_path",
+    "graphify_explain",
+    "graphify_run",
+    "search_code",
+    "search_codebase",
+    "read_file",
+    "get_file_outline",
+    "search_symbol",
+    "get_callers",
+    "get_callees",
+    "get_dependencies",
+    "list_files",
+    "list_repo_directory",
+})
+
+# Tools with potential side effects.
+_WRITE_TOOLS = frozenset({
+    "write_file_system",
+    "save_catalog_entry",
+    "graphify_add",
+})
+
+# Read-only introspection/query tools.
+_READ_ONLY_TOOLS = frozenset({
+    "get_map",
+    "trace_path",
+    "graphify_query",
+    "graphify_path",
+    "graphify_explain",
+    "search_code",
+    "search_codebase",
+    "read_file",
+    "get_file_outline",
+    "search_symbol",
+    "get_callers",
+    "get_callees",
+    "get_dependencies",
+    "list_files",
+    "list_repo_directory",
+    "list_file_system",
+    "read_file_system",
+    "search_catalogs",
+})
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """Runtime policy metadata for one tool."""
+
+    name: str
+    read_only: bool = True
+    concurrency_safe: bool = True
+    requires_repo: bool = False
+    requires_mirror: bool = False
+    idempotent: bool = True
+    fallback_tools: tuple[str, ...] = ()
+
+
+def _build_tool_specs(available_tool_names: set[str]) -> dict[str, ToolSpec]:
+    """Build default ToolSpec entries for currently available tools."""
+    specs: dict[str, ToolSpec] = {}
+    for raw_name in available_tool_names:
+        name = _canonical_tool_name(raw_name)
+        if not name:
+            continue
+        is_write = name in _WRITE_TOOLS
+        read_only = (name in _READ_ONLY_TOOLS) and not is_write
+        specs[name] = ToolSpec(
+            name=name,
+            read_only=read_only,
+            concurrency_safe=True,
+            requires_repo=name in _REPO_REQUIRED_TOOLS,
+            requires_mirror=(name == "write_file_system"),
+            idempotent=(name not in {"graphify_add", "save_catalog_entry"}),
+            fallback_tools=(
+                ("list_repo_directory", "get_map")
+                if name == "list_files"
+                else ("list_files", "get_map")
+                if name == "list_repo_directory"
+                else ("list_repo_directory", "list_files")
+                if name == "get_map"
+                else ("list_repo_directory", "get_map")
+                if name in {"search_code", "search_codebase", "read_file"}
+                else ()
+            ),
+        )
+    return specs
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -236,6 +338,7 @@ class ToolDispatcher:
     ) -> None:
         self.tools = playbook_tools
         self._repair = ToolCallRepair(available_tool_names)
+        self._tool_specs = _build_tool_specs(available_tool_names)
         # Normalise to a single string for injection
         if isinstance(enforced_repo_id, list):
             self._repo_id: str | None = enforced_repo_id[0] if enforced_repo_id else None
@@ -243,6 +346,7 @@ class ToolDispatcher:
             self._repo_id = enforced_repo_id or None
         self._mirror_root = str(Path(enforced_mirror_root).resolve()) if enforced_mirror_root else None
         self._prefer_mirror_reads = bool(prefer_mirror_reads)
+        self._call_signature_counts: dict[str, int] = {}
         # Pre-create execution trace directory so it is always visible on disk.
         # This avoids confusion when no tool calls have been executed yet.
         self._exec_trace_dir: Path | None = None
@@ -258,6 +362,121 @@ class ToolDispatcher:
     def repair_tool_calls(self, content: str) -> list[dict]:
         """Try to extract tool calls from plain-text LLM content."""
         return self._repair.repair(content)
+
+    def get_tool_specs(self) -> dict[str, ToolSpec]:
+        """Expose immutable runtime tool policy metadata for debugging/telemetry."""
+        return dict(self._tool_specs)
+
+    @staticmethod
+    def _sanitize_args_for_signature(args: dict) -> dict:
+        """Drop volatile/runtime-only keys before computing call signatures."""
+        if not isinstance(args, dict):
+            return {}
+        volatile = {
+            "_mirror_root",
+            "_prefer_mirror_reads",
+            "_mirrored_from_path",
+            "id",
+            "request_id",
+            "timestamp",
+        }
+        return {k: v for k, v in args.items() if k not in volatile}
+
+    def _call_signature(self, name: str, args: dict) -> str:
+        """Return stable signature for repetition checks and telemetry."""
+        safe_args = self._sanitize_args_for_signature(args)
+        try:
+            arg_blob = json.dumps(safe_args, sort_keys=True, default=str)
+        except Exception:
+            arg_blob = _to_str(safe_args)
+        return f"{name}|{arg_blob}"
+
+    def _classify_outcome(
+        self,
+        *,
+        name: str,
+        args: dict,
+        result: dict | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> dict:
+        """
+        Normalize tool outcome for agent-orchestration decisions.
+
+        outcome ∈ {success, no_data, retryable_error, fatal_error}
+        """
+        spec = self._tool_specs.get(name)
+        signature = self._call_signature(name, args)
+        fallback_tools = list(spec.fallback_tools) if spec else []
+        evidence_score = 0.0
+        outcome = "success"
+
+        if error:
+            low = error.lower()
+            if any(x in low for x in ("timeout", "temporar", "rate", "unavailable", "connection")):
+                outcome = "retryable_error"
+            else:
+                outcome = "fatal_error"
+        elif code and str(code).startswith("policy_"):
+            outcome = "fatal_error"
+        else:
+            payload = result if isinstance(result, dict) else {}
+            if payload.get("error"):
+                low = str(payload.get("error", "")).lower()
+                if "no matches found" in low or "not found" in low:
+                    outcome = "no_data"
+                else:
+                    outcome = "retryable_error"
+            else:
+                count = payload.get("count")
+                if isinstance(count, int):
+                    if count > 0:
+                        evidence_score += 1.0
+                    else:
+                        outcome = "no_data"
+                for key in ("results", "files", "content", "context", "path", "top_nodes", "entry_points"):
+                    val = payload.get(key)
+                    if isinstance(val, list) and len(val) > 0:
+                        evidence_score += 0.6
+                    elif isinstance(val, str):
+                        txt = val.strip().lower()
+                        if txt and txt not in {"no matches found.", "no matching files.", "no results found.", "[]", "{}"}:
+                            evidence_score += 0.4
+                if evidence_score <= 0.0 and outcome == "success":
+                    outcome = "no_data"
+
+        return {
+            "outcome": outcome,
+            "evidence_score": round(min(evidence_score, 2.0), 3),
+            "call_signature": signature,
+            "fallback_tools": fallback_tools,
+            "tool": name,
+        }
+
+    def _check_repetition(self, *, name: str, args: dict) -> tuple[bool, dict | None]:
+        """
+        Deny identical repeated calls beyond threshold (loop breaker).
+        """
+        signature = self._call_signature(name, args)
+        new_count = self._call_signature_counts.get(signature, 0) + 1
+        self._call_signature_counts[signature] = new_count
+        if new_count <= _MAX_IDENTICAL_CALLS_PER_RUN:
+            return True, None
+        spec = self._tool_specs.get(name)
+        return False, {
+            "error": (
+                f"Identical tool call '{name}' repeated {new_count} times. "
+                f"Loop breaker triggered at {_MAX_IDENTICAL_CALLS_PER_RUN}."
+            ),
+            "code": "policy_repetition_limit",
+            "tool": name,
+            "call_signature": signature,
+            "repeat_count": new_count,
+            "max_identical_calls": _MAX_IDENTICAL_CALLS_PER_RUN,
+            "tool_spec": {
+                "fallback_tools": list(spec.fallback_tools) if spec else [],
+            },
+        }
 
     # ── coalescing ────────────────────────────────────────────────────────────
 
@@ -460,6 +679,53 @@ class ToolDispatcher:
             patched.setdefault("_prefer_mirror_reads", True)
         return patched
 
+    def _evaluate_policy(self, name: str, args: dict) -> tuple[bool, dict | None]:
+        """
+        Enforce dispatcher-level tool policy before execution.
+
+        Returns:
+            (True, None) if allowed
+            (False, error_payload) if denied
+        """
+        spec = self._tool_specs.get(name)
+        if not spec:
+            return False, {
+                "error": f"Tool '{name}' is not in the active tool registry.",
+                "code": "policy_tool_not_allowed",
+                "tool": name,
+            }
+
+        effective_repo_id = _to_str(args.get("repo_id")) or _to_str(self._repo_id)
+        if spec.requires_repo and not effective_repo_id:
+            return False, {
+                "error": (
+                    f"Tool '{name}' requires repo_id but none was provided/enforced."
+                ),
+                "code": "policy_repo_required",
+                "tool": name,
+                "tool_spec": {
+                    "requires_repo": spec.requires_repo,
+                    "read_only": spec.read_only,
+                    "fallback_tools": list(spec.fallback_tools),
+                },
+            }
+
+        if spec.requires_mirror and _ENFORCE_MIRROR_WRITES and not self._mirror_root:
+            return False, {
+                "error": (
+                    f"Tool '{name}' requires an enforced mirror root for safe writes, "
+                    "but no mirror root is configured."
+                ),
+                "code": "policy_mirror_required",
+                "tool": name,
+                "tool_spec": {
+                    "requires_mirror": spec.requires_mirror,
+                    "read_only": spec.read_only,
+                },
+            }
+
+        return True, None
+
     def _write_executed_tool_call_trace(
         self,
         *,
@@ -515,9 +781,70 @@ class ToolDispatcher:
                 args = self._rewrite_write_path_to_mirror(args)
             call_id = tc.get("id") or _make_call_id()
 
+            allowed, deny_payload = self._evaluate_policy(name, args)
+            if not allowed:
+                if isinstance(deny_payload, dict):
+                    deny_payload = dict(deny_payload)
+                    deny_payload["_meta"] = self._classify_outcome(
+                        name=name,
+                        args=args,
+                        result=deny_payload,
+                        error=deny_payload.get("error"),
+                        code=deny_payload.get("code"),
+                    )
+                content = sanitize_tool_output_for_tool(
+                    name, json.dumps(deny_payload, default=str)
+                )
+                self._write_executed_tool_call_trace(
+                    call_id=call_id,
+                    name=name,
+                    args=args,
+                    result=deny_payload,
+                    error=deny_payload.get("error") if isinstance(deny_payload, dict) else "policy_denied",
+                )
+                messages.append(
+                    ToolMessage(content=content, tool_call_id=call_id, name=name)
+                )
+                continue
+
+            allowed_repeat, repeat_payload = self._check_repetition(name=name, args=args)
+            if not allowed_repeat:
+                repeat_payload = dict(repeat_payload or {})
+                repeat_payload["_meta"] = self._classify_outcome(
+                    name=name,
+                    args=args,
+                    result=repeat_payload,
+                    error=repeat_payload.get("error"),
+                    code=repeat_payload.get("code"),
+                )
+                content = sanitize_tool_output_for_tool(
+                    name, json.dumps(repeat_payload, default=str)
+                )
+                self._write_executed_tool_call_trace(
+                    call_id=call_id,
+                    name=name,
+                    args=args,
+                    result=repeat_payload,
+                    error=repeat_payload.get("error"),
+                )
+                messages.append(
+                    ToolMessage(content=content, tool_call_id=call_id, name=name)
+                )
+                continue
+
             try:
                 result = await self.tools.execute_tool(name, args)
                 result = self._filter_noise(name, result)
+                if isinstance(result, dict):
+                    result = dict(result)
+                else:
+                    result = {"result": result}
+                result["_meta"] = self._classify_outcome(
+                    name=name,
+                    args=args,
+                    result=result,
+                    error=result.get("error"),
+                )
                 content = sanitize_tool_output_for_tool(
                     name, json.dumps(result, default=str)
                 )
@@ -530,12 +857,22 @@ class ToolDispatcher:
                 )
             except Exception as exc:
                 logger.exception("Tool '%s' execution failed: %s", name, exc)
-                content = json.dumps({"error": str(exc), "tool": name})
+                err_payload = {
+                    "error": str(exc),
+                    "tool": name,
+                }
+                err_payload["_meta"] = self._classify_outcome(
+                    name=name,
+                    args=args,
+                    result=err_payload,
+                    error=str(exc),
+                )
+                content = json.dumps(err_payload)
                 self._write_executed_tool_call_trace(
                     call_id=call_id,
                     name=name,
                     args=args,
-                    result=None,
+                    result=err_payload,
                     error=str(exc),
                 )
 

@@ -1391,7 +1391,22 @@ class PlaybookTools:
                     return {"error": "No valid queries provided", "results": "", "count": 0}
                 search_pattern = f"({'|'.join(escaped_queries)})"
             elif query:
-                search_pattern = str(query)
+                # Natural-language fallback: users/models often emit
+                # "A OR B OR C" instead of regex alternation "(A|B|C)".
+                # Convert this common pattern to a safe escaped alternation.
+                raw_query = str(query).strip()
+                if re.search(r"\s+\bOR\b\s+", raw_query, flags=re.IGNORECASE):
+                    parts = [
+                        p.strip()
+                        for p in re.split(r"\s+\bOR\b\s+", raw_query, flags=re.IGNORECASE)
+                        if p and p.strip()
+                    ]
+                    if len(parts) > 1:
+                        search_pattern = f"({'|'.join(re.escape(p) for p in parts)})"
+                    else:
+                        search_pattern = raw_query
+                else:
+                    search_pattern = raw_query
             else:
                 return {"error": "No query or queries provided for grep", "results": "", "count": 0}
 
@@ -1443,6 +1458,7 @@ class PlaybookTools:
                     "success": True,
                     "results": "No matches found.",
                     "count": 0,
+                    "search_pattern": search_pattern,
                     "search_root": str(scan_root),
                     "mirror_mode": mirror_mode,
                     "mirror_fallback_to_repo": mirror_fallback and not mirror_mode,
@@ -1452,6 +1468,7 @@ class PlaybookTools:
                 "success": True,
                 "results": output,
                 "count": count,
+                "search_pattern": search_pattern,
                 "search_root": str(scan_root),
                 "mirror_mode": mirror_mode,
                 "mirror_fallback_to_repo": mirror_fallback and not mirror_mode,
