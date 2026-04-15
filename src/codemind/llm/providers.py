@@ -9,6 +9,25 @@ from .token_manager import ApigeeTokenManager, EnterpriseTokenManager
 
 import re as _re_mod
 
+
+def _safe_extract_message(data: dict) -> dict:
+    """Safely extract the message dict from an OpenAI-style API response.
+
+    Handles missing keys, null values, and content-filter refusals without
+    raising KeyError.
+    """
+    choices = data.get("choices")
+    if not choices or not isinstance(choices, list):
+        return {}
+    first = choices[0]
+    if not isinstance(first, dict):
+        return {}
+    msg = first.get("message")
+    if not isinstance(msg, dict):
+        return {}
+    return msg
+
+
 class LocalDriver(LLMDriver):
     def __init__(self, config: LLMConfig):
         self.config = config
@@ -85,7 +104,14 @@ class LocalDriver(LLMDriver):
                 print(f"[LLM] Error {response.status_code}: {error_body}")
                 raise Exception(f"HTTP {response.status_code} - {error_body}")
             data = response.json()
-            output = data["choices"][0]["message"]["content"]
+            msg = _safe_extract_message(data)
+            output = msg.get("content") or ""
+            if not output:
+                refusal = msg.get("refusal") or ""
+                finish = (data.get("choices") or [{}])[0].get("finish_reason", "")
+                print(f"[LLM] Warning: empty content (finish_reason={finish}, refusal={refusal})")
+                if refusal:
+                    output = f"[Model refused: {refusal}]"
             
             # Strip <think>...</think> reasoning/planning blocks that some local models
             # (DeepSeek-R1, Qwen3-thinking, etc.) emit before the final response.
@@ -128,7 +154,7 @@ class OllamaDriver(LLMDriver):
             )
             response.raise_for_status()
             data = response.json()
-            return data["message"]["content"]
+            return (data.get("message") or {}).get("content") or ""
 
     def is_available(self) -> bool:
         return bool(self.config.base_url)
@@ -206,7 +232,15 @@ class ApigeeDriver(LLMDriver):
                 print(f"[APIGEE] Error {response.status_code}: {error_body}", flush=True)
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            msg = _safe_extract_message(data)
+            content = msg.get("content") or ""
+            if not content:
+                refusal = msg.get("refusal") or ""
+                finish = (data.get("choices") or [{}])[0].get("finish_reason", "")
+                print(f"[APIGEE] Warning: empty content (finish_reason={finish}, refusal={refusal})", flush=True)
+                if refusal:
+                    content = f"[Model refused: {refusal}]"
+            return content
 
     def is_available(self) -> bool:
         required_vars = [

@@ -16,6 +16,8 @@ class LMStudioLLM:
                     "temperature": 0.2
                 })
                 r.raise_for_status()
-                return r.json()["choices"][0]["message"]["content"]
+                data = r.json()
+                msg = (data.get("choices") or [{}])[0].get("message") or {}
+                return msg.get("content") or ""
         except Exception as e:
             return f"Error executing LLM request: {e}"
