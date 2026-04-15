@@ -650,10 +650,10 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
     seen_ids: set[str] = set()
     function_bodies: list[tuple[str, object]] = []
 
-    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None) -> None:
+    def add_node(nid: str, label: str, line: int, node_type: str = "code", end_line: int | None = None, docstring: str | None = None, parent_id: str | None = None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
-            nodes.append({
+            entry: dict = {
                 "id": nid,
                 "label": label,
                 "type": node_type,
@@ -662,7 +662,10 @@ def _extract_generic(path: Path, config: LanguageConfig) -> dict:
                 "source_location": f"L{line}",
                 "end_line": end_line,
                 "docstring": docstring,
-            })
+            }
+            if parent_id:
+                entry["parent_id"] = parent_id
+            nodes.append(entry)
 
     def add_edge(src: str, tgt: str, relation: str, line: int,
                  confidence: str = "EXTRACTED", weight: float = 1.0) -> None:
