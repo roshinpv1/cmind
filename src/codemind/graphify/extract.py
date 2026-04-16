@@ -10,6 +10,15 @@ from pathlib import Path
 from typing import Callable, Any
 from .cache import load_cached, save_cached
 
+try:
+    from codemind.indexer.file_filters import (
+        CODE_EXTENSIONS as _INDEXER_CODE_EXTENSIONS,
+        KNOWN_FILENAMES as _INDEXER_KNOWN_FILENAMES,
+    )
+except Exception:
+    _INDEXER_CODE_EXTENSIONS = set()
+    _INDEXER_KNOWN_FILENAMES = set()
+
 
 def _make_id(*parts: str) -> str:
     """Build a stable node ID from one or more name parts."""
@@ -1171,6 +1180,319 @@ def extract_lua(path: Path) -> dict:
 def extract_swift(path: Path) -> dict:
     """Extract classes, structs, protocols, functions, imports, and calls from a .swift file."""
     return _extract_generic(path, _SWIFT_CONFIG)
+
+
+def extract_text(path: Path) -> dict:
+    """Fallback extractor for supported-but-non-AST file types.
+
+    Produces a file-level node so these files are represented in the graph
+    even when no language-specific tree-sitter extractor exists yet.
+    """
+    try:
+        preview = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
+
+    stem = path.stem
+    str_path = str(path)
+    line_count = preview.count("\n") + (1 if preview else 0)
+    short = preview[:200].replace("\r\n", " ").replace("\r", " ").replace("\n", " ").strip()
+    file_nid = _make_id(stem)
+    return {
+        "nodes": [
+            {
+                "id": file_nid,
+                "label": path.name,
+                "type": "File",
+                "file_type": "text",
+                "source_file": str_path,
+                "source_location": "L1",
+                "end_line": max(1, line_count),
+                "docstring": short or None,
+            }
+        ],
+        "edges": [],
+    }
+
+
+_BUILD_FILE_NAMES = {
+    "pom.xml",
+    "package.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "pipfile",
+    "cargo.toml",
+    "go.mod",
+    "gemfile",
+    "composer.json",
+    "build.gradle",
+    "settings.gradle",
+    "build.gradle.kts",
+    "settings.gradle.kts",
+    "build.sbt",
+    "mix.exs",
+    "pubspec.yaml",
+    "project.clj",
+    "deps.edn",
+    "packages.config",
+    "cmakelists.txt",
+    "makefile",
+    "dockerfile",
+    "jenkinsfile",
+}
+
+_BUILD_FILE_SUFFIXES = {
+    ".csproj",
+    ".vbproj",
+    ".fsproj",
+    ".props",
+    ".targets",
+    ".sln",
+}
+
+
+def _is_build_file(path: Path) -> bool:
+    name = path.name.lower()
+    if name in _BUILD_FILE_NAMES:
+        return True
+    for suf in _BUILD_FILE_SUFFIXES:
+        if name.endswith(suf):
+            return True
+    return False
+
+
+def _extract_build_dependencies(path: Path, text: str) -> list[str]:
+    deps: set[str] = set()
+    name = path.name.lower()
+
+    # Gradle
+    if name.endswith(".gradle") or name.endswith(".gradle.kts"):
+        for m in re.finditer(
+            r'(?m)^\s*(implementation|api|compileOnly|runtimeOnly|testImplementation|classpath)\s*\(?\s*["\']([^"\']+)["\']',
+            text,
+        ):
+            deps.add(m.group(2).strip())
+        for m in re.finditer(r'project\(\s*["\']([^"\']+)["\']\s*\)', text):
+            deps.add(f"project:{m.group(1).strip()}")
+
+    # Maven pom.xml
+    if name == "pom.xml":
+        for m in re.finditer(
+            r"<dependency>.*?<groupId>\s*([^<\s]+)\s*</groupId>.*?<artifactId>\s*([^<\s]+)\s*</artifactId>.*?</dependency>",
+            text,
+            flags=re.DOTALL,
+        ):
+            deps.add(f"{m.group(1).strip()}:{m.group(2).strip()}")
+
+    # npm / node package.json
+    if name == "package.json":
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                for key in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies"):
+                    val = obj.get(key)
+                    if isinstance(val, dict):
+                        for pkg in val.keys():
+                            deps.add(str(pkg))
+        except Exception:
+            pass
+
+    # Python requirements.txt
+    if name == "requirements.txt":
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            token = re.split(r"[<>=!~\[]", line, maxsplit=1)[0].strip()
+            if token:
+                deps.add(token)
+
+    # Python pyproject.toml (best-effort)
+    if name == "pyproject.toml":
+        for m in re.finditer(r'(?m)^\s*([A-Za-z0-9._-]+)\s*=\s*["\'][^"\']+["\']\s*$', text):
+            pkg = m.group(1).strip()
+            if pkg not in {"name", "version", "description", "requires-python"}:
+                deps.add(pkg)
+        for m in re.finditer(r'["\']([A-Za-z0-9._-]+)\s*(?:[<>=!~].*?)?["\']', text):
+            deps.add(m.group(1).strip())
+
+    # Cargo.toml
+    if name == "cargo.toml":
+        in_deps = False
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("[") and line.endswith("]"):
+                in_deps = "dependencies" in line
+                continue
+            if not in_deps or not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                pkg = line.split("=", 1)[0].strip()
+                if pkg:
+                    deps.add(pkg)
+
+    # Go modules
+    if name == "go.mod":
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line.startswith("require "):
+                parts = line.split()
+                if len(parts) >= 2:
+                    deps.add(parts[1].strip())
+            elif line and not line.startswith("//"):
+                m = re.match(r"([a-zA-Z0-9._/\-]+)\s+v[0-9]", line)
+                if m:
+                    deps.add(m.group(1).strip())
+
+    # Ruby Gemfile
+    if name == "gemfile":
+        for m in re.finditer(r'(?m)^\s*gem\s+["\']([^"\']+)["\']', text):
+            deps.add(m.group(1).strip())
+
+    # composer.json
+    if name == "composer.json":
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                for key in ("require", "require-dev"):
+                    val = obj.get(key)
+                    if isinstance(val, dict):
+                        deps.update(str(k) for k in val.keys())
+        except Exception:
+            pass
+
+    # .NET project files
+    if any(name.endswith(s) for s in _BUILD_FILE_SUFFIXES):
+        for m in re.finditer(r'<PackageReference[^>]*Include\s*=\s*["\']([^"\']+)["\']', text):
+            deps.add(m.group(1).strip())
+
+    return sorted(d for d in deps if d)
+
+
+def extract_build_file(path: Path) -> dict:
+    """Extract dependency relationships from common build files."""
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
+
+    stem = path.stem
+    str_path = str(path)
+    file_nid = _make_id(stem)
+    nodes: list[dict] = [
+        {
+            "id": file_nid,
+            "label": path.name,
+            "type": "BuildFile",
+            "file_type": "build",
+            "source_file": str_path,
+            "source_location": "L1",
+            "end_line": max(1, source.count("\n") + 1),
+        }
+    ]
+    edges: list[dict] = []
+    seen = {file_nid}
+    for dep in _extract_build_dependencies(path, source):
+        dep_nid = _make_id("dep", dep)
+        if dep_nid not in seen:
+            seen.add(dep_nid)
+            nodes.append(
+                {
+                    "id": dep_nid,
+                    "label": dep,
+                    "type": "Dependency",
+                    "file_type": "build",
+                    "source_file": str_path,
+                    "source_location": "L1",
+                }
+            )
+        edges.append(
+            {
+                "source": file_nid,
+                "target": dep_nid,
+                "relation": "depends_on",
+                "confidence": "EXTRACTED",
+                "source_file": str_path,
+                "source_location": "L1",
+                "weight": 1.0,
+            }
+        )
+    return {"nodes": nodes, "edges": edges}
+
+
+def extract_jsp(path: Path) -> dict:
+    """Extract JSP includes/imports/taglibs as graph relationships."""
+    try:
+        source = path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
+
+    stem = path.stem
+    str_path = str(path)
+    file_nid = _make_id(stem)
+    nodes: list[dict] = [
+        {
+            "id": file_nid,
+            "label": path.name,
+            "type": "JSPFile",
+            "file_type": "code",
+            "source_file": str_path,
+            "source_location": "L1",
+            "end_line": max(1, source.count("\n") + 1),
+        }
+    ]
+    edges: list[dict] = []
+    seen = {file_nid}
+
+    def _add_target(label: str, relation: str, line: int) -> None:
+        tgt_nid = _make_id(label)
+        if tgt_nid not in seen:
+            seen.add(tgt_nid)
+            nodes.append(
+                {
+                    "id": tgt_nid,
+                    "label": label,
+                    "type": "JSPRef",
+                    "file_type": "code",
+                    "source_file": str_path,
+                    "source_location": f"L{line}",
+                }
+            )
+        edges.append(
+            {
+                "source": file_nid,
+                "target": tgt_nid,
+                "relation": relation,
+                "confidence": "EXTRACTED",
+                "source_file": str_path,
+                "source_location": f"L{line}",
+                "weight": 1.0,
+            }
+        )
+
+    # <%@ include file="..." %>
+    for m in re.finditer(r'<%@\s*include\s+file\s*=\s*"([^"]+)"\s*%>', source, flags=re.IGNORECASE):
+        line = source.count("\n", 0, m.start()) + 1
+        _add_target(m.group(1).strip(), "includes", line)
+
+    # <jsp:include page="...">
+    for m in re.finditer(r'<jsp:include[^>]*\bpage\s*=\s*"([^"]+)"', source, flags=re.IGNORECASE):
+        line = source.count("\n", 0, m.start()) + 1
+        _add_target(m.group(1).strip(), "includes", line)
+
+    # <%@ page import="a.b.C, x.y.Z" %>
+    for m in re.finditer(r'<%@\s*page[^>]*\bimport\s*=\s*"([^"]+)"', source, flags=re.IGNORECASE):
+        line = source.count("\n", 0, m.start()) + 1
+        imports = [x.strip() for x in m.group(1).split(",") if x.strip()]
+        for imp in imports:
+            _add_target(imp, "imports", line)
+
+    # <%@ taglib uri="..." prefix="..." %>
+    for m in re.finditer(r'<%@\s*taglib[^>]*\buri\s*=\s*"([^"]+)"', source, flags=re.IGNORECASE):
+        line = source.count("\n", 0, m.start()) + 1
+        _add_target(m.group(1).strip(), "uses_taglib", line)
+
+    return {"nodes": nodes, "edges": edges}
 
 
 # ── Julia extractor (custom walk) ────────────────────────────────────────────
@@ -2651,6 +2973,8 @@ def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
         ".jsx": extract_js,
         ".ts": extract_js,
         ".tsx": extract_js,
+        ".jsp": extract_jsp,
+        ".jspx": extract_jsp,
         ".go": extract_go,
         ".rs": extract_rust,
         ".java": extract_java,
@@ -2677,13 +3001,34 @@ def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
         ".mm": extract_objc,
         ".jl": extract_julia,
     }
+    # Build ecosystem files get dependency extraction instead of plain text fallback.
+    _BUILD_DISPATCH: dict[str, Any] = {
+        ".gradle": extract_build_file,
+        ".csproj": extract_build_file,
+        ".vbproj": extract_build_file,
+        ".fsproj": extract_build_file,
+        ".props": extract_build_file,
+        ".targets": extract_build_file,
+        ".sln": extract_build_file,
+    }
+    _DISPATCH.update(_BUILD_DISPATCH)
+    # Ensure every extension accepted by indexing can be represented in graphify.
+    # Unsupported languages fall back to a file-level text extractor.
+    for ext in _INDEXER_CODE_EXTENSIONS:
+        norm = str(ext).lower()
+        if norm and norm.startswith("."):
+            _DISPATCH.setdefault(norm, extract_text)
 
     total = len(paths)
     _PROGRESS_INTERVAL = 100
     for i, path in enumerate(paths):
         if total >= _PROGRESS_INTERVAL and i % _PROGRESS_INTERVAL == 0 and i > 0:
             print(f"  AST extraction: {i}/{total} files ({i * 100 // total}%)", flush=True)
-        extractor = _DISPATCH.get(path.suffix)
+        extractor = _DISPATCH.get(path.suffix.lower())
+        if extractor is None and _is_build_file(path):
+            extractor = extract_build_file
+        if extractor is None and path.name in _INDEXER_KNOWN_FILENAMES:
+            extractor = extract_text
         if extractor is None:
             continue
         cached = load_cached(path, root)
@@ -2732,6 +3077,9 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
         ".lua", ".toc", ".zig", ".ps1",
         ".m", ".mm",
     }
+    if _INDEXER_CODE_EXTENSIONS:
+        _EXTENSIONS.update(str(e).lower() for e in _INDEXER_CODE_EXTENSIONS if str(e).startswith("."))
+    _KNOWN_FILENAMES = set(_INDEXER_KNOWN_FILENAMES or set())
     from codemind.graphify.detect import _load_graphifyignore, _is_ignored
     ignore_root = root if root is not None else target
     patterns = _load_graphifyignore(ignore_root)
@@ -2747,6 +3095,13 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
                 if not any(part.startswith(".") for part in p.parts)
                 and not _ignored(p)
             )
+        if _KNOWN_FILENAMES:
+            for fname in sorted(_KNOWN_FILENAMES):
+                results.extend(
+                    p for p in target.rglob(fname)
+                    if not any(part.startswith(".") for part in p.parts)
+                    and not _ignored(p)
+                )
         return sorted(results)
     # Walk with symlink following + cycle detection
     results = []
@@ -2763,7 +3118,7 @@ def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | N
             continue
         for fname in filenames:
             p = dp / fname
-            if p.suffix in _EXTENSIONS and not fname.startswith(".") and not _ignored(p):
+            if (p.suffix.lower() in _EXTENSIONS or fname in _KNOWN_FILENAMES) and not fname.startswith(".") and not _ignored(p):
                 results.append(p)
     return sorted(results)
 
