@@ -662,6 +662,33 @@ class ReActAgent:
                     answer = await self._synthesize(
                         messages, goal, playbook_name, reason=decision.synth_reason
                     )
+                    synth_gate = evaluate_final_state(
+                        response_text=answer,
+                        repo_id=self._repo_id,
+                        tool_calls_made=tool_calls_made,
+                        has_tool_history=orchestration.has_tool_history(messages),
+                        output_type=output_type,
+                        output_schema_model=output_schema_model,
+                    )
+                    if not synth_gate.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
+                        finalization_retries += 1
+                        logs.append(
+                            f"  Iter {iteration}: synthesized output rejected by final-state gate "
+                            f"({synth_gate.reason}); retry {finalization_retries}/{_MAX_FINALIZATION_RETRIES}"
+                        )
+                        messages.append(
+                            HumanMessage(
+                                content=synth_gate.continue_prompt
+                                or "Synthesis result is still intermediate. Continue tool-driven work."
+                            )
+                        )
+                        _append_quality_scorecard(
+                            iteration_idx=iteration,
+                            response_text=answer,
+                            stage="synthesis_rejected_by_final_gate",
+                            final_gate_reason=synth_gate.reason,
+                        )
+                        continue
                     _append_quality_scorecard(
                         iteration_idx=iteration,
                         response_text=answer,

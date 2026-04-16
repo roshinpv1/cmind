@@ -49,6 +49,10 @@ PLANNING_PHRASES = (
     "involves exploring",
     "focuses on",
     "phase involves",
+    "methodology for future analysis",
+    "does not contain the results",
+    "it is not possible to provide a detailed analysis",
+    "data does not contain any information",
 )
 
 # Phrases that indicate the LLM gave up after one or two failing tool calls
