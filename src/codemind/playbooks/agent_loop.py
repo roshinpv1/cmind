@@ -439,7 +439,11 @@ class ReActAgent:
         except Exception:
             pass  # trace is best-effort
 
-    def _collect_evidence_stats(self, messages: list[BaseMessage]) -> dict[str, int]:
+    def _collect_evidence_stats(
+        self,
+        messages: list[BaseMessage],
+        expected_critical_files: list[str] | None = None,
+    ) -> dict[str, int | float]:
         """
         Build lightweight evidence-coverage stats from executed tool messages.
         Used by final-state gating to prevent shallow completion.
@@ -464,6 +468,7 @@ class ReActAgent:
         structural_calls = 0
         lexical_calls = 0
         evidence_messages = 0
+        expected = {str(p).strip() for p in (expected_critical_files or []) if str(p).strip()}
 
         for msg in messages:
             if not isinstance(msg, ToolMessage):
@@ -496,6 +501,13 @@ class ReActAgent:
             "structural_calls": structural_calls,
             "lexical_calls": lexical_calls,
             "evidence_messages": evidence_messages,
+            "critical_candidates_total": len(expected),
+            "critical_candidates_read": len(unique_read_files & expected) if expected else 0,
+            "critical_coverage_ratio": (
+                float(len(unique_read_files & expected)) / float(len(expected))
+                if expected
+                else 1.0
+            ),
         }
 
     # ── synthesis ─────────────────────────────────────────────────────────────
@@ -571,6 +583,7 @@ class ReActAgent:
         playbook_name: str = "react",
         output_type: str = "",
         output_schema_model: object | None = None,
+        expected_critical_files: list[str] | None = None,
     ) -> AgentResult:
         """
         Run the ReAct loop to completion.
@@ -834,7 +847,9 @@ class ReActAgent:
                         has_tool_history=orchestration.has_tool_history(messages),
                         output_type=output_type,
                         output_schema_model=output_schema_model,
-                        evidence_stats=self._collect_evidence_stats(messages),
+                        evidence_stats=self._collect_evidence_stats(
+                            messages, expected_critical_files
+                        ),
                     )
                     if not synth_gate.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                         finalization_retries += 1
@@ -972,7 +987,9 @@ class ReActAgent:
                     has_tool_history=orchestration.has_tool_history(messages),
                     output_type=output_type,
                     output_schema_model=output_schema_model,
-                    evidence_stats=self._collect_evidence_stats(messages),
+                    evidence_stats=self._collect_evidence_stats(
+                        messages, expected_critical_files
+                    ),
                 )
                 if not decision.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                     finalization_retries += 1

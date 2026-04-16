@@ -100,3 +100,26 @@ def test_accepts_repo_finalization_when_evidence_contract_met():
         },
     )
     assert decision.is_final
+
+
+def test_rejects_when_critical_candidates_not_covered():
+    decision = evaluate_final_state(
+        response_text="Final answer.",
+        repo_id="abc123",
+        tool_calls_made=6,
+        has_tool_history=True,
+        output_type="",
+        output_schema_model=None,
+        evidence_stats={
+            "unique_read_files": 4,
+            "structural_calls": 2,
+            "lexical_calls": 2,
+            "evidence_messages": 3,
+            "critical_candidates_total": 10,
+            "critical_candidates_read": 2,
+            "critical_coverage_ratio": 0.2,
+        },
+    )
+    assert not decision.is_final
+    assert decision.reason == "evidence_contract_not_met"
+    assert "critical ranked files" in (decision.continue_prompt or "")

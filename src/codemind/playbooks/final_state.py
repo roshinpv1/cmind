@@ -28,6 +28,9 @@ _MIN_LEXICAL_CALLS = max(
 _MIN_EVIDENCE_MESSAGES = max(
     1, int(os.getenv("CODEMIND_MIN_EVIDENCE_MESSAGES", "2"))
 )
+_MIN_CRITICAL_COVERAGE_RATIO = max(
+    0.0, min(1.0, float(os.getenv("CODEMIND_MIN_CRITICAL_COVERAGE_RATIO", "0.4")))
+)
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -137,6 +140,9 @@ def evaluate_final_state(
         structural_calls = int(stats.get("structural_calls", 0) or 0)
         lexical_calls = int(stats.get("lexical_calls", 0) or 0)
         evidence_messages = int(stats.get("evidence_messages", 0) or 0)
+        critical_total = int(stats.get("critical_candidates_total", 0) or 0)
+        critical_read = int(stats.get("critical_candidates_read", 0) or 0)
+        critical_ratio = float(stats.get("critical_coverage_ratio", 0.0) or 0.0)
         missing: list[str] = []
         if unique_read_files < _MIN_UNIQUE_READ_FILES:
             missing.append(
@@ -153,6 +159,12 @@ def evaluate_final_state(
         if evidence_messages < _MIN_EVIDENCE_MESSAGES:
             missing.append(
                 f"collect at least {_MIN_EVIDENCE_MESSAGES} evidence-bearing tool outputs"
+            )
+        if critical_total > 0 and critical_ratio < _MIN_CRITICAL_COVERAGE_RATIO:
+            min_read = max(1, int(critical_total * _MIN_CRITICAL_COVERAGE_RATIO + 0.999))
+            missing.append(
+                "cover critical ranked files before finalizing "
+                f"(read {critical_read}/{critical_total}; need at least {min_read})"
             )
         if missing:
             return FinalStateDecision(

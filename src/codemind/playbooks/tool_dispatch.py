@@ -38,7 +38,7 @@ _MAX_IDENTICAL_CALLS_PER_RUN = max(
     2,
     int(os.getenv("CODEMIND_MAX_IDENTICAL_CALLS_PER_RUN", "4")),
 )
-_NOISE_TOOLS = frozenset({"search_codebase", "search_code"})
+_NOISE_TOOLS = frozenset({"search_codebase", "search_code", "search_bm25"})
 _NOISE_PATTERNS = (
     "graph.json",
     "package-lock.json",
@@ -67,6 +67,7 @@ _REPO_REQUIRED_TOOLS = frozenset({
     "graphify_explain",
     "graphify_run",
     "search_code",
+    "search_bm25",
     "search_codebase",
     "read_file",
     "get_file_outline",
@@ -93,6 +94,7 @@ _READ_ONLY_TOOLS = frozenset({
     "graphify_path",
     "graphify_explain",
     "search_code",
+    "search_bm25",
     "search_codebase",
     "read_file",
     "get_file_outline",
@@ -145,7 +147,7 @@ def _build_tool_specs(available_tool_names: set[str]) -> dict[str, ToolSpec]:
                 else ("list_repo_directory", "list_files")
                 if name == "get_map"
                 else ("list_repo_directory", "get_map")
-                if name in {"search_code", "search_codebase", "read_file"}
+                if name in {"search_code", "search_bm25", "search_codebase", "read_file"}
                 else ()
             ),
         )

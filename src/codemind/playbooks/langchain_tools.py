@@ -37,6 +37,14 @@ class SearchCodebaseInput(BaseModel):
     file_types: Optional[list[str]] = Field(default=None, description="File extensions to filter, e.g. ['.py', '.js']")
 
 
+class SearchBm25Input(BaseModel):
+    """Input for BM25 lexical retrieval."""
+    query: str = Field(description="Lexical query string")
+    repo_id: str = Field(description="Repository identifier")
+    limit: int = Field(default=20, description="Max results to return")
+    file_types: Optional[list[str]] = Field(default=None, description="File extensions to filter, e.g. ['.py', '.js']")
+
+
 class ReadFileInput(BaseModel):
     """Input for reading a specific file."""
     file_path: str = Field(description="Path to the file to read")
@@ -433,6 +441,22 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
                 return json.dumps(grep_result, default=str)
 
         return json.dumps(result, default=str)
+
+    @tool(args_schema=SearchBm25Input)
+    async def search_bm25(
+        query: str,
+        repo_id: str,
+        limit: int = 20,
+        file_types: Optional[list[str]] = None,
+    ) -> str:
+        """Ranked lexical retrieval using SQLite FTS5 BM25 over indexed chunks."""
+        if enforced_repo_id:
+            repo_id = enforced_repo_id
+        params = {"query": query, "repo_id": repo_id, "limit": limit}
+        if file_types:
+            params["file_types"] = file_types
+        result = await playbook_tools.search_bm25(params)
+        return json.dumps(result, default=str)
     
     @tool(args_schema=ReadFileInput)
     async def read_file(
@@ -700,6 +724,7 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
         list_files,
         list_repo_directory,
         search_code,
+        search_bm25,
         search_codebase,
         read_file,
         list_file_system,

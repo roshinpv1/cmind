@@ -11,6 +11,7 @@ from pathlib import Path
 import traceback
 
 from codemind.storage.database import CatalogStore
+from codemind.storage.bm25_storage import BM25Storage
 from codemind.storage.models import RepositoryManifest
 
 # Max chars returned for repo file reads (protect LLM context)
@@ -65,6 +66,38 @@ class PlaybookTools:
         self.graph = graph_service
         self.embedder = embedder
         self.db = db
+        self.bm25 = BM25Storage()
+
+    @staticmethod
+    def _rrf_fuse(lanes: list[list[dict]], *, k: int = 60) -> list[dict]:
+        """Reciprocal rank fusion over heterogeneous retrieval lanes."""
+        score_map: dict[str, float] = {}
+        exemplar: dict[str, dict] = {}
+        reasons: dict[str, set[str]] = {}
+
+        for lane in lanes:
+            for rank, row in enumerate(lane, start=1):
+                key = str(row.get("chunk_hash") or "") or (
+                    f"{row.get('file_path','')}:{row.get('start_line',0)}:{row.get('end_line',0)}"
+                )
+                if not key:
+                    continue
+                score_map[key] = score_map.get(key, 0.0) + (1.0 / float(k + rank))
+                if key not in exemplar:
+                    exemplar[key] = dict(row)
+                why = str(row.get("lane") or "").strip()
+                if why:
+                    reasons.setdefault(key, set()).add(why)
+
+        fused = []
+        for key, score in score_map.items():
+            row = dict(exemplar.get(key, {}))
+            row["rrf_score"] = float(score)
+            row["score"] = float(score)
+            row["provenance"] = sorted(reasons.get(key, set()))
+            fused.append(row)
+        fused.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return fused
 
     def _get_repo_root_sync(self, repo_id: str) -> Path | None:
         """Resolve filesystem root for a repo_id via RepositoryManifest."""
@@ -308,17 +341,7 @@ class PlaybookTools:
         """
         try:
             import os
-            if os.getenv("EMBEDDING_PROVIDER") == "none":
-                return {
-                    "success": True,
-                    "results": [],
-                    "count": 0,
-                    "message": (
-                        "NOTE: Semantic/Vector search is disabled in this environment. "
-                        "You MUST use Graph-First tools (get_map, trace_path) for discovery "
-                        "and surgical search (search_code) for text matching. Do NOT stop the audit."
-                    )
-                }
+            vector_disabled = os.getenv("EMBEDDING_PROVIDER") == "none"
             
             repo_id = params.get("repo_id")
             if not repo_id:
@@ -333,6 +356,9 @@ class PlaybookTools:
             queries = params.get("queries", [])
             limit = params.get("limit", 10)
             mode = params.get("mode", "semantic")
+            if vector_disabled and mode == "semantic":
+                mode = "hybrid"
+            
             file_types = params.get("file_types", [])
             graph_filters = params.get("graph_filters", {})
             min_score = params.get("min_score", 0.0)
@@ -352,7 +378,7 @@ class PlaybookTools:
                     "queries_used": []
                 }
             
-            if not self.embedder:
+            if not self.embedder and mode == "semantic":
                 return {
                     "error": "No embedder available",
                     "results": [],
@@ -377,61 +403,81 @@ class PlaybookTools:
                     "min_score": min_score
                 }
 
-            # Execute all queries and combine results
-            all_results = []
-            dedupe_set = set()
-            
+            semantic_lane: list[dict] = []
+            bm25_lane: list[dict] = []
+            structural_lane: list[dict] = []
             for query in queries:
-                # Encode query with proper task prefix
-                query_emb = self.embedder.encode_query(query)
-                
-                # Semantic search
-                results = self.lance.search(query_emb, repo_id=repo_id, limit=limit * 2, min_score=min_score)
-                
-                # Apply filters
-                if mode == "hybrid" and (file_types or graph_filters):
-                    filtered_results = []
-                    
-                    for r in results:
-                        file_path = r.get('file_path', '')
-                        
-                        # File type filter
-                        if file_types:
-                            if not any(file_path.endswith(ft) for ft in file_types):
-                                continue
-                        
-                        # Dedupe by file_path + chunk_text
-                        dedupe_key = f"{file_path}:{r.get('chunk_text', '')[:50]}"
-                        if dedupe_key not in dedupe_set:
-                            filtered_results.append(r)
-                            dedupe_set.add(dedupe_key)
-                    
-                    results = filtered_results
-                else:
-                    # Still dedupe
-                    results_to_add = []
-                    for r in results:
-                        file_path = r.get('file_path', '')
-                        dedupe_key = f"{file_path}:{r.get('chunk_text', '')[:50]}"
-                        if dedupe_key not in dedupe_set:
-                            results_to_add.append(r)
-                            dedupe_set.add(dedupe_key)
-                    results = results_to_add
-                
-                # Map _distance to score (1 - distance)
-                for r in results:
-                    if "_distance" in r and "score" not in r:
-                        r["score"] = 1.0 - r["_distance"]
-                
-                all_results.extend(results)
-            
-            # Filter by min_score
-            if min_score > 0:
-                all_results = [r for r in all_results if r.get('score', 0) >= min_score]
+                query_text = str(query or "").strip()
+                if not query_text:
+                    continue
 
-            # Sort by score and limit
-            all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
-            final_results = all_results[:limit]
+                # Semantic lane
+                if not vector_disabled:
+                    query_emb = self.embedder.encode_query(query_text)
+                    sem = self.lance.search(
+                        query_emb,
+                        repo_id=repo_id,
+                        limit=limit * 2,
+                        min_score=min_score,
+                    )
+                    for r in sem:
+                        file_path = str(r.get("file_path", ""))
+                        if file_types and not any(file_path.endswith(ft) for ft in file_types):
+                            continue
+                        if "_distance" in r and "score" not in r:
+                            r["score"] = 1.0 - float(r.get("_distance", 1.0))
+                        r["lane"] = "semantic"
+                        semantic_lane.append(r)
+
+                # BM25 lexical lane
+                bm25_rows = self.bm25.search(
+                    query=query_text,
+                    repo_id=repo_id if isinstance(repo_id, str) else None,
+                    limit=limit * 2,
+                    file_types=file_types,
+                )
+                for r in bm25_rows:
+                    r["lane"] = "bm25"
+                    bm25_lane.append(r)
+
+                # Structural lane from graph symbols
+                if isinstance(repo_id, str):
+                    syms = self.graph.find_symbol_by_name(repo_id, query_text, None) or []
+                    for s in syms[: max(4, limit)]:
+                        fp = str(s.get("file_path") or "")
+                        if not fp:
+                            continue
+                        if file_types and not any(fp.endswith(ft) for ft in file_types):
+                            continue
+                        structural_lane.append(
+                            {
+                                "file_path": fp,
+                                "chunk_hash": f"symbol:{s.get('name','')}:{fp}:{s.get('start_line',0)}",
+                                "chunk_text": f"Symbol match: {s.get('name','')} ({s.get('type','')})",
+                                "start_line": int(s.get("start_line", 0) or 0),
+                                "end_line": int(s.get("end_line", 0) or 0),
+                                "score": 0.65,
+                                "lane": "structural",
+                            }
+                        )
+
+            if mode == "hybrid":
+                final_results = self._rrf_fuse(
+                    [semantic_lane, bm25_lane, structural_lane]
+                )[:limit]
+            elif mode == "bm25":
+                final_results = sorted(
+                    bm25_lane, key=lambda x: float(x.get("score", 0.0)), reverse=True
+                )[:limit]
+            else:
+                final_results = sorted(
+                    semantic_lane, key=lambda x: float(x.get("score", 0.0)), reverse=True
+                )[:limit]
+
+            if min_score > 0:
+                final_results = [
+                    r for r in final_results if float(r.get("score", 0.0)) >= float(min_score)
+                ][:limit]
             
             # Final safeguard to ensure embeddings never leak to the LLM
             for r in final_results:
@@ -442,7 +488,8 @@ class PlaybookTools:
                 "results": final_results,
                 "count": len(final_results),
                 "queries_used": queries,
-                "min_score": min_score
+                "min_score": min_score,
+                "vector_disabled": vector_disabled,
             }
         
         except Exception as e:
@@ -982,6 +1029,54 @@ class PlaybookTools:
             }
         """
         return await self.grep_search(params)
+
+    async def search_bm25(self, params: dict) -> dict:
+        """True lexical retrieval using SQLite FTS5 BM25 ranking."""
+        repo_id = params.get("repo_id")
+        if not repo_id:
+            return {"error": "repo_id is required for search_bm25", "results": [], "count": 0}
+        queries = params.get("queries") or []
+        if not queries and params.get("query"):
+            queries = [params.get("query")]
+        if not queries:
+            return {"error": "No query or queries provided", "results": [], "count": 0}
+        try:
+            limit = max(1, min(int(params.get("limit", 20)), 200))
+        except (TypeError, ValueError):
+            limit = 20
+        file_types = params.get("file_types") or []
+        if file_types and not isinstance(file_types, list):
+            file_types = [str(file_types)]
+
+        merged: dict[str, dict] = {}
+        for q in [str(x) for x in queries if str(x).strip()]:
+            rows = self.bm25.search(
+                query=q,
+                repo_id=repo_id,
+                limit=limit * 2,
+                file_types=file_types,
+            )
+            for row in rows:
+                key = str(row.get("chunk_hash") or "") or (
+                    f"{row.get('file_path','')}:{row.get('start_line',0)}:{row.get('end_line',0)}"
+                )
+                if not key:
+                    continue
+                existing = merged.get(key)
+                row["lane"] = "bm25"
+                if not existing or float(row.get("score", 0.0)) > float(existing.get("score", 0.0)):
+                    merged[key] = row
+        results = sorted(
+            merged.values(),
+            key=lambda x: float(x.get("score", 0.0)),
+            reverse=True,
+        )[:limit]
+        return {
+            "success": True,
+            "results": results,
+            "count": len(results),
+            "queries_used": queries,
+        }
 
     async def get_map(self, params: dict) -> dict:
         """Phase A: Architecture Mapping (The 'GPS').
@@ -2096,6 +2191,7 @@ class PlaybookTools:
             "graphify_add": self.graphify_add,
             "graphify_run": self.graphify_run,
             "search_code": self.search_code,
+            "search_bm25": self.search_bm25,
             "search_codebase": self.search_codebase,
             "read_file": self.read_file,
             "list_file_system": self.list_file_system,
@@ -2169,6 +2265,14 @@ class PlaybookTools:
                     "Use ONLY after narrowing down to specific modules/files via graph tools."
                 ),
                 "parameters": "query (str), repo_id (str, optional), includes (list[str], optional), limit (int, optional)"
+            },
+            {
+                "name": "search_bm25",
+                "description": (
+                    "True lexical retrieval using SQLite FTS5 BM25 ranking over indexed chunks. "
+                    "Use for exact-term relevance ranked better than regex grep."
+                ),
+                "parameters": "query (str) or queries (list[str]), repo_id (str), file_types (list[str], optional), limit (int, optional)"
             },
             {
                 "name": "read_file",

@@ -335,6 +335,7 @@ class PlaybookExecutor:
         # playbooks whenever a repo_id is available, so every repo analysis
         # starts with concrete graph data rather than a cold start.
         prefetch_block = ""
+        critical_files: list[str] = []
         if repo_id_str:
             goal_hint = user_input.get("goal") or user_input.get("query") or ""
             try:
@@ -342,6 +343,11 @@ class PlaybookExecutor:
                     repo_id=repo_id_str, goal=goal_hint, limit=12
                 )
                 prefetch_block = self._data_fetcher.to_prompt_block(prefetch)
+                critical_files = [
+                    str(c.get("file_path") or "").strip()
+                    for c in (prefetch.ranked_candidates or [])[:10]
+                    if str(c.get("file_path") or "").strip()
+                ]
             except Exception as exc:
                 prefetch_block = (
                     f"\n### GRAPHIFY PREFLIGHT\n"
@@ -361,6 +367,7 @@ class PlaybookExecutor:
             playbook_name=playbook_name,
             output_type=getattr(playbook, "output_type", "") or "",
             output_schema_model=output_schema_model,
+            expected_critical_files=critical_files,
         )
 
         logs = list(result.logs)
@@ -518,6 +525,7 @@ gather real evidence before drawing conclusions.
 
 **Code Search**
 - `search_code` — lexical/regex search over source files (exact text patterns).
+- `search_bm25` — BM25-ranked lexical retrieval over indexed chunks (strong exact-term ranking).
 - `search_symbol` — structural lookup for definitions/references by symbol name.
   Prefer running both in early passes (lexical + structural) to improve coverage.
 - `grep_search` — regex search across the raw source files.

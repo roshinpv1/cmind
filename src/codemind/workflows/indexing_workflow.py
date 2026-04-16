@@ -16,6 +16,7 @@ from codemind.indexer.embedder import EmbeddingGenerator
 from codemind.indexer.file_filters import CODE_EXTENSIONS, KNOWN_FILENAMES
 from codemind.indexer.models import FileChange
 from codemind.storage import ManifestManager
+from codemind.storage.bm25_storage import BM25Storage
 from codemind.storage.lancedb_storage import LanceDBStorage
 from codemind.graphify.extract import extract as graphify_extract
 
@@ -76,6 +77,7 @@ class IndexingWorkflow:
             db_path=lance_storage.db_path,
             embedding_dim=self.embedder.embedding_dim
         )
+        self.bm25 = BM25Storage()
         self.graph_builder = GraphBuilder(graph_db)
 
     def _report_progress(self, stage: str, progress: int):
@@ -116,18 +118,11 @@ class IndexingWorkflow:
             self._report_progress("discovery", 15)
 
             self._report_progress("chunking", 25)
-            # --- Skip LanceDB/Embedding if disabled ---
-            if self.embedder.provider_type == "none":
-                print(f"[WORKFLOW] ⚡ Skipping chunking and embedding (No-LanceDB Mode)")
-                state.chunks_created = 0
-                state.embeddings_generated = 0
-            else:
-                state = self.chunk_and_embed_files(state)
-                if state.error:
-                    print(f"[WORKFLOW] ❌ chunk_and_embed_files failed: {state.error}")
-                    return state
-                print(f"[WORKFLOW] ✅ chunk_and_embed_files complete — {state.chunks_created} chunks, {state.embeddings_generated} embeddings")
-            # ------------------------------------------
+            state = self.chunk_and_embed_files(state)
+            if state.error:
+                print(f"[WORKFLOW] ❌ chunk_and_embed_files failed: {state.error}")
+                return state
+            print(f"[WORKFLOW] ✅ chunk_and_embed_files complete — {state.chunks_created} chunks, {state.embeddings_generated} embeddings")
             self._report_progress("embedding", 65)
 
             self._report_progress("discovery", 70)
@@ -207,6 +202,7 @@ class IndexingWorkflow:
                 print(f"[WORKFLOW] Purging old indexed data for {len(files_to_purge)} modified/deleted files...")
                 try:
                     self.storage.delete_chunks_by_file(state.repo_id, files_to_purge)
+                    self.bm25.delete_by_files(state.repo_id, files_to_purge)
                     if getattr(self, "graph", None):
                         self.graph.delete_file_nodes(state.repo_id, files_to_purge)
                 except Exception as purge_err:
@@ -314,10 +310,40 @@ class IndexingWorkflow:
                 # Directly embed and dump to DB, allowing cyclic reclamation of the array buffer
                 if batch_chunks:
                     try:
-                        new_with_emb = self.embedder.generate_embeddings(batch_chunks, existing_hashes)
-                        if new_with_emb:
-                            self.storage.append_chunks(state.repo_id, new_with_emb)
-                            total_embeddings_generated += len(new_with_emb)
+                        if self.embedder.provider_type == "none":
+                            bm25_rows = []
+                            for chunk in batch_chunks:
+                                bm25_rows.append(
+                                    {
+                                        "chunk_hash": chunk.chunk_hash,
+                                        "file_path": chunk.file_path,
+                                        "start_line": chunk.start_line,
+                                        "end_line": chunk.end_line,
+                                        "language": getattr(chunk, "language", "") or "",
+                                        "symbol_name": getattr(chunk, "symbol_name", "") or "",
+                                        "chunk_text": chunk.text,
+                                    }
+                                )
+                            self.bm25.upsert_chunks(state.repo_id, bm25_rows)
+                        else:
+                            new_with_emb = self.embedder.generate_embeddings(batch_chunks, existing_hashes)
+                            if new_with_emb:
+                                self.storage.append_chunks(state.repo_id, new_with_emb)
+                                bm25_rows = []
+                                for chunk, _emb in new_with_emb:
+                                    bm25_rows.append(
+                                        {
+                                            "chunk_hash": chunk.chunk_hash,
+                                            "file_path": chunk.file_path,
+                                            "start_line": chunk.start_line,
+                                            "end_line": chunk.end_line,
+                                            "language": getattr(chunk, "language", "") or "",
+                                            "symbol_name": getattr(chunk, "symbol_name", "") or "",
+                                            "chunk_text": chunk.text,
+                                        }
+                                    )
+                                self.bm25.upsert_chunks(state.repo_id, bm25_rows)
+                                total_embeddings_generated += len(new_with_emb)
                     except Exception as e:
                         print(f"[STREAM] ❌ Error embedding batch: {type(e).__name__}: {e}")
                 

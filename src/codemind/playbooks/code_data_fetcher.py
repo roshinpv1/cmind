@@ -120,6 +120,8 @@ class GraphPrefetch:
     # Parallel retrieval lanes
     lexical_hits: list[dict] = field(default_factory=list)
     structural_hits: list[dict] = field(default_factory=list)
+    semantic_hits: list[dict] = field(default_factory=list)
+    bm25_hits: list[dict] = field(default_factory=list)
     # Final fused queue with provenance + score
     ranked_candidates: list[dict] = field(default_factory=list)
 
@@ -132,6 +134,8 @@ class GraphPrefetch:
             + len(self.top_nodes)
             + len(self.lexical_hits)
             + len(self.structural_hits)
+            + len(self.semantic_hits)
+            + len(self.bm25_hits)
         )
 
 
@@ -244,12 +248,12 @@ class CodeDataFetcher:
 
     def _rank_candidates(self, prefetch: GraphPrefetch) -> list[dict]:
         """
-        Fuse structural + lexical + graph signals into a ranked file queue.
+        Fuse graph + structural + lexical + semantic + bm25 + metadata signals.
         """
-        score_map: dict[str, int] = {}
+        score_map: dict[str, float] = {}
         reasons: dict[str, list[str]] = {}
 
-        def add(path: str | None, weight: int, reason: str) -> None:
+        def add(path: str | None, weight: float, reason: str) -> None:
             if not path:
                 return
             p = str(path).strip()
@@ -261,29 +265,51 @@ class CodeDataFetcher:
                 reasons[p].append(reason)
 
         for e in prefetch.matched_entities:
-            add(e.get("file_path"), 8, "goal-entity-match")
+            add(e.get("file_path"), 8.0, "goal-entity-match")
         for s in prefetch.signatures:
-            add(s.get("file_path"), 5, "signature")
+            add(s.get("file_path"), 5.0, "signature")
         for n in prefetch.neighbors:
-            add(n.get("file_path"), 3, "dependency-neighbor")
+            add(n.get("file_path"), 3.5, "dependency-neighbor")
         for p in prefetch.cluster_peers:
-            add(p.get("file_path"), 3, "same-community")
+            add(p.get("file_path"), 3.0, "same-community")
         for h in prefetch.structural_hits:
-            add(h.get("file_path"), 4, "symbol-hit")
+            add(h.get("file_path"), 4.5, "symbol-hit")
         for h in prefetch.lexical_hits:
-            add(h.get("file_path"), 2, "lexical-hit")
+            add(h.get("file_path"), 2.5, "lexical-hit")
+        for h in prefetch.semantic_hits:
+            add(
+                h.get("file_path"),
+                2.0 + (float(h.get("score", 0.0)) * 2.5),
+                "semantic-hit",
+            )
+        for h in prefetch.bm25_hits:
+            add(
+                h.get("file_path"),
+                1.5 + (float(h.get("score", 0.0)) * 2.5),
+                "bm25-hit",
+            )
         for f in prefetch.candidate_files:
-            add(f, 2, "pattern-candidate")
+            add(f, 2.0, "pattern-candidate")
         for ep in prefetch.entry_points:
-            add(ep.get("file_path"), 2, "entry-point")
+            add(ep.get("file_path"), 2.0, "entry-point")
         for n in prefetch.top_nodes:
-            add(n.get("file_path"), 1, "topology-hub")
+            add(n.get("file_path"), 1.0, "topology-hub")
+
+        # Lightweight metadata priors (often high-value for security/infra tasks).
+        for path in list(score_map.keys()):
+            p = path.lower()
+            if any(x in p for x in ("auth", "security", "policy", "guard", "middleware")):
+                add(path, 1.2, "metadata-prior:security-core")
+            if any(x in p for x in ("controller", "handler", "route", "endpoint")):
+                add(path, 1.0, "metadata-prior:entry-surface")
+            if any(x in p for x in ("config", ".env", "settings", "properties", "yaml", "toml")):
+                add(path, 0.8, "metadata-prior:config")
 
         ranked = sorted(
             (
                 {
                     "file_path": path,
-                    "score": score,
+                    "score": round(float(score), 3),
                     "provenance": reasons.get(path, []),
                 }
                 for path, score in score_map.items()
@@ -291,6 +317,72 @@ class CodeDataFetcher:
             key=lambda x: (-x["score"], x["file_path"]),
         )
         return ranked[:32]
+
+    def _semantic_and_bm25_retrieval(
+        self,
+        repo_id: str,
+        goal_terms: list[str],
+    ) -> tuple[list[dict], list[dict]]:
+        semantic_hits: list[dict] = []
+        bm25_hits: list[dict] = []
+        terms = [t for t in goal_terms[:8] if t]
+        if not terms:
+            return semantic_hits, bm25_hits
+
+        # Semantic lane via vector index (if enabled)
+        try:
+            if (
+                getattr(self.tools, "embedder", None)
+                and getattr(self.tools.embedder, "provider_type", "") != "none"
+                and getattr(self.tools, "lance", None)
+            ):
+                for term in terms[:5]:
+                    q_emb = self.tools.embedder.encode_query(term)
+                    rows = self.tools.lance.search(q_emb, repo_id=repo_id, limit=10, min_score=0.0)
+                    for row in rows[:8]:
+                        fp = row.get("file_path")
+                        if not fp:
+                            continue
+                        score = row.get("score")
+                        if score is None and row.get("_distance") is not None:
+                            score = 1.0 - float(row.get("_distance", 1.0))
+                        semantic_hits.append(
+                            {
+                                "term": term,
+                                "file_path": fp,
+                                "score": max(0.0, float(score or 0.0)),
+                                "start_line": row.get("start_line", 0),
+                                "end_line": row.get("end_line", 0),
+                            }
+                        )
+        except Exception:
+            pass
+
+        # BM25 lexical lane (FTS5)
+        try:
+            bm25 = getattr(self.tools, "bm25", None)
+            if bm25:
+                for term in terms:
+                    rows = bm25.search(query=term, repo_id=repo_id, limit=10)
+                    for row in rows[:8]:
+                        fp = row.get("file_path")
+                        if not fp:
+                            continue
+                        bm25_hits.append(
+                            {
+                                "term": term,
+                                "file_path": fp,
+                                "score": float(row.get("score", 0.0) or 0.0),
+                                "start_line": row.get("start_line", 0),
+                                "end_line": row.get("end_line", 0),
+                            }
+                        )
+        except Exception:
+            pass
+
+        semantic_hits = self._dedupe_dicts_keep_order(semantic_hits, "file_path")[:24]
+        bm25_hits = self._dedupe_dicts_keep_order(bm25_hits, "file_path")[:24]
+        return semantic_hits, bm25_hits
 
     def build_graph_prefetch(
         self,
@@ -335,6 +427,14 @@ class CodeDataFetcher:
             )
             prefetch.structural_hits = structural_hits
             prefetch.lexical_hits = lexical_hits
+        except Exception:
+            pass
+        try:
+            semantic_hits, bm25_hits = self._semantic_and_bm25_retrieval(
+                repo_id, goal_terms
+            )
+            prefetch.semantic_hits = semantic_hits
+            prefetch.bm25_hits = bm25_hits
         except Exception:
             pass
 
@@ -427,8 +527,14 @@ class CodeDataFetcher:
         lexical_files = self._dedupe_keep_order(
             [h.get("file_path") for h in prefetch.lexical_hits if h.get("file_path")]
         )
+        semantic_files = self._dedupe_keep_order(
+            [h.get("file_path") for h in prefetch.semantic_hits if h.get("file_path")]
+        )
+        bm25_files = self._dedupe_keep_order(
+            [h.get("file_path") for h in prefetch.bm25_hits if h.get("file_path")]
+        )
         prefetch.ordered_files = self._dedupe_keep_order(
-            cluster_files + structural_files + lexical_files + arch_files
+            cluster_files + structural_files + lexical_files + semantic_files + bm25_files + arch_files
         )[:28]
 
         # Keyword-matched candidate files (goal-domain terms → file pattern)
@@ -586,11 +692,18 @@ class CodeDataFetcher:
             for fp in prefetch.candidate_files[:10]:
                 lines.append(f"  • {fp}")
 
-        if prefetch.structural_hits or prefetch.lexical_hits:
+        if (
+            prefetch.structural_hits
+            or prefetch.lexical_hits
+            or prefetch.semantic_hits
+            or prefetch.bm25_hits
+        ):
             lines.append(
                 f"\n#### Parallel retrieval lanes:"
                 f"\n  • structural/symbol hits: {len(prefetch.structural_hits)}"
                 f"\n  • lexical/path hits: {len(prefetch.lexical_hits)}"
+                f"\n  • semantic/vector hits: {len(prefetch.semantic_hits)}"
+                f"\n  • bm25 lexical hits: {len(prefetch.bm25_hits)}"
             )
             for s in prefetch.structural_hits[:6]:
                 lines.append(
@@ -600,6 +713,16 @@ class CodeDataFetcher:
             for l in prefetch.lexical_hits[:6]:
                 lines.append(
                     f"    - lexical[{l.get('term','?')}]: {l.get('file_path','?')}"
+                )
+            for s in prefetch.semantic_hits[:6]:
+                lines.append(
+                    f"    - semantic[{s.get('term','?')}]: {s.get('file_path','?')} "
+                    f"(score={round(float(s.get('score', 0.0)), 3)})"
+                )
+            for b in prefetch.bm25_hits[:6]:
+                lines.append(
+                    f"    - bm25[{b.get('term','?')}]: {b.get('file_path','?')} "
+                    f"(score={round(float(b.get('score', 0.0)), 3)})"
                 )
 
         if prefetch.ranked_candidates:
