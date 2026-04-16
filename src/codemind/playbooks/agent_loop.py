@@ -335,6 +335,65 @@ class ReActAgent:
         except Exception:
             pass  # trace is best-effort
 
+    def _collect_evidence_stats(self, messages: list[BaseMessage]) -> dict[str, int]:
+        """
+        Build lightweight evidence-coverage stats from executed tool messages.
+        Used by final-state gating to prevent shallow completion.
+        """
+        structural_tool_names = {
+            "get_map",
+            "trace_path",
+            "get_callers",
+            "get_callees",
+            "get_dependencies",
+            "search_symbol",
+            "get_file_outline",
+        }
+        lexical_tool_names = {
+            "search_code",
+            "grep_search",
+            "list_files",
+            "list_repo_directory",
+        }
+        read_tool_names = {"read_file", "read_file_system"}
+        unique_read_files: set[str] = set()
+        structural_calls = 0
+        lexical_calls = 0
+        evidence_messages = 0
+
+        for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            name = str(getattr(msg, "name", "") or "")
+            if name in structural_tool_names:
+                structural_calls += 1
+            if name in lexical_tool_names:
+                lexical_calls += 1
+            try:
+                payload = json.loads(str(msg.content or "{}"))
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            if name in read_tool_names and payload.get("success"):
+                fp = str(payload.get("file_path") or "").strip()
+                if fp:
+                    unique_read_files.add(fp)
+            meta = payload.get("_meta")
+            if isinstance(meta, dict) and float(meta.get("evidence_score", 0.0) or 0.0) > 0:
+                evidence_messages += 1
+            elif payload.get("success") and any(
+                payload.get(k) for k in ("results", "content", "files", "top_nodes", "entry_points")
+            ):
+                evidence_messages += 1
+
+        return {
+            "unique_read_files": len(unique_read_files),
+            "structural_calls": structural_calls,
+            "lexical_calls": lexical_calls,
+            "evidence_messages": evidence_messages,
+        }
+
     # ── synthesis ─────────────────────────────────────────────────────────────
 
     async def _synthesize(
@@ -669,6 +728,7 @@ class ReActAgent:
                         has_tool_history=orchestration.has_tool_history(messages),
                         output_type=output_type,
                         output_schema_model=output_schema_model,
+                        evidence_stats=self._collect_evidence_stats(messages),
                     )
                     if not synth_gate.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                         finalization_retries += 1
@@ -806,6 +866,7 @@ class ReActAgent:
                     has_tool_history=orchestration.has_tool_history(messages),
                     output_type=output_type,
                     output_schema_model=output_schema_model,
+                    evidence_stats=self._collect_evidence_stats(messages),
                 )
                 if not decision.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                     finalization_retries += 1

@@ -464,9 +464,9 @@ gather real evidence before drawing conclusions.
 - `trace_path` — shortest call/import path between two symbols.
 
 **Code Search**
-- `search_code` — semantic + keyword hybrid search across the indexed codebase.
-  Use targeted queries; batch multiple patterns in one call.
-- `search_symbol` — find a class or function by exact name.
+- `search_code` — lexical/regex search over source files (exact text patterns).
+- `search_symbol` — structural lookup for definitions/references by symbol name.
+  Prefer running both in early passes (lexical + structural) to improve coverage.
 - `grep_search` — regex search across the raw source files.
 
 **File Reading**

@@ -61,3 +61,42 @@ def test_accepts_valid_json_response():
         output_schema_model=_Schema,
     )
     assert decision.is_final
+
+
+def test_rejects_repo_finalization_when_evidence_contract_not_met():
+    decision = evaluate_final_state(
+        response_text="Completed analysis.",
+        repo_id="abc123",
+        tool_calls_made=4,
+        has_tool_history=True,
+        output_type="",
+        output_schema_model=None,
+        evidence_stats={
+            "unique_read_files": 0,
+            "structural_calls": 0,
+            "lexical_calls": 0,
+            "evidence_messages": 0,
+        },
+    )
+    assert not decision.is_final
+    assert decision.reason == "evidence_contract_not_met"
+    assert decision.continue_prompt is not None
+    assert "Evidence coverage is incomplete" in decision.continue_prompt
+
+
+def test_accepts_repo_finalization_when_evidence_contract_met():
+    decision = evaluate_final_state(
+        response_text="Final evidence-backed answer.",
+        repo_id="abc123",
+        tool_calls_made=4,
+        has_tool_history=True,
+        output_type="",
+        output_schema_model=None,
+        evidence_stats={
+            "unique_read_files": 3,
+            "structural_calls": 2,
+            "lexical_calls": 2,
+            "evidence_messages": 3,
+        },
+    )
+    assert decision.is_final

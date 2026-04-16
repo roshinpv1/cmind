@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -13,6 +14,20 @@ class FinalStateDecision:
     is_final: bool
     reason: str = ""
     continue_prompt: str | None = None
+
+
+_MIN_UNIQUE_READ_FILES = max(
+    1, int(os.getenv("CODEMIND_MIN_UNIQUE_READ_FILES", "2"))
+)
+_MIN_STRUCTURAL_CALLS = max(
+    1, int(os.getenv("CODEMIND_MIN_STRUCTURAL_CALLS", "1"))
+)
+_MIN_LEXICAL_CALLS = max(
+    1, int(os.getenv("CODEMIND_MIN_LEXICAL_CALLS", "1"))
+)
+_MIN_EVIDENCE_MESSAGES = max(
+    1, int(os.getenv("CODEMIND_MIN_EVIDENCE_MESSAGES", "2"))
+)
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -81,6 +96,7 @@ def evaluate_final_state(
     has_tool_history: bool,
     output_type: str = "",
     output_schema_model: Any = None,
+    evidence_stats: dict[str, Any] | None = None,
 ) -> FinalStateDecision:
     text = (response_text or "").strip()
     if not text:
@@ -114,6 +130,40 @@ def evaluate_final_state(
                 "before concluding."
             ),
         )
+
+    if repo_id and has_tool_history:
+        stats = evidence_stats or {}
+        unique_read_files = int(stats.get("unique_read_files", 0) or 0)
+        structural_calls = int(stats.get("structural_calls", 0) or 0)
+        lexical_calls = int(stats.get("lexical_calls", 0) or 0)
+        evidence_messages = int(stats.get("evidence_messages", 0) or 0)
+        missing: list[str] = []
+        if unique_read_files < _MIN_UNIQUE_READ_FILES:
+            missing.append(
+                f"read at least {_MIN_UNIQUE_READ_FILES} unique repository files"
+            )
+        if structural_calls < _MIN_STRUCTURAL_CALLS:
+            missing.append(
+                "perform structural tracing (e.g., get_map/get_callers/get_callees/get_dependencies/search_symbol)"
+            )
+        if lexical_calls < _MIN_LEXICAL_CALLS:
+            missing.append(
+                "perform lexical search (e.g., search_code/grep_search/list_files)"
+            )
+        if evidence_messages < _MIN_EVIDENCE_MESSAGES:
+            missing.append(
+                f"collect at least {_MIN_EVIDENCE_MESSAGES} evidence-bearing tool outputs"
+            )
+        if missing:
+            return FinalStateDecision(
+                is_final=False,
+                reason="evidence_contract_not_met",
+                continue_prompt=(
+                    "Do not finalize yet. Evidence coverage is incomplete for repository analysis. "
+                    "Continue tool-driven investigation and satisfy ALL missing checks:\n- "
+                    + "\n- ".join(missing)
+                ),
+            )
 
     if (output_type or "").strip().lower() == "tool_call":
         return FinalStateDecision(

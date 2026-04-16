@@ -33,6 +33,7 @@ Implements the full goal-to-context pipeline:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 from dataclasses import dataclass, field
 
@@ -116,6 +117,11 @@ class GraphPrefetch:
     # Derived file reading order
     ordered_files: list[str] = field(default_factory=list)
     candidate_files: list[str] = field(default_factory=list)
+    # Parallel retrieval lanes
+    lexical_hits: list[dict] = field(default_factory=list)
+    structural_hits: list[dict] = field(default_factory=list)
+    # Final fused queue with provenance + score
+    ranked_candidates: list[dict] = field(default_factory=list)
 
     @property
     def evidence_count(self) -> int:
@@ -124,6 +130,8 @@ class GraphPrefetch:
             + len(self.signatures)
             + len(self.neighbors)
             + len(self.top_nodes)
+            + len(self.lexical_hits)
+            + len(self.structural_hits)
         )
 
 
@@ -151,6 +159,138 @@ class CodeDataFetcher:
             seen.add(v)
             out.append(v)
         return out
+
+    @staticmethod
+    def _dedupe_dicts_keep_order(items: list[dict], key: str) -> list[dict]:
+        """Deduplicate dict items by a key while preserving first-seen order."""
+        seen: set[str] = set()
+        out: list[dict] = []
+        for item in items:
+            val = str(item.get(key) or "").strip()
+            if not val or val in seen:
+                continue
+            seen.add(val)
+            out.append(item)
+        return out
+
+    def _parallel_goal_retrieval(
+        self,
+        gqs,
+        repo_id: str,
+        goal_terms: list[str],
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Run structural and lexical retrieval lanes in parallel.
+
+        Structural lane:
+          - symbol lookups (definitions/references by name) via graph index.
+        Lexical lane:
+          - file-path pattern matches for exact/substring terms.
+        """
+        structural_hits: list[dict] = []
+        lexical_hits: list[dict] = []
+        terms = [t for t in goal_terms[:10] if t]
+        if not terms:
+            return structural_hits, lexical_hits
+
+        with ThreadPoolExecutor(max_workers=min(8, max(2, len(terms) * 2))) as pool:
+            tasks = {}
+            for term in terms:
+                tasks[pool.submit(gqs.find_symbol_by_name, repo_id, term, None)] = (
+                    "symbol", term
+                )
+                tasks[pool.submit(gqs.find_files_by_pattern, repo_id, term)] = (
+                    "lexical", term
+                )
+
+            for future in as_completed(tasks):
+                lane, term = tasks[future]
+                try:
+                    rows = future.result() or []
+                except Exception:
+                    rows = []
+
+                if lane == "symbol":
+                    for row in rows[:6]:
+                        fp = row.get("file_path")
+                        if not fp:
+                            continue
+                        structural_hits.append(
+                            {
+                                "term": term,
+                                "name": row.get("name"),
+                                "type": row.get("type"),
+                                "file_path": fp,
+                                "start_line": row.get("start_line", 0),
+                                "end_line": row.get("end_line", 0),
+                            }
+                        )
+                else:
+                    for row in rows[:8]:
+                        fp = row.get("file_path")
+                        if not fp:
+                            continue
+                        lexical_hits.append(
+                            {
+                                "term": term,
+                                "file_path": fp,
+                                "language": row.get("language", ""),
+                            }
+                        )
+
+        structural_hits = self._dedupe_dicts_keep_order(structural_hits, "file_path")[:24]
+        lexical_hits = self._dedupe_dicts_keep_order(lexical_hits, "file_path")[:28]
+        return structural_hits, lexical_hits
+
+    def _rank_candidates(self, prefetch: GraphPrefetch) -> list[dict]:
+        """
+        Fuse structural + lexical + graph signals into a ranked file queue.
+        """
+        score_map: dict[str, int] = {}
+        reasons: dict[str, list[str]] = {}
+
+        def add(path: str | None, weight: int, reason: str) -> None:
+            if not path:
+                return
+            p = str(path).strip()
+            if not p:
+                return
+            score_map[p] = score_map.get(p, 0) + weight
+            reasons.setdefault(p, [])
+            if reason not in reasons[p]:
+                reasons[p].append(reason)
+
+        for e in prefetch.matched_entities:
+            add(e.get("file_path"), 8, "goal-entity-match")
+        for s in prefetch.signatures:
+            add(s.get("file_path"), 5, "signature")
+        for n in prefetch.neighbors:
+            add(n.get("file_path"), 3, "dependency-neighbor")
+        for p in prefetch.cluster_peers:
+            add(p.get("file_path"), 3, "same-community")
+        for h in prefetch.structural_hits:
+            add(h.get("file_path"), 4, "symbol-hit")
+        for h in prefetch.lexical_hits:
+            add(h.get("file_path"), 2, "lexical-hit")
+        for f in prefetch.candidate_files:
+            add(f, 2, "pattern-candidate")
+        for ep in prefetch.entry_points:
+            add(ep.get("file_path"), 2, "entry-point")
+        for n in prefetch.top_nodes:
+            add(n.get("file_path"), 1, "topology-hub")
+
+        ranked = sorted(
+            (
+                {
+                    "file_path": path,
+                    "score": score,
+                    "provenance": reasons.get(path, []),
+                }
+                for path, score in score_map.items()
+            ),
+            key=lambda x: (-x["score"], x["file_path"]),
+        )
+        return ranked[:32]
 
     def build_graph_prefetch(
         self,
@@ -186,6 +326,33 @@ class CodeDataFetcher:
                 )
         except Exception:
             pass
+
+        # ── Parallel lanes: lexical + structural retrieval ───────────────
+        # These run independently from graph topology steps and broaden recall.
+        try:
+            structural_hits, lexical_hits = self._parallel_goal_retrieval(
+                gqs, repo_id, goal_terms
+            )
+            prefetch.structural_hits = structural_hits
+            prefetch.lexical_hits = lexical_hits
+        except Exception:
+            pass
+
+        # If entity matching misses, bootstrap from structural symbol hits.
+        if not prefetch.matched_entities and prefetch.structural_hits:
+            prefetch.matched_entities = [
+                {
+                    "node_id": None,
+                    "name": s.get("name"),
+                    "type": s.get("type") or "Symbol",
+                    "file_path": s.get("file_path"),
+                    "start_line": s.get("start_line", 0),
+                    "end_line": s.get("end_line", 0),
+                    "community": None,
+                    "degree": 0,
+                }
+                for s in prefetch.structural_hits[:12]
+            ]
 
         # ── Step 2: Identify relevant cluster ────────────────────────────
         # Determine which community the matched entities belong to.
@@ -254,9 +421,15 @@ class CodeDataFetcher:
             [n.get("file_path") for n in prefetch.top_nodes if n.get("file_path")]
             + [ep.get("file_path") for ep in prefetch.entry_points if ep.get("file_path")]
         )
+        structural_files = self._dedupe_keep_order(
+            [h.get("file_path") for h in prefetch.structural_hits if h.get("file_path")]
+        )
+        lexical_files = self._dedupe_keep_order(
+            [h.get("file_path") for h in prefetch.lexical_hits if h.get("file_path")]
+        )
         prefetch.ordered_files = self._dedupe_keep_order(
-            cluster_files + arch_files
-        )[:24]
+            cluster_files + structural_files + lexical_files + arch_files
+        )[:28]
 
         # Keyword-matched candidate files (goal-domain terms → file pattern)
         candidate_files: list[str] = []
@@ -269,7 +442,8 @@ class CodeDataFetcher:
                         candidate_files.append(fp)
             except Exception:
                 pass
-        prefetch.candidate_files = self._dedupe_keep_order(candidate_files)[:20]
+        prefetch.candidate_files = self._dedupe_keep_order(candidate_files)[:24]
+        prefetch.ranked_candidates = self._rank_candidates(prefetch)
 
         return prefetch
 
@@ -411,6 +585,31 @@ class CodeDataFetcher:
             lines.append("\n#### Keyword-matched candidate files:")
             for fp in prefetch.candidate_files[:10]:
                 lines.append(f"  • {fp}")
+
+        if prefetch.structural_hits or prefetch.lexical_hits:
+            lines.append(
+                f"\n#### Parallel retrieval lanes:"
+                f"\n  • structural/symbol hits: {len(prefetch.structural_hits)}"
+                f"\n  • lexical/path hits: {len(prefetch.lexical_hits)}"
+            )
+            for s in prefetch.structural_hits[:6]:
+                lines.append(
+                    f"    - symbol[{s.get('term','?')}]: {s.get('name','?')} "
+                    f"→ {s.get('file_path','?')}"
+                )
+            for l in prefetch.lexical_hits[:6]:
+                lines.append(
+                    f"    - lexical[{l.get('term','?')}]: {l.get('file_path','?')}"
+                )
+
+        if prefetch.ranked_candidates:
+            lines.append("\n#### Fused ranked read queue (lexical + structural + graph):")
+            for idx, cand in enumerate(prefetch.ranked_candidates[:12], 1):
+                why = ", ".join(cand.get("provenance", [])[:3])
+                lines.append(
+                    f"  {idx}. {cand.get('file_path','?')}  "
+                    f"(score={cand.get('score', 0)}; why: {why})"
+                )
 
         lines.append(
             "\n#### MANDATORY — you MUST call tools before concluding:\n"
