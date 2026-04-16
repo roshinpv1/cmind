@@ -121,6 +121,109 @@ _INLINE_HTML_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_POTENTIAL_SECURITY_PATTERNS: dict[str, dict[str, object]] = {
+    "sql_injection_like": {
+        "severity_hint": "HIGH",
+        "regexes": (
+            r"select\s+.+\+",
+            r"execute\s*\(.+\+",
+            r"raw\s*sql",
+        ),
+    },
+    "command_injection_like": {
+        "severity_hint": "CRITICAL",
+        "regexes": (
+            r"os\.system\s*\(",
+            r"subprocess\.(run|popen|call)\s*\(",
+            r"shell\s*=\s*true",
+        ),
+    },
+    "dynamic_code_execution": {
+        "severity_hint": "CRITICAL",
+        "regexes": (
+            r"\beval\s*\(",
+            r"\bexec\s*\(",
+        ),
+    },
+    "ssrf_like_http_fetch": {
+        "severity_hint": "HIGH",
+        "regexes": (
+            r"requests\.(get|post|request)\s*\(",
+            r"httpx\.(get|post|request)\s*\(",
+            r"urllib\.request\.urlopen\s*\(",
+        ),
+    },
+    "xss_like_render_sink": {
+        "severity_hint": "HIGH",
+        "regexes": (
+            r"dangerouslysetinnerhtml",
+            r"\binnerhtml\s*=",
+            r"\bv-html\b",
+        ),
+    },
+    "hardcoded_secret_like": {
+        "severity_hint": "CRITICAL",
+        "regexes": (
+            r"(api[_-]?key|secret|token|password)\s*[:=]\s*['\"][^'\"]+['\"]",
+            r"-----begin\s+private\s+key-----",
+        ),
+    },
+    "weak_crypto_or_tls": {
+        "severity_hint": "HIGH",
+        "regexes": (
+            r"\bmd5\s*\(",
+            r"\bsha1\s*\(",
+            r"\bdes\b",
+            r"\brc4\b",
+            r"mode_ecb",
+            r"verify\s*=\s*false",
+        ),
+    },
+}
+
+
+def _extract_text_from_tool_payload(payload: dict) -> str:
+    chunks: list[str] = []
+    for key in ("results", "content", "outline", "context"):
+        val = payload.get(key)
+        if isinstance(val, str):
+            chunks.append(val)
+        elif isinstance(val, list):
+            for item in val[:40]:
+                chunks.append(str(item))
+        elif isinstance(val, dict):
+            chunks.append(json.dumps(val, default=str))
+    return "\n".join(chunks)[:200_000]
+
+
+def _detect_potential_security_patterns(payload: dict, tool_name: str) -> list[dict]:
+    """
+    Identify potential security issue patterns from tool outputs.
+    This is heuristic and intentionally labels findings as "potential".
+    """
+    text = _extract_text_from_tool_payload(payload)
+    if not text.strip():
+        return []
+    low = text.lower()
+    findings: list[dict] = []
+    for pattern_id, spec in _POTENTIAL_SECURITY_PATTERNS.items():
+        regexes = spec.get("regexes", ())
+        matches: list[str] = []
+        for rx in regexes:
+            m = re.search(str(rx), low, flags=re.IGNORECASE)
+            if m:
+                matches.append(m.group(0))
+        if matches:
+            findings.append(
+                {
+                    "pattern_id": pattern_id,
+                    "severity_hint": spec.get("severity_hint", "MEDIUM"),
+                    "source_tool": tool_name,
+                    "indicators": sorted(set(matches))[:4],
+                }
+            )
+    return findings
+
 
 def _extract_files_from_manifest_obj(obj: object) -> list[tuple[str, str]]:
     """
@@ -279,6 +382,7 @@ class AgentResult:
     logs: list[str] = field(default_factory=list)
     quality_scorecards: list[dict] = field(default_factory=list)
     quality_summary: dict = field(default_factory=dict)
+    potential_issue_patterns: list[dict] = field(default_factory=list)
     error: str | None = None
 
 
@@ -481,6 +585,7 @@ class ReActAgent:
         messages: list[BaseMessage] = [HumanMessage(content=goal)]
         tool_calls_made = 0
         generated_files: list[str] = []
+        potential_issue_patterns: dict[str, dict] = {}
         finalization_retries = 0
         quality_scorecards: list[dict] = []
         cumulative_evidence_score = 0.0
@@ -563,6 +668,7 @@ class ReActAgent:
                 logs=logs,
                 quality_scorecards=quality_scorecards,
                 quality_summary=_quality_summary(),
+                potential_issue_patterns=list(potential_issue_patterns.values()),
                 error=error,
             )
 
@@ -925,6 +1031,29 @@ class ReActAgent:
                     if is_write and fp:
                         generated_files.append(str(fp))
                         print(f"[REACT] ✅ File written: {fp}")
+                    detected = _detect_potential_security_patterns(
+                        payload, str(getattr(tm, "name", "") or "")
+                    )
+                    for item in detected:
+                        key = str(item.get("pattern_id") or "")
+                        if not key:
+                            continue
+                        if key in potential_issue_patterns:
+                            existing = potential_issue_patterns[key]
+                            prev = set(existing.get("indicators", []) or [])
+                            new = set(item.get("indicators", []) or [])
+                            existing["indicators"] = sorted(prev | new)[:6]
+                            src = set(existing.get("source_tools", []) or [])
+                            src.add(str(item.get("source_tool") or ""))
+                            existing["source_tools"] = sorted(s for s in src if s)
+                        else:
+                            potential_issue_patterns[key] = {
+                                "pattern_id": key,
+                                "severity_hint": item.get("severity_hint", "MEDIUM"),
+                                "indicators": list(item.get("indicators", []) or []),
+                                "source_tools": [str(item.get("source_tool") or "")],
+                                "confidence": "potential",
+                            }
                 except Exception:
                     continue
 

@@ -129,6 +129,43 @@ def _extract_changed_files_claim(answer: str) -> list[str]:
     return []
 
 
+def _is_security_playbook(playbook_name: str, playbook: Any) -> bool:
+    n = (playbook_name or "").lower()
+    category = str(getattr(playbook, "category", "") or "").lower()
+    if category == "security":
+        return True
+    return any(tok in n for tok in ("security", "vulnerab", "sentinel"))
+
+
+def _inject_potential_patterns_into_result_text(
+    *,
+    answer: str,
+    patterns: list[dict],
+    output_type: str,
+) -> str:
+    if not patterns:
+        return answer
+    # Keep JSON responses valid JSON; attach a new top-level field if parseable.
+    if (output_type or "").strip().lower() == "json_response":
+        s = (answer or "").strip()
+        try:
+            obj = json.loads(s)
+        except Exception:
+            return answer
+        if isinstance(obj, dict):
+            obj.setdefault("potential_issue_patterns", patterns)
+            return json.dumps(obj, indent=2, ensure_ascii=False)
+        return answer
+
+    lines = ["\n\nPotential issue patterns identified from evidence:"]
+    for p in patterns[:10]:
+        pid = p.get("pattern_id", "unknown_pattern")
+        sev = p.get("severity_hint", "MEDIUM")
+        indicators = ", ".join((p.get("indicators") or [])[:3])
+        lines.append(f"- {pid} [{sev}] - indicators: {indicators}")
+    return (answer or "").rstrip() + "\n" + "\n".join(lines)
+
+
 # ── PlaybookExecutor ──────────────────────────────────────────────────────────
 
 class PlaybookExecutor:
@@ -332,6 +369,7 @@ class PlaybookExecutor:
         )
         quality_scorecards = list(result.quality_scorecards or [])
         quality_summary = dict(result.quality_summary or {})
+        potential_issue_patterns = list(result.potential_issue_patterns or [])
 
         generated_files = list(dict.fromkeys(result.generated_files))
         effective_error = result.error
@@ -347,10 +385,23 @@ class PlaybookExecutor:
                 "Files may not have been persisted to mirror workspace."
             )
 
+        output_type = getattr(playbook, "output_type", "") or ""
+        if _is_security_playbook(playbook_name, playbook) and potential_issue_patterns:
+            logs.append(
+                f"Security enrichment: attached {len(potential_issue_patterns)} potential issue pattern(s)."
+            )
+            result_text = _inject_potential_patterns_into_result_text(
+                answer=result.answer,
+                patterns=potential_issue_patterns,
+                output_type=output_type,
+            )
+        else:
+            result_text = result.answer
+
         return {
             "success": effective_error is None,
             "outputs": {
-                "result":        result.answer,
+                "result":        result_text,
                 "data":          None,
                 "tool_executed": result.tool_calls_made > 0,
                 "tool_result":   None,
@@ -358,12 +409,14 @@ class PlaybookExecutor:
                 "playbook":      playbook_name,
                 "generated_files": generated_files,
                 "claimed_changed_files": claimed_changed_files,
+                "potential_issue_patterns": potential_issue_patterns,
                 "quality_scorecards": quality_scorecards,
                 "quality_summary": quality_summary,
                 "context": {
                     "sources": [],
                     "evidence_count": quality_summary.get("cumulative_evidence_score", 0),
                     "log_count": len(logs),
+                    "potential_issue_patterns": potential_issue_patterns,
                     "quality": quality_summary,
                 },
             },
