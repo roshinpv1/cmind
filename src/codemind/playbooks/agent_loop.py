@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from .final_state import evaluate_final_state
 from .orchestration_controller import NextAction, OrchestrationController
 from .orchestration_policies import MIN_REPO_TOOL_CALLS, should_force_continuation
+from .quality_guard import evaluate_quality_guard
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,12 @@ _TRACE_DIR        = os.getenv("CODEMIND_TRACE_DIR", "/tmp")
 _MAX_FINALIZATION_RETRIES = max(
     1, int(os.getenv("CODEMIND_FINALIZATION_MAX_RETRIES", "2"))
 )
+_ENABLE_VERIFIER_PASS = os.getenv("CODEMIND_ENABLE_VERIFIER_PASS", "0").lower() in ("1", "true", "yes")
+_ENABLE_GROUNDING_GATE = os.getenv("CODEMIND_ENABLE_GROUNDING_GATE", "0").lower() in ("1", "true", "yes")
+_ENABLE_RISK_WEIGHTED_COVERAGE = os.getenv(
+    "CODEMIND_ENABLE_RISK_WEIGHTED_COVERAGE", "0"
+).lower() in ("1", "true", "yes")
+_QUALITY_GUARD_ENFORCE = os.getenv("CODEMIND_QUALITY_GUARD_ENFORCE", "0").lower() in ("1", "true", "yes")
 
 _AGENT_DIRECTIVE = """
 ### AGENT PROTOCOL
@@ -498,6 +505,7 @@ class ReActAgent:
 
         return {
             "unique_read_files": len(unique_read_files),
+            "read_files": sorted(unique_read_files),
             "structural_calls": structural_calls,
             "lexical_calls": lexical_calls,
             "evidence_messages": evidence_messages,
@@ -509,6 +517,39 @@ class ReActAgent:
                 else 1.0
             ),
         }
+
+    def _collect_evidence_files(self, messages: list[BaseMessage]) -> set[str]:
+        """
+        Best-effort set of file paths observed in tool outputs.
+        Used by grounding checks (shadow/enforced via feature flags).
+        """
+        files: set[str] = set()
+        for msg in messages:
+            if not isinstance(msg, ToolMessage):
+                continue
+            try:
+                payload = json.loads(str(msg.content or "{}"))
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                continue
+            for key in ("file_path", "absolute_path"):
+                v = str(payload.get(key) or "").strip()
+                if v:
+                    files.add(v)
+            for k in ("files", "results", "symbols", "callers", "callees", "dependencies"):
+                val = payload.get(k)
+                if isinstance(val, list):
+                    for item in val[:200]:
+                        if isinstance(item, dict):
+                            fp = str(item.get("file_path") or item.get("path") or "").strip()
+                            if fp:
+                                files.add(fp)
+                        elif isinstance(item, str):
+                            s = item.strip()
+                            if s and "/" in s and "." in s:
+                                files.add(s)
+        return files
 
     # ── synthesis ─────────────────────────────────────────────────────────────
 
@@ -840,6 +881,9 @@ class ReActAgent:
                     answer = await self._synthesize(
                         messages, goal, playbook_name, reason=decision.synth_reason
                     )
+                    evidence_stats = self._collect_evidence_stats(
+                        messages, expected_critical_files
+                    )
                     synth_gate = evaluate_final_state(
                         response_text=answer,
                         repo_id=self._repo_id,
@@ -847,9 +891,7 @@ class ReActAgent:
                         has_tool_history=orchestration.has_tool_history(messages),
                         output_type=output_type,
                         output_schema_model=output_schema_model,
-                        evidence_stats=self._collect_evidence_stats(
-                            messages, expected_critical_files
-                        ),
+                        evidence_stats=evidence_stats,
                     )
                     if not synth_gate.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                         finalization_retries += 1
@@ -868,6 +910,41 @@ class ReActAgent:
                             response_text=answer,
                             stage="synthesis_rejected_by_final_gate",
                             final_gate_reason=synth_gate.reason,
+                        )
+                        continue
+                    quality_guard = evaluate_quality_guard(
+                        answer=answer,
+                        output_type=output_type,
+                        evidence_files=self._collect_evidence_files(messages),
+                        read_files=set(evidence_stats.get("read_files", []) or []),
+                        expected_critical_files=expected_critical_files,
+                        enable_verifier=_ENABLE_VERIFIER_PASS,
+                        enable_grounding=_ENABLE_GROUNDING_GATE,
+                        enable_risk_coverage=_ENABLE_RISK_WEIGHTED_COVERAGE,
+                        enforce=_QUALITY_GUARD_ENFORCE,
+                    )
+                    if quality_guard.reasons:
+                        logs.append(
+                            "  Iter "
+                            f"{iteration}: quality-guard ({quality_guard.mode}) "
+                            f"reasons={quality_guard.reasons}"
+                        )
+                    if not quality_guard.passed and finalization_retries < _MAX_FINALIZATION_RETRIES:
+                        finalization_retries += 1
+                        messages.append(
+                            HumanMessage(
+                                content=(
+                                    "Quality guard blocked finalization due to: "
+                                    + ", ".join(quality_guard.reasons)
+                                    + ". Continue gathering targeted evidence."
+                                )
+                            )
+                        )
+                        _append_quality_scorecard(
+                            iteration_idx=iteration,
+                            response_text=answer,
+                            stage="quality_guard_rejected",
+                            final_gate_reason="quality_guard_rejected",
                         )
                         continue
                     _append_quality_scorecard(
@@ -980,6 +1057,9 @@ class ReActAgent:
                         f"  Iter {iteration}: empty response — synthesising from tool data"
                     )
                     answer = await self._synthesize(messages, goal, playbook_name, reason="empty_response")
+                evidence_stats = self._collect_evidence_stats(
+                    messages, expected_critical_files
+                )
                 decision = evaluate_final_state(
                     response_text=answer,
                     repo_id=self._repo_id,
@@ -987,9 +1067,7 @@ class ReActAgent:
                     has_tool_history=orchestration.has_tool_history(messages),
                     output_type=output_type,
                     output_schema_model=output_schema_model,
-                    evidence_stats=self._collect_evidence_stats(
-                        messages, expected_critical_files
-                    ),
+                    evidence_stats=evidence_stats,
                 )
                 if not decision.is_final and finalization_retries < _MAX_FINALIZATION_RETRIES:
                     finalization_retries += 1
@@ -1008,6 +1086,41 @@ class ReActAgent:
                         response_text=answer,
                         stage="final_state_rejected",
                         final_gate_reason=decision.reason,
+                    )
+                    continue
+                quality_guard = evaluate_quality_guard(
+                    answer=answer,
+                    output_type=output_type,
+                    evidence_files=self._collect_evidence_files(messages),
+                    read_files=set(evidence_stats.get("read_files", []) or []),
+                    expected_critical_files=expected_critical_files,
+                    enable_verifier=_ENABLE_VERIFIER_PASS,
+                    enable_grounding=_ENABLE_GROUNDING_GATE,
+                    enable_risk_coverage=_ENABLE_RISK_WEIGHTED_COVERAGE,
+                    enforce=_QUALITY_GUARD_ENFORCE,
+                )
+                if quality_guard.reasons:
+                    logs.append(
+                        "  Iter "
+                        f"{iteration}: quality-guard ({quality_guard.mode}) "
+                        f"reasons={quality_guard.reasons}"
+                    )
+                if not quality_guard.passed and finalization_retries < _MAX_FINALIZATION_RETRIES:
+                    finalization_retries += 1
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                "Quality guard blocked finalization due to: "
+                                + ", ".join(quality_guard.reasons)
+                                + ". Continue gathering targeted evidence."
+                            )
+                        )
+                    )
+                    _append_quality_scorecard(
+                        iteration_idx=iteration,
+                        response_text=answer,
+                        stage="quality_guard_rejected",
+                        final_gate_reason="quality_guard_rejected",
                     )
                     continue
                 if decision.is_final:
