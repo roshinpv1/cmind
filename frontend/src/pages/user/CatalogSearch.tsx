@@ -4,18 +4,28 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { authService } from "../../lib/auth";
 
-interface SearchResult {
-    catalog_id: string;
+/** API returns `_format_catalog_results` rows (GET/POST `/api/v1/catalogs/search`). */
+interface CatalogSearchRow {
+    repo_id: string;
     repo_name: string;
-    result: string;
-    score: number;
-    metadata: string; // JSON string
-    created_at: string;
+    score?: number;
+    match_score?: number;
+    chunk_text?: string;
+    description?: string;
+    metadata?: string;
+    created_at?: string;
+}
+
+function similarityPct(row: CatalogSearchRow): number {
+    const raw = row.score ?? row.match_score;
+    const n = typeof raw === "number" && Number.isFinite(raw) ? raw : parseFloat(String(raw ?? ""));
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(100, Math.max(0, Math.round(n * 100)));
 }
 
 export default function CatalogSearch() {
     const [query, setQuery] = useState("");
-    const [results, setResults] = useState<SearchResult[]>([]);
+    const [results, setResults] = useState<CatalogSearchRow[]>([]);
     const [loading, setLoading] = useState(false);
     const [hasSearched, setHasSearched] = useState(false);
 
@@ -47,7 +57,7 @@ export default function CatalogSearch() {
             });
 
             const data = await res.json();
-            setResults(data);
+            setResults(Array.isArray(data) ? data : []);
         } catch (err) {
             console.error(err);
         } finally {
@@ -138,17 +148,19 @@ export default function CatalogSearch() {
             {/* Results */}
             <div className="space-y-6">
                 {results.map((item) => (
-                    <div key={item.catalog_id} className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow">
+                    <div key={item.repo_id} className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow">
                         <div className="px-6 py-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
                             <div>
                                 <h3 className="text-lg font-semibold text-gray-900">{item.repo_name}</h3>
                                 <p className="text-xs text-gray-500">
-                                    Matches similarity: {(item.score * 100).toFixed(0)}%
+                                    Search match: <span className="font-semibold text-gray-700">{similarityPct(item)}%</span>
                                 </p>
                             </div>
-                            <span className="text-xs text-gray-400">
-                                {new Date(item.created_at).toLocaleDateString()}
-                            </span>
+                            {item.created_at && !Number.isNaN(new Date(item.created_at).getTime()) && (
+                                <span className="text-xs text-gray-400">
+                                    {new Date(item.created_at).toLocaleDateString()}
+                                </span>
+                            )}
                         </div>
                         {(() => {
                             try {
@@ -168,7 +180,9 @@ export default function CatalogSearch() {
                         })()}
                         <div className="px-6 py-4 prose prose-red max-w-none">
                             <div className="text-gray-700">
-                                <Markdown remarkPlugins={[remarkGfm]}>{item.result}</Markdown>
+                                <Markdown remarkPlugins={[remarkGfm]}>
+                                    {item.chunk_text || item.description || ""}
+                                </Markdown>
                             </div>
                         </div>
                         <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 text-right">

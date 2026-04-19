@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from dataclasses import dataclass
 from typing import Any
 
+from .json_answer_extract import extract_top_level_json_object
 from .orchestration_policies import MIN_REPO_TOOL_CALLS, should_force_continuation
 
 
@@ -34,36 +34,7 @@ _MIN_CRITICAL_COVERAGE_RATIO = max(
 
 
 def _extract_json_object(text: str) -> dict | None:
-    s = (text or "").strip()
-    if not s:
-        return None
-
-    fenced = re.search(r"```json\s*(\{.*?\})\s*```", s, flags=re.DOTALL | re.IGNORECASE)
-    if fenced:
-        try:
-            obj = json.loads(fenced.group(1))
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
-
-    try:
-        obj = json.loads(s)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-
-    dec = json.JSONDecoder()
-    start = s.find("{")
-    if start >= 0:
-        try:
-            obj, _ = dec.raw_decode(s[start:])
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
-    return None
+    return extract_top_level_json_object(text)
 
 
 def _is_non_empty(value: Any) -> bool:

@@ -278,10 +278,17 @@ class EmbeddingGenerator:
         max_tokens: int | None = None,
         batch_size: int | None = None,
         query_prefix: str | None = None,
-        version: int = 3
+        version: int = 3,
+        *,
+        provider_type: str | None = None,
     ):
-        # Read from env with defaults
-        self.provider_type = os.getenv("EMBEDDING_PROVIDER", "local").lower()
+        # Read from env with defaults; optional override (e.g. indexer vs API server)
+        raw = (
+            provider_type
+            if provider_type is not None
+            else os.getenv("EMBEDDING_PROVIDER", "local")
+        )
+        self.provider_type = str(raw).strip().lower()
         self.model_name = model_name or os.getenv("EMBEDDING_MODEL", "BAAI/bge-base-en-v1.5")
         self.max_tokens = max_tokens or int(os.getenv("EMBEDDING_MAX_TOKENS", "512"))
         self.batch_size = batch_size or int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))

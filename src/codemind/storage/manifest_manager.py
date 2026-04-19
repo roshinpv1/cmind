@@ -130,7 +130,7 @@ class ManifestManager:
             Created repository manifest
         """
         if not repo_id:
-            repo_id = self._compute_repo_id(repo_path)
+            repo_id = self._compute_repo_id(repo_path, branch)
         
         abs_path = str(Path(repo_path).resolve())
 

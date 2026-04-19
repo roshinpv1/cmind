@@ -37,6 +37,8 @@ interface CatalogResult {
     repo_id: string;
     repo_name: string;
     score: number;
+    /** Duplicate of `score` from API for semantic match [0,1] */
+    match_score?: number;
     category: string;
     description: string;
     summary_detailed: string;
@@ -78,22 +80,37 @@ function QualityBadge({ score }: { score: number }) {
     );
 }
 
-function ScoreBar({ score }: { score: number }) {
-    const pct = Math.round(score * 100);
+/** Semantic / vector match score in [0, 1] from API (`score` or `match_score`). */
+function toSimilarity01(score: unknown): number {
+    if (typeof score === "number" && Number.isFinite(score)) {
+        return Math.min(1, Math.max(0, score));
+    }
+    const n = parseFloat(String(score ?? ""));
+    return Number.isFinite(n) ? Math.min(1, Math.max(0, n)) : 0;
+}
+
+function ScoreBar({ score }: { score: number | string | undefined | null }) {
+    const sim = toSimilarity01(score);
+    const pct = Math.round(sim * 100);
     const color =
         pct >= 70 ? "bg-emerald-500" : pct >= 50 ? "bg-amber-500" : "bg-red-400";
 
     return (
-        <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                    className={`h-full rounded-full transition-all duration-700 ease-out ${color}`}
-                    style={{ width: `${pct}%` }}
-                />
-            </div>
-            <span className="text-xs font-bold text-gray-500 tabular-nums w-10 text-right">
-                {pct}%
+        <div className="flex flex-col items-end gap-0.5">
+            <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">
+                Search match
             </span>
+            <div className="flex items-center gap-2 w-full min-w-[7rem]">
+                <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                        className={`h-full rounded-full transition-all duration-700 ease-out ${color}`}
+                        style={{ width: `${pct}%` }}
+                    />
+                </div>
+                <span className="text-xs font-bold text-gray-600 tabular-nums w-11 text-right shrink-0">
+                    {pct}%
+                </span>
+            </div>
         </div>
     );
 }
@@ -120,6 +137,15 @@ function CatalogCard({ item: rawItem }: { item: CatalogResult }) {
     // Normalize null/undefined fields to safe defaults — use safeStr to guard against objects from LLM
     const item = {
         ...rawItem,
+        score: toSimilarity01(
+            (rawItem as unknown as { match_score?: number }).match_score ?? rawItem.score
+        ),
+        quality_score: (() => {
+            const q = rawItem.quality_score;
+            if (typeof q === "number" && Number.isFinite(q)) return Math.round(q);
+            const n = parseInt(String(q ?? ""), 10);
+            return Number.isFinite(n) ? n : 0;
+        })(),
         topics: (rawItem.topics ?? []).map(safeStr),
         pros: (rawItem.pros ?? []).map(safeStr),
         cons: (rawItem.cons ?? []).map(safeStr),

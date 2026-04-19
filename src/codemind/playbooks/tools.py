@@ -3,6 +3,7 @@ Playbook execution tools - Universal code retrieval and structural discovery.
 """
 
 import fnmatch
+import inspect
 import os
 import re
 import stat
@@ -12,6 +13,7 @@ import traceback
 
 from codemind.storage.database import CatalogStore
 from codemind.storage.bm25_storage import BM25Storage
+from codemind.playbooks.catalog_entry_writer import CatalogEntryWriter, normalize_catalog_params
 from codemind.storage.models import RepositoryManifest
 
 # Max chars returned for repo file reads (protect LLM context)
@@ -67,6 +69,7 @@ class PlaybookTools:
         self.embedder = embedder
         self.db = db
         self.bm25 = BM25Storage()
+        self._catalog_writer = CatalogEntryWriter(lance_storage, embedder, db)
 
     @staticmethod
     def _rrf_fuse(lanes: list[list[dict]], *, k: int = 60) -> list[dict]:
@@ -340,11 +343,14 @@ class PlaybookTools:
             }
         """
         try:
-            import os
-            vector_disabled = os.getenv("EMBEDDING_PROVIDER") == "none"
+            vector_disabled = (
+                not self.embedder
+                or getattr(self.embedder, "provider_type", None) == "none"
+            )
             
+            mode = params.get("mode", "semantic")
             repo_id = params.get("repo_id")
-            if not repo_id:
+            if not repo_id and mode != "catalog":
                 return {
                     "success": False,
                     "error": "repo_id is required for search_codebase",
@@ -352,10 +358,9 @@ class PlaybookTools:
                     "count": 0,
                     "queries_used": [],
                 }
-                
+
             queries = params.get("queries", [])
             limit = params.get("limit", 10)
-            mode = params.get("mode", "semantic")
             if vector_disabled and mode == "semantic":
                 mode = "hybrid"
             
@@ -587,7 +592,7 @@ class PlaybookTools:
             if (
                 self.embedder
                 and self.lance
-                and os.getenv("EMBEDDING_PROVIDER") != "none"
+                and getattr(self.embedder, "provider_type", None) != "none"
             ):
                 files = self.graph.find_files_by_pattern(repo_id, pattern=file_path)
                 if not files:
@@ -1139,7 +1144,7 @@ class PlaybookTools:
                 mode = "bfs"
 
             depth = max(1, min(int(params.get("depth", 2)), 6))
-            budget = max(200, min(int(params.get("budget", 2000)), 20000))
+            budget = max(200, min(int(params.get("budget", 5000)), 20000))
             graph_path = str(self._repo_graph_path(repo_id))
 
             from codemind.graphify.serve import _load_graph, _score_nodes, _bfs, _dfs, _subgraph_to_text
@@ -1586,22 +1591,34 @@ class PlaybookTools:
         2. Maximize score per repository
         3. Fetch full context from SQLite for top N repositories
         """
+        from codemind.storage.lancedb_storage import lance_cosine_distance_to_similarity
+
         repo_candidates = {} # repo_id -> {score, chunk_item}
         
         for query in queries:
             q_emb = self.embedder.encode_query(query)
             # Use a high enough candidate limit to ensure we find diverse results
-            candidate_chunks = await self.lance.search_catalogs(
-                q_emb, 
-                repo_id=repo_id, 
+            _catalog_hits = self.lance.search_catalogs(
+                q_emb,
+                repo_id=repo_id,
                 limit=limit * 5,
-                columns=["repo_id", "repo_name", "chunk_text", "metadata"]
+                columns=["repo_id", "repo_name", "chunk_text", "metadata"],
             )
-            
+            candidate_chunks = (
+                await _catalog_hits if inspect.isawaitable(_catalog_hits) else _catalog_hits
+            )
+
             for item in candidate_chunks:
                 rid = item['repo_id']
-                dist = item.get("_distance", 1.0)
-                score = max(0.0, 1.0 - dist)
+                if item.get("score") is not None:
+                    try:
+                        score = float(item["score"])
+                    except (TypeError, ValueError):
+                        score = 0.0
+                else:
+                    score = lance_cosine_distance_to_similarity(
+                        item.get("_distance", item.get("distance"))
+                    )
                 if score < min_score:
                     continue
                     
@@ -1768,7 +1785,7 @@ class PlaybookTools:
         results.sort(key=lambda x: x["score"], reverse=True)
         results = results[:limit]
 
-        # ── AI LLM RE-RANKING (EXPERT MODE) ──────────────────────────
+        # ── AI LLM RE-RANKING (intent-aware, top vector hits only) ───
         if ai_rerank and results:
             try:
                 from codemind.llm.factory import get_chat_model
@@ -1776,72 +1793,142 @@ class PlaybookTools:
                 from langchain_core.messages import SystemMessage, HumanMessage
                 import json as _json
 
+                rerank_pool = results[:5]
+                allowed_ids = {r["repo_id"] for r in rerank_pool}
+                pool_by_id = {r["repo_id"]: r for r in rerank_pool}
+
                 rerank_payload = []
-                for r in results:
-                    # Parse metadata for rich business context
+                for r in rerank_pool:
                     r_meta = _json.loads(r.get("metadata", "{}")) if r.get("metadata") else {}
                     rerank_payload.append({
                         "repo_id": r["repo_id"],
                         "repo_name": r.get("repo_name", ""),
-                        # Business signals — primary scoring dimension
                         "business_functionalities": r_meta.get("business_functionalities", []),
                         "category": r_meta.get("category", ""),
-                        # Technology signals — secondary scoring dimension
+                        "taxonomy_labels": r_meta.get("taxonomy_labels", []),
+                        "technical_capabilities": r_meta.get("technical_capabilities", []),
                         "tech_stack": r_meta.get("tech_stack", ""),
                         "architecture": r_meta.get("architecture", ""),
-                        # Short text preview for general context
-                        "preview": r.get("chunk_text", "")[:300]
+                        "summary_high_level": (r_meta.get("summary_high_level") or "")[:400],
+                        "preview": r.get("chunk_text", "")[:300],
                     })
 
                 query_str = queries[0] if isinstance(queries, list) else queries
                 sys_prompt = (
-                    "You are an Enterprise Component Discovery Expert. "
-                    "Your PRIMARY scoring criterion is BUSINESS RELEVANCE (70% weight): "
-                    "does this component fulfill the user's business need, domain requirement, or functional goal? "
-                    "Evaluate using business_functionalities and category. Ignore tech stack for this dimension. "
-                    "Your SECONDARY criterion is TECHNOLOGY FIT (30% weight): "
-                    "does the tech_stack or architecture align with explicit technical constraints in the query? "
-                    "If the query has no technical constraints, score technology_fit_score as 50 (neutral). "
-                    "CRITICAL: A strong business match ALWAYS outranks a weak business match regardless of tech similarity. "
-                    "Compute final_score = ROUND((business_relevance_score * 0.7) + (technology_fit_score * 0.3)). "
-                    "Omit components with business_relevance_score < 20 as irrelevant."
+                    "You re-rank catalog components that were already retrieved by vector search. "
+                    "Candidates are ONLY the JSON objects provided (each maps to one real component by repo_id).\n\n"
+                    "Step 1 — Infer the user's actual intent in plain language (query_intent).\n"
+                    "Step 2 — Classify intent_axis: "
+                    "'business' if the query is mainly about outcomes, domains, capabilities, compliance, or product fit; "
+                    "'technical' if mainly about stack, runtime, frameworks, APIs, deployment, or engineering constraints; "
+                    "'hybrid' if both matter materially.\n"
+                    "Step 3 — Score every candidate repo_id from the list. "
+                    "business_relevance_score: 0-100 from business_functionalities, category, taxonomy_labels, summary. "
+                    "technology_fit_score: 0-100 from tech_stack, architecture, technical_capabilities, and technical cues in the query. "
+                    "If a dimension is not relevant to the query, use 50 for that dimension (neutral).\n"
+                    "Step 4 — final_score MUST follow intent_axis: "
+                    "business → final_score = business_relevance_score; "
+                    "technical → final_score = technology_fit_score; "
+                    "hybrid → final_score = ROUND(business_relevance_score * 0.5 + technology_fit_score * 0.5).\n"
+                    "Step 5 — Ordering: sort items by final_score descending; ties by stronger primary dimension for that axis.\n"
+                    "Relevance filter (omit from items): "
+                    "if intent_axis is business, omit when business_relevance_score < 20; "
+                    "if technical, omit when technology_fit_score < 20; "
+                    "if hybrid, omit when final_score < 20.\n"
+                    "Never invent repo_id values; only use repo_id strings from Candidates."
                 )
                 user_msg = (
                     f"User Query: '{query_str}'\n\n"
-                    "Score each candidate using the two-dimension schema. "
-                    "Return ONLY components that have business_relevance_score >= 20.\n\n"
-                    f"Candidates:\n{_json.dumps(rerank_payload, indent=2)}"
+                    "Return structured output: query_intent, intent_axis, intent_confidence, and items.\n"
+                    f"Candidates (top vector hits):\n{_json.dumps(rerank_payload, indent=2)}"
                 )
-                
-                print(f"[TOOLS] Initiating LLM Re-Ranking for {len(results)} items...")
+
+                print(f"[TOOLS] Initiating LLM re-rank for {len(rerank_pool)} top vector hit(s)...")
                 model = get_chat_model()
                 llm = model.with_structured_output(CatalogRerankOutput)
-                
+
                 output = llm.invoke([
                     SystemMessage(content=sys_prompt),
-                    HumanMessage(content=user_msg)
+                    HumanMessage(content=user_msg),
                 ])
-                
-                ranked_rids = {item.repo_id: item for item in output.items}
 
-                final_results = []
-                for r in results:
-                    if r["repo_id"] in ranked_rids:
-                        r_item = ranked_rids[r["repo_id"]]
-                        # Use the blended final_score (70% business + 30% tech) as authoritative rank
-                        r["score"] = r_item.final_score / 100.0
-                        # Surface all sub-scores into metadata for UI transparency
-                        meta = _json.loads(r.get("metadata", "{}"))
-                        meta["ai_business_score"] = r_item.business_relevance_score
-                        meta["ai_tech_score"] = r_item.technology_fit_score
-                        meta["ai_final_score"] = r_item.final_score
-                        meta["ai_insight"] = r_item.reasoning
-                        r["metadata"] = _json.dumps(meta)
-                        final_results.append(r)
+                axis = getattr(output, "intent_axis", None) or "hybrid"
+                if axis not in ("business", "technical", "hybrid"):
+                    axis = "hybrid"
 
-                final_results.sort(key=lambda x: x["score"], reverse=True)
-                results = final_results
-                print(f"[TOOLS] LLM Re-Ranking complete. Kept {len(results)} items.")
+                def _canonical_final(b: int, t: int) -> int:
+                    if axis == "business":
+                        return int(b)
+                    if axis == "technical":
+                        return int(t)
+                    return int(round(b * 0.5 + t * 0.5))
+
+                def _keep_rerank_item(item) -> bool:
+                    if getattr(item, "repo_id", None) not in allowed_ids:
+                        return False
+                    fin = _canonical_final(item.business_relevance_score, item.technology_fit_score)
+                    if axis == "business":
+                        return item.business_relevance_score >= 20
+                    if axis == "technical":
+                        return item.technology_fit_score >= 20
+                    return fin >= 20
+
+                filtered_items = [it for it in output.items if _keep_rerank_item(it)]
+                seen: set[str] = set()
+                ordered_items = []
+                for it in filtered_items:
+                    if it.repo_id in allowed_ids and it.repo_id not in seen:
+                        seen.add(it.repo_id)
+                        ordered_items.append(it)
+
+                q_intent = getattr(output, "query_intent", "") or ""
+                ic = getattr(output, "intent_confidence", 70)
+                try:
+                    ic = int(ic)
+                except (TypeError, ValueError):
+                    ic = 70
+                ic = max(0, min(100, ic))
+
+                final_results: list[dict] = []
+                for r_item in ordered_items:
+                    r = pool_by_id.get(r_item.repo_id)
+                    if not r:
+                        continue
+                    r = dict(r)
+                    fin = _canonical_final(
+                        r_item.business_relevance_score,
+                        r_item.technology_fit_score,
+                    )
+                    r["score"] = fin / 100.0
+                    meta = _json.loads(r.get("metadata", "{}")) if r.get("metadata") else {}
+                    meta["ai_business_score"] = r_item.business_relevance_score
+                    meta["ai_tech_score"] = r_item.technology_fit_score
+                    meta["ai_final_score"] = fin
+                    meta["ai_insight"] = r_item.reasoning
+                    meta["ai_query_intent"] = q_intent
+                    meta["ai_intent_axis"] = axis
+                    meta["ai_intent_confidence"] = ic
+                    if getattr(r_item, "intent_alignment", None):
+                        meta["ai_intent_alignment"] = r_item.intent_alignment
+                    r["metadata"] = _json.dumps(meta)
+                    final_results.append(r)
+
+                for r in rerank_pool:
+                    if r["repo_id"] not in {x["repo_id"] for x in final_results}:
+                        rr = dict(r)
+                        meta = _json.loads(rr.get("metadata", "{}")) if rr.get("metadata") else {}
+                        meta["ai_query_intent"] = q_intent
+                        meta["ai_intent_axis"] = axis
+                        meta["ai_intent_confidence"] = ic
+                        meta["ai_rerank_skipped"] = True
+                        rr["metadata"] = _json.dumps(meta)
+                        final_results.append(rr)
+
+                tail = results[5:]
+                merged = final_results + [dict(x) for x in tail]
+                merged.sort(key=lambda x: x["score"], reverse=True)
+                results = merged
+                print(f"[TOOLS] LLM re-rank complete (axis={axis}). {len(final_results)} in top pool adjusted; {len(results)} total.")
 
             except Exception as e:
                 print(f"[TOOLS] AI Re-ranking failed (non-fatal, falling back to dense vectors): {e}")
@@ -1907,270 +1994,17 @@ class PlaybookTools:
 
     @staticmethod
     def _normalize_catalog_params(params: dict) -> dict:
-        """Normalize nested LLM output to flat save_catalog_entry format.
-        
-        The LLM may output nested structures like:
-            {name, url, purpose: {short_summary, detailed_explanation},
-             architecture: {layers, design_patterns, data_flow},
-             tech_stack: {backend_languages, frameworks, ...},
-             quality_assessment: {score, pros, cons},
-             specification: {api_base_path, endpoints, models}}
-             
-        This normalizes to flat format:
-            {repo_name, repo_url, description, summary_detailed,
-             architecture (str), tech_stack (str), quality_score (int),
-             pros (list), cons (list), specification (str), topics (list)}
-        """
-        import json
-        
-        normalized = dict(params)  # shallow copy
-        
-        # Unwrap catalog_entry wrapper — LLM often nests all fields here
-        catalog_entry = normalized.pop("catalog_entry", None)
-        if isinstance(catalog_entry, dict):
-            # Merge catalog_entry fields into top level (don't overwrite existing top-level keys)
-            for k, v in catalog_entry.items():
-                if k not in normalized or normalized[k] is None or normalized[k] == "" or normalized[k] == []:
-                    normalized[k] = v
-        
-        # Unwrap identity wrapper — LLM sometimes nests name/url/branch here
-        identity = normalized.pop("identity", None)
-        if isinstance(identity, dict):
-            if "name" in identity and "repo_name" not in normalized:
-                normalized["repo_name"] = identity["name"]
-            if "url" in identity and "repo_url" not in normalized:
-                normalized["repo_url"] = identity["url"]
-            if "branch" in identity and "branch" not in normalized:
-                normalized["branch"] = identity["branch"]
-        
-        # name → repo_name
-        if "name" in normalized and "repo_name" not in normalized:
-            normalized["repo_name"] = normalized.pop("name")
-        
-        # url → repo_url 
-        if "url" in normalized and "repo_url" not in normalized:
-            normalized["repo_url"] = normalized.pop("url")
-        
-        # purpose → description + summary_detailed
-        purpose = normalized.pop("purpose", None)
-        if isinstance(purpose, dict):
-            if "description" not in normalized:
-                normalized["description"] = purpose.get("short_summary", "")
-            if "summary_detailed" not in normalized:
-                normalized["summary_detailed"] = purpose.get("detailed_explanation", "")
-            if "summary_high_level" not in normalized:
-                normalized["summary_high_level"] = purpose.get("short_summary", "")
-        
-        # architecture → stringify if nested
-        arch = normalized.get("architecture")
-        if isinstance(arch, dict):
-            parts = []
-            if arch.get("layers"):
-                val = arch["layers"]
-                parts.append("Layers: " + (", ".join(val) if isinstance(val, list) else str(val)))
-            if arch.get("design_patterns"):
-                val = arch["design_patterns"]
-                parts.append("Patterns: " + (", ".join(val) if isinstance(val, list) else str(val)))
-            if arch.get("data_flow"):
-                val = arch["data_flow"]
-                parts.append("Data Flow: " + (", ".join(val) if isinstance(val, list) else str(val)))
-            normalized["architecture"] = "\n".join(parts) if parts else json.dumps(arch)
-        
-        # tech_stack → stringify if nested
-        ts = normalized.get("tech_stack")
-        if isinstance(ts, dict):
-            all_tech = []
-            for key, val in ts.items():
-                if isinstance(val, list):
-                    all_tech.extend(val)
-                elif isinstance(val, dict):
-                    for sub_key, sub_val in val.items():
-                        if isinstance(sub_val, list):
-                            all_tech.extend(sub_val)
-                        elif isinstance(sub_val, str):
-                            all_tech.append(sub_val)
-                elif isinstance(val, str):
-                    all_tech.append(val)
-            normalized["tech_stack"] = ", ".join(all_tech) if all_tech else json.dumps(ts)
-        elif isinstance(ts, list):
-            normalized["tech_stack"] = ", ".join(ts)
-        
-        # quality_assessment → quality_score, pros, cons
-        qa = normalized.pop("quality_assessment", None)
-        if isinstance(qa, dict):
-            if "quality_score" not in normalized:
-                normalized["quality_score"] = qa.get("score", 0)
-            if "pros" not in normalized and qa.get("pros"):
-                normalized["pros"] = qa["pros"]
-            if "cons" not in normalized and qa.get("cons"):
-                normalized["cons"] = qa["cons"]
-        elif isinstance(qa, (int, float)):
-            # LLM sometimes returns quality_assessment as a plain number
-            if "quality_score" not in normalized:
-                normalized["quality_score"] = int(qa)
-        
-        # specification → stringify if nested
-        spec = normalized.get("specification")
-        if isinstance(spec, dict):
-            normalized["specification"] = json.dumps(spec, indent=2)
-        
-        # Ensure description exists
-        if "description" not in normalized:
-            normalized["description"] = normalized.get("summary_detailed", normalized.get("summary_high_level", ""))
-            
-        # Extract estimated_cost specifically if LLM wrapped it under strange names
-        if "estimated_cost" not in normalized:
-            if isinstance(catalog_entry, dict) and "estimated_cost" in catalog_entry:
-                normalized["estimated_cost"] = catalog_entry["estimated_cost"]
-            elif "quality_assessment" in normalized and isinstance(normalized["quality_assessment"], dict):
-                qb = normalized["quality_assessment"]
-                if "estimated_cost" in qb:
-                     normalized["estimated_cost"] = qb["estimated_cost"]
-                     
-        if "business_functionalities" not in normalized:
-            if isinstance(catalog_entry, dict) and "business_functionalities" in catalog_entry:
-                normalized["business_functionalities"] = catalog_entry["business_functionalities"]
-        
-        return normalized
+        """Delegate to shared normalizer (also used by ``CatalogEntryWriter``)."""
+        return normalize_catalog_params(params)
 
     async def save_catalog_entry(self, params: dict) -> dict:
-        """Save or update a catalog entry for a repository.
-        
-        Persists full content to SQLite and searchable chunks to LanceDB.
-        Handles both flat and nested LLM output formats.
-        """
-        try:
-            # Normalize nested LLM output to flat format
-            params = self._normalize_catalog_params(params)
-            print(f"[TOOLS] Normalized params keys: {list(params.keys())}")
-            
-            repo_id = params["repo_id"]
-            description = params["description"]
-            # Use detailed summary as the main content if available, else description
-            main_content = params.get("summary_detailed", description)
-            
-            if not self.embedder:
-                 return {"error": "No embedder available"}
+        """Save or update a catalog entry (delegates to ``CatalogEntryWriter``).
 
-            # --- 1. Construct Metadata & Content ---
-            import json
-            import uuid
-            
-            metadata_dict = {
-                "architecture": params.get("architecture", ""),
-                "tech_stack": params.get("tech_stack", ""),
-                "topics": params.get("topics", []),
-                "repo_name": params.get("repo_name", ""),
-                "repo_url": params.get("repo_url", ""),
-                "branch": params.get("branch", ""),
-                "org": params.get("org", ""),
-                "summary_high_level": params.get("summary_high_level", ""),
-                "category": params.get("category", "Uncategorized"),
-                "quality_score": params.get("quality_score", 0),
-                "specification": params.get("specification", ""),
-                "pros": params.get("pros", []),
-                "cons": params.get("cons", []),
-                "first_author": params.get("first_author", ""),
-                "total_commits": params.get("total_commits", 0),
-                "last_pr_title": params.get("last_pr_title", ""),
-                "estimated_cost": params.get("estimated_cost", 0),
-                "estimated_dev_months": params.get("estimated_dev_months", 0),
-                "team_size_estimate": params.get("team_size_estimate", 0),
-                "complexity_tier": params.get("complexity_tier", "medium"),
-                "business_functionalities": params.get("business_functionalities", [])
-            }
-            
-            # Full content includes everything for the LLM to read
-            full_entry = {
-                "description": description,
-                "summary_detailed": main_content,
-                **metadata_dict
-            }
-            full_content_str = json.dumps(full_entry, indent=2)
-            
-            # --- 2. Persist to SQLite (Full Content) ---
-            if self.db:
-                try:
-                    with self.db.get_session() as session:
-                        # Check existence
-                        existing = session.query(CatalogStore).filter_by(repo_id=repo_id).first()
-                        if existing:
-                            existing.content = full_content_str
-                            existing.metadata_json = metadata_dict
-                            existing.repo_name = params.get("repo_name")
-                            existing.org = params.get("org", "")
-                            existing.updated_at = int(datetime.now(UTC).timestamp())
-                        else:
-                            new_entry = CatalogStore(
-                                repo_id=repo_id,
-                                repo_name=params.get("repo_name"),
-                                org=params.get("org", ""),
-                                content=full_content_str,
-                                metadata_json=metadata_dict,
-                                created_at=int(datetime.now(UTC).timestamp()),
-                                updated_at=int(datetime.now(UTC).timestamp())
-                            )
-                            session.add(new_entry)
-                        session.commit()
-                        print(f"[TOOLS] Saved full catalog entry to SQLite for {repo_id}")
-                except Exception as e:
-                    print(f"[TOOLS] SQLite save failed: {e}")
-                    # Continue to LanceDB? Yes, partial success is better than fail.
-            
-            # --- 3. Chunk & Embed for LanceDB ---
-            # Chunking strategy: 
-            # 1. Metadata chunk (high priority)
-            # 2. Description chunks (sliding window)
-            
-            chunks = []
-            
-            # Chunk 1: Metadata + High Level Summary
-            meta_text = (
-                f"Repo: {params.get('repo_name', repo_id)}\n"
-                f"Topics: {', '.join(metadata_dict['topics'])}\n"
-                f"Stack: {metadata_dict['tech_stack']}\n"
-                f"Summary: {metadata_dict['summary_high_level']}\n"
-                f"Category: {metadata_dict['category']}"
-            )
-            chunks.append(meta_text)
-            
-            # Chunk 2+: Split main content into ~1000 char chunks with overlap
-            # Simple text splitter
-            text_to_split = main_content
-            chunk_size = 1000
-            overlap = 200
-            
-            start = 0
-            while start < len(text_to_split):
-                end = start + chunk_size
-                chunk_text = text_to_split[start:end]
-                chunks.append(chunk_text)
-                start += (chunk_size - overlap)
-                
-            # Embed all chunks
-            embeddings = self.embedder.provider.encode_batch(chunks)
-            
-            # Prepare LanceDB rows
-            lance_rows = []
-            for i, (txt, emb) in enumerate(zip(chunks, embeddings)):
-                lance_rows.append({
-                    "catalog_id": str(uuid.uuid4()),
-                    "chunk_id": f"{repo_id}_chunk_{i}",
-                    "repo_id": repo_id,
-                    "repo_name": params.get("repo_name", repo_id),
-                    "chunk_text": txt,
-                    "metadata": json.dumps(metadata_dict), # Store metadata in every chunk for filtering
-                    "created_at": datetime.now(UTC),
-                    "embedding": emb.tolist() if hasattr(emb, "tolist") else emb
-                })
-                
-            self.lance.store_catalog_chunks(lance_rows)
-            
-            return {"success": True, "message": f"Catalog entry saved for {repo_id} (SQLite + {len(lance_rows)} chunks)"}
-            
-        except Exception as e:
-            traceback.print_exc()
-            return {"error": str(e)}
+        The ``generate_catalog`` playbook persists via the executor instead of
+        this tool; the tool remains for APIs, tests, and other playbooks.
+        """
+        params = self._normalize_catalog_params(params)
+        return await self._catalog_writer.persist(params)
 
     async def execute_tool(self, tool_name: str, params: dict) -> dict:
         """Dispatch a tool call by name.

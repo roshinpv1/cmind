@@ -49,6 +49,10 @@ class IndexingState:
 class IndexingWorkflow:
     """LangGraph-style workflow for code indexing."""
 
+    # Lance dense vectors for code chunks: off for now (BM25 + graph indexing still run).
+    # API/catalog use EMBEDDING_PROVIDER via the server embedder only.
+    _INDEX_LANCE_CODE_VECTORS = False
+
     def __init__(
         self,
         manifest_manager: ManifestManager,
@@ -71,6 +75,7 @@ class IndexingWorkflow:
         self.chunker = ASTChunker()  # AST-aware chunking (falls back to char-based)
         self.call_extractor = CallExtractor()
         self.embedder = EmbeddingGenerator()
+        self._index_lance_code_vectors = self._INDEX_LANCE_CODE_VECTORS
         
         # Pass embedding dimension to storage (ensures schema matches model)
         self.storage = LanceDBStorage(
@@ -244,10 +249,10 @@ class IndexingWorkflow:
             total = len(state.changed_files)
             print(f"[STREAM] Starting streamed chunking & embedding for {total} files...")
             
-            # --- Diagnostic for Zero-Vector Mode ---
-            if getattr(self.embedder.provider, "__class__", None).__name__ == "NoneEmbeddingProvider":
-                print(f"[STREAM] ⚡ Zero-Vector Mode active: skipping actual embedding generation.")
-            # ----------------------------------------
+            if not self._index_lance_code_vectors:
+                print("[STREAM] Lance code-vector indexing disabled; BM25 + graph only.")
+            elif getattr(self.embedder.provider, "__class__", None).__name__ == "NoneEmbeddingProvider":
+                print("[STREAM] ⚡ Zero-Vector Mode active: skipping actual embedding generation.")
 
             # Pre-filter files
             chunkable = []
@@ -310,7 +315,10 @@ class IndexingWorkflow:
                 # Directly embed and dump to DB, allowing cyclic reclamation of the array buffer
                 if batch_chunks:
                     try:
-                        if self.embedder.provider_type == "none":
+                        if (
+                            not self._index_lance_code_vectors
+                            or self.embedder.provider_type == "none"
+                        ):
                             bm25_rows = []
                             for chunk in batch_chunks:
                                 bm25_rows.append(

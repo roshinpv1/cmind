@@ -1,7 +1,8 @@
 import pytest
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from codemind.playbooks.tools import PlaybookTools
+
 
 @pytest.mark.asyncio
 async def test_catalog_search_score_maximization():
@@ -10,9 +11,9 @@ async def test_catalog_search_score_maximization():
     mock_graph = MagicMock()
     mock_embedder = MagicMock()
     mock_db = MagicMock()
-    
+
     tools = PlaybookTools(mock_lance, mock_graph, mock_embedder, mock_db)
-    
+
     # Mock search_catalogs to return different scores for the same repo across queries
     # Query 1: Repo A (0.5), Repo B (0.6)
     # Query 2: Repo A (0.9), Repo C (0.4)
@@ -21,26 +22,29 @@ async def test_catalog_search_score_maximization():
         if emb == "emb_1":
             return [
                 {"repo_id": "repo_a", "_distance": 0.5, "chunk_text": "A1"},
-                {"repo_id": "repo_b", "_distance": 0.4, "chunk_text": "B1"}
+                {"repo_id": "repo_b", "_distance": 0.4, "chunk_text": "B1"},
             ]
         else:
             return [
                 {"repo_id": "repo_a", "_distance": 0.1, "chunk_text": "A2"},
-                {"repo_id": "repo_c", "_distance": 0.6, "chunk_text": "C1"}
+                {"repo_id": "repo_c", "_distance": 0.6, "chunk_text": "C1"},
             ]
-            
+
     mock_lance.search_catalogs.side_effect = side_effect
     mock_embedder.encode_query.side_effect = lambda q: "emb_1" if q == "query1" else "emb_2"
-    
-    # Mock SQLite session
+
+    def _catalog_row():
+        row = MagicMock()
+        row.content = json.dumps({"description": "Full Desc"})
+        row.metadata_json = {"tech_stack": "Python"}
+        return row
+
+    # get_session() must be usable as ``with session:`` and expose .query(...)
     mock_session = MagicMock()
-    mock_db.get_session.return_value.__enter__.return_value = mock_session
-    
-    # Dummy catalog entries
-    mock_session.query.return_value.filter_by.return_value.first.side_effect = lambda: MagicMock(
-        content=json.dumps({"description": "Full Desc"}),
-        metadata_json={"tech_stack": "Python"}
-    )
+    mock_session.__enter__.return_value = mock_session
+    mock_session.__exit__.return_value = None
+    mock_session.query.return_value.filter_by.return_value.first.side_effect = _catalog_row
+    mock_db.get_session.return_value = mock_session
 
     params = {
         "queries": ["query1", "query2"],

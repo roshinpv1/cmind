@@ -5,6 +5,7 @@ Stores chunks, embeddings, and metadata immutably.
 Supports configurable embedding dimensions.
 """
 
+import math
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,6 +14,31 @@ import lancedb
 import pyarrow as pa
 
 from codemind.indexer.chunker import CodeChunk
+
+
+def lance_cosine_distance_to_similarity(distance: object) -> float:
+    """
+    Map LanceDB vector-search cosine *distance* to a [0, 1] similarity score.
+
+    Lance uses cosine distance consistent with ``1 - cosine_similarity`` for
+    normalized vectors. Invalid values (missing, NaN, inf) become 0.0 — e.g.
+    degenerate zero vectors yield NaN distance in Lance, which must not propagate
+    into API scores as NaN/null (often shown as 0 in clients).
+    """
+    if distance is None:
+        return 0.0
+    try:
+        d = float(distance)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(d) or math.isinf(d):
+        return 0.0
+    sim = 1.0 - d
+    if sim < 0.0:
+        return 0.0
+    if sim > 1.0:
+        return 1.0
+    return sim
 
 
 class LanceDBStorage:
@@ -436,7 +462,12 @@ class LanceDBStorage:
             # Handle potential schema or dimension mismatch
             print(f"[LANCE] Search failed: {e}")
             return []
-            
+
+        for r in results:
+            r.pop("embedding", None)
+            d = r.get("_distance", r.get("distance"))
+            r["score"] = lance_cosine_distance_to_similarity(d)
+
         return results
 
 

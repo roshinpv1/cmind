@@ -641,7 +641,7 @@ def main() -> None:
         print("  install [--platform P]  copy skill to platform config dir (claude|windows|codex|opencode|aider|claw|droid|trae|trae-cn|gemini|cursor)")
         print("  query \"<question>\"       BFS traversal of graph.json for a question")
         print("    --dfs                   use depth-first instead of breadth-first")
-        print("    --budget N              cap output at N tokens (default 2000)")
+        print("    --budget N              cap output at N tokens (default 5000)")
         print("    --graph <path>          path to graph.json (default graphify-out/graph.json)")
         print("  save-result             save a Q&A result to graphify-out/memory/ for graph feedback loop")
         print("    --question Q            the question asked")
@@ -776,7 +776,7 @@ def main() -> None:
         from networkx.readwrite import json_graph
         question = sys.argv[2]
         use_dfs = "--dfs" in sys.argv
-        budget = 2000
+            budget = 5000
         graph_path = "graphify-out/graph.json"
         args = sys.argv[3:]
         i = 0

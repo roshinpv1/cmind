@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI):
     # Initialize agent services (existing doc generator)
     from . import agents as agents_module
     from codemind.indexer.embedder import EmbeddingGenerator
+
     app.state.embedder = EmbeddingGenerator()
     agents_module.init_agent_services(app.state.lance_storage, app.state.graph_db, app.state.embedder)
     app.include_router(agents_module.router)
@@ -1808,8 +1809,8 @@ async def create_catalog_entry(
     execution_result = result["outputs"].get("result", "")
     
     # 3. Retrieve the full content from SQLite
-    # The playbook's tool 'save_catalog_entry' has already persisted it to SQLite and LanceDB(chunks).
-    # We just need to fetch it to return it to the user.
+    # For generate_catalog, PlaybookExecutor persists via CatalogEntryWriter after JSON validation.
+    # Other catalog playbooks may still use save_catalog_entry. Fetch saved row for the response.
     
     full_catalog_data = {}
     catalog_status = "created"
@@ -1874,6 +1875,25 @@ async def create_catalog_entry(
 def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
     """Transform internal catalog results into structured API response format."""
     import json
+    import math
+
+    def _safe_round_score(v: object) -> float:
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isnan(x) or math.isinf(x):
+            return 0.0
+        return round(x, 4)
+
+    def _coerce_int(v: object, default: int = 0) -> int:
+        if v is None:
+            return default
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return default
+
     formatted = []
     for item in raw_results:
         # Parse the metadata
@@ -1887,25 +1907,43 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
         elif isinstance(meta_str, dict):
             metadata = meta_str
         
+        sim = _safe_round_score(item.get("score", item.get("match_score", 0.0)))
         entry = {
             "repo_id": item.get("repo_id", ""),
             "repo_name": item.get("repo_name", metadata.get("repo_name", "")),
-            "score": round(item.get("score", 0.0), 4),
+            "score": sim,
+            "match_score": sim,
             "category": metadata.get("category", ""),
-            "description": metadata.get("summary_high_level", ""),
-            "summary_detailed": "", 
+            "description": metadata.get("description") or metadata.get("summary_high_level", ""),
+            "summary_detailed": "",
             "architecture": metadata.get("architecture", ""),
             "tech_stack": metadata.get("tech_stack", ""),
             "topics": metadata.get("topics", []),
-            "quality_score": metadata.get("quality_score", 0),
+            "quality_score": _coerce_int(metadata.get("quality_score"), 0),
             "specification": metadata.get("specification", ""),
             "pros": metadata.get("pros", []),
             "cons": metadata.get("cons", []),
             "repo_url": metadata.get("repo_url", ""),
             "branch": metadata.get("branch", ""),
             "org": metadata.get("org", ""),
-            "estimated_cost": metadata.get("estimated_cost", 0),
+            "estimated_cost": (
+                metadata["estimated_cost"]
+                if metadata.get("estimated_cost") is not None
+                else 0
+            ),
             "business_functionalities": metadata.get("business_functionalities", []),
+            "taxonomy_labels": metadata.get("taxonomy_labels", []),
+            "glossary_domain_terms": metadata.get("glossary_domain_terms", []),
+            "ontology_entity_types": metadata.get("ontology_entity_types", []),
+            "ontology_relationships": metadata.get("ontology_relationships", "") or "",
+            "potential_business_capabilities": metadata.get("potential_business_capabilities", []),
+            "technical_capabilities": metadata.get("technical_capabilities", []),
+            "frameworks_used": metadata.get("frameworks_used", []),
+            "operational_deployment": metadata.get("operational_deployment", "") or "",
+            "data_and_integrations": metadata.get("data_and_integrations", "") or "",
+            "security_compliance": metadata.get("security_compliance", "") or "",
+            "testing_observability": metadata.get("testing_observability", "") or "",
+            "developer_guide": metadata.get("developer_guide", "") or "",
             "status": item.get("status", metadata.get("status", "active")),
             "source_gap": metadata.get("source_gap", ""),
             # Defaults for shared metrics
@@ -1925,12 +1963,36 @@ def _format_catalog_results(raw_results: list[dict]) -> list[dict]:
                 elif "DESCRIPTION:" in line and i + 1 < len(lines):
                     entry["description"] = lines[i+1].strip()
 
-        # Coerce None values to safe defaults
-        for k, v in entry.items():
-            if v is None:
-                if isinstance(v, list): entry[k] = []
-                elif isinstance(v, int): entry[k] = 0
-                else: entry[k] = ""
+        # Coerce None values (isinstance(v, int) is False when v is None — do not use v's type here)
+        for k, v in list(entry.items()):
+            if v is not None:
+                continue
+            if k in (
+                "topics",
+                "pros",
+                "cons",
+                "business_functionalities",
+                "taxonomy_labels",
+                "glossary_domain_terms",
+                "ontology_entity_types",
+                "potential_business_capabilities",
+                "technical_capabilities",
+                "frameworks_used",
+            ):
+                entry[k] = []
+            elif k in (
+                "quality_score",
+                "estimated_cost",
+                "likes_count",
+                "popularity_points",
+                "search_count",
+                "view_count",
+            ):
+                entry[k] = 0
+            elif k == "score" or k == "match_score":
+                entry[k] = 0.0
+            else:
+                entry[k] = ""
 
         formatted.append(entry)
 

@@ -178,7 +178,7 @@ class GraphifyQueryInput(BaseModel):
     question: str = Field(description="Natural-language graph question or keyword query")
     mode: str = Field(default="bfs", description="Traversal mode: 'bfs' or 'dfs'")
     depth: int = Field(default=2, ge=1, le=6, description="Traversal depth")
-    budget: int = Field(default=2000, ge=200, le=20000, description="Approx output token budget")
+    budget: int = Field(default=5000, ge=200, le=20000, description="Approx output token budget")
 
 
 class GraphifyPathInput(BaseModel):
@@ -264,7 +264,12 @@ class SaveCatalogEntryInput(BaseModel):
 
 # ─── Tool Factory ─────────────────────────────────────────────────────────────
 
-def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list[str]] = None) -> list:
+def create_langchain_tools(
+    playbook_tools,
+    enforced_repo_id: Optional[str | list[str]] = None,
+    *,
+    exclude_tool_names: frozenset[str] | None = None,
+) -> list:
     """Create LangChain tool instances that delegate to PlaybookTools methods.
     
     Args:
@@ -304,7 +309,7 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
         question: str,
         mode: str = "bfs",
         depth: int = 2,
-        budget: int = 2000,
+        budget: int = 5000,
     ) -> str:
         """Run Graphify query traversal with BFS/DFS and token budget."""
         result = await playbook_tools.graphify_query(
@@ -706,8 +711,6 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
         result = await playbook_tools.save_catalog_entry(kwargs)
         return json.dumps(result, default=str)
     
-    import os
-
     tools_list = [
         get_map,
         trace_path,
@@ -734,8 +737,12 @@ def create_langchain_tools(playbook_tools, enforced_repo_id: Optional[str | list
         save_catalog_entry,
     ]
 
-    # Framework-level allocation: If semantic search is disabled, remove search_codebase
-    if os.getenv("EMBEDDING_PROVIDER") == "none":
+    # If this PlaybookTools embedder is none (or missing), semantic search is unusable
+    _emb = getattr(playbook_tools, "embedder", None)
+    if not _emb or getattr(_emb, "provider_type", None) == "none":
         tools_list = [t for t in tools_list if t.name != "search_codebase"]
+
+    if exclude_tool_names:
+        tools_list = [t for t in tools_list if t.name not in exclude_tool_names]
 
     return tools_list

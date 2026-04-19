@@ -297,7 +297,16 @@ class PlaybookExecutor:
                 execution_context.get("prefer_mirror_reads", bool(enforced_mirror_root))
             )
 
-        lc_tools       = create_langchain_tools(self.tools, enforced_repo_id=enforced_repo_id)
+        _exclude_tools = (
+            frozenset({"save_catalog_entry"})
+            if (playbook_name or "").strip().lower() == "generate_catalog"
+            else None
+        )
+        lc_tools       = create_langchain_tools(
+            self.tools,
+            enforced_repo_id=enforced_repo_id,
+            exclude_tool_names=_exclude_tools,
+        )
         tool_names     = {t.name for t in lc_tools}
         llm_with_tools = self._get_chat_model().bind_tools(lc_tools)  # new instance per call
         compactor      = ContextCompactor(llm_driver=self.llm, threshold_ratio=0.6)
@@ -370,10 +379,67 @@ class PlaybookExecutor:
             expected_critical_files=critical_files,
         )
 
+        catalog_persist: dict | None = None
+        if (
+            (playbook_name or "").strip().lower() == "generate_catalog"
+            and result.error is None
+            and repo_id_str
+        ):
+            from codemind.playbooks.catalog_entry_writer import (
+                CatalogEntryWriter,
+                parse_json_object_from_answer,
+            )
+            from codemind.playbooks.structured_schemas import CatalogGeneratorOutput
+
+            blob = parse_json_object_from_answer(result.answer or "")
+            if isinstance(blob, dict):
+                blob.setdefault("repo_id", repo_id_str)
+                org = user_input.get("org") if isinstance(user_input, dict) else None
+                if org and not blob.get("org"):
+                    blob["org"] = str(org)
+                try:
+                    validated = CatalogGeneratorOutput.model_validate(blob)
+                    writer = CatalogEntryWriter(self.tools.lance, self.tools.embedder, self.tools.db)
+                    catalog_persist = await writer.persist(validated.model_dump())
+                    if catalog_persist.get("success"):
+                        logger.info("generate_catalog: catalog persisted for repo_id=%s", repo_id_str)
+                    else:
+                        logger.warning(
+                            "generate_catalog: persist returned error repo_id=%s detail=%s",
+                            repo_id_str,
+                            catalog_persist.get("error"),
+                        )
+                except Exception as exc:
+                    catalog_persist = {"success": False, "error": str(exc)}
+                    logger.warning(
+                        "generate_catalog: validation or persist failed repo_id=%s: %s",
+                        repo_id_str,
+                        exc,
+                        exc_info=True,
+                    )
+            else:
+                catalog_persist = {
+                    "success": False,
+                    "error": "Final answer did not contain a parseable JSON object for catalog",
+                }
+                preview = (result.answer or "")[:400].replace("\n", " ")
+                logger.warning(
+                    "generate_catalog: no JSON object extracted repo_id=%s answer_preview=%r",
+                    repo_id_str,
+                    preview,
+                )
+
         logs = list(result.logs)
         logs.append(
             f"Completed: iterations={result.iterations} tool_calls={result.tool_calls_made}"
         )
+        if catalog_persist is not None:
+            if catalog_persist.get("success"):
+                logs.append(
+                    "Catalog persist: " + str(catalog_persist.get("message", "ok"))
+                )
+            else:
+                logs.append("Catalog persist failed: " + str(catalog_persist.get("error", catalog_persist)))
         quality_scorecards = list(result.quality_scorecards or [])
         quality_summary = dict(result.quality_summary or {})
         potential_issue_patterns = list(result.potential_issue_patterns or [])
@@ -405,11 +471,15 @@ class PlaybookExecutor:
         else:
             result_text = result.answer
 
+        out_data = None
+        if catalog_persist is not None:
+            out_data = {"catalog_persist": catalog_persist}
+
         return {
             "success": effective_error is None,
             "outputs": {
                 "result":        result_text,
-                "data":          None,
+                "data":          out_data,
                 "tool_executed": result.tool_calls_made > 0,
                 "tool_result":   None,
                 "iterations":    result.iterations,

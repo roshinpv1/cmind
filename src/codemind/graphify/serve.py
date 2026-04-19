@@ -82,7 +82,7 @@ def _dfs(G: nx.Graph, start_nodes: list[str], depth: int) -> tuple[set[str], lis
     return visited, edges_seen
 
 
-def _subgraph_to_text(G: nx.Graph, nodes: set[str], edges: list[tuple], token_budget: int = 2000) -> str:
+def _subgraph_to_text(G: nx.Graph, nodes: set[str], edges: list[tuple], token_budget: int = 5000) -> str:
     """Render subgraph as text, cutting at token_budget (approx 3 chars/token)."""
     char_budget = token_budget * 3
     lines = []
@@ -135,7 +135,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
                         "mode": {"type": "string", "enum": ["bfs", "dfs"], "default": "bfs",
                                  "description": "bfs=broad context, dfs=trace a specific path"},
                         "depth": {"type": "integer", "default": 3, "description": "Traversal depth (1-6)"},
-                        "token_budget": {"type": "integer", "default": 2000, "description": "Max output tokens"},
+                        "token_budget": {"type": "integer", "default": 5000, "description": "Max output tokens"},
                     },
                     "required": ["question"],
                 },
@@ -199,7 +199,7 @@ def serve(graph_path: str = "graphify-out/graph.json") -> None:
         question = arguments["question"]
         mode = arguments.get("mode", "bfs")
         depth = min(int(arguments.get("depth", 3)), 6)
-        budget = int(arguments.get("token_budget", 2000))
+        budget = int(arguments.get("token_budget", 5000))
         terms = [t.lower() for t in question.split() if len(t) > 2]
         scored = _score_nodes(G, terms)
         start_nodes = [nid for _, nid in scored[:3]]

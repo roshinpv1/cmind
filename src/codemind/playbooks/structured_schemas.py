@@ -6,18 +6,24 @@ LLM responses against expected formats, replacing inline schema
 hints and manual JSON parsing.
 """
 
-from typing import Any, Optional, Union
+from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 
 # ─── Catalog Generator ──────────────────────────────────────────────────────
 
 class CatalogGeneratorOutput(BaseModel):
-    """Structured output for generate_catalog playbook."""
+    """Structured output for generate_catalog playbook.
+
+    Persisted after the run by ``CatalogEntryWriter`` (see ``PlaybookExecutor``);
+    the agent does not call ``save_catalog_entry``.
+    """
+
     repo_id: str = Field(description="Repository identifier")
     repo_name: str = Field(description="Human-readable project name")
     repo_url: str = Field(default="", description="Repository URL")
     branch: str = Field(default="main", description="Branch name")
+    org: str = Field(default="", description="Organization owning this component (optional)")
     description: str = Field(description="One-line summary with domain context")
     summary_high_level: str = Field(description="Keyword-rich 3-4 sentence overview explicitly stating integrations and domain logic")
     summary_detailed: str = Field(description="Comprehensive multi-paragraph analysis explicitly listing all external systems and data flows")
@@ -29,8 +35,63 @@ class CatalogGeneratorOutput(BaseModel):
     topics: list[str] = Field(default_factory=list, description="Searchable tags including technologies and business domains")
     pros: list[str] = Field(default_factory=list, description="Strengths")
     cons: list[str] = Field(default_factory=list, description="Weaknesses")
-    estimated_cost: int = Field(default=0, description="Estimated cost in USD")
+    first_author: str = Field(default="", description="Original author when known from metadata")
+    total_commits: int = Field(default=0, ge=0, description="Total commits when known")
+    last_pr_title: str = Field(default="", description="Last merged PR title when known")
+    estimated_cost: int = Field(default=0, ge=0, description="Estimated cost in USD to rebuild from scratch")
+    estimated_dev_months: float = Field(default=1.0, ge=0, description="Developer-months to rebuild from scratch")
+    team_size_estimate: int = Field(default=1, ge=1, le=10, description="Ideal team size to build")
+    complexity_tier: str = Field(default="medium", description="low | medium | high | extreme")
     business_functionalities: list[str] = Field(default_factory=list, description="Core business capabilities and explicit domain features")
+    # ── Holistic documentation (optional but strongly encouraged for portfolio search) ──
+    taxonomy_labels: list[str] = Field(
+        default_factory=list,
+        description="Faceted labels: domain, product line, architecture style, deployment class (e.g. 'B2B SaaS', 'Event-driven', 'Kubernetes')",
+    )
+    glossary_domain_terms: list[str] = Field(
+        default_factory=list,
+        description="Domain vocabulary evidenced in code, APIs, or docs (proper nouns, regulations, industry terms)",
+    )
+    ontology_entity_types: list[str] = Field(
+        default_factory=list,
+        description="Primary domain entities / aggregates / actors (short phrases, e.g. 'Invoice', 'PolicyHolder', 'WorkflowRun')",
+    )
+    ontology_relationships: str = Field(
+        default="",
+        description="Narrative of how entities relate, own data, and participate in flows (evidence-backed)",
+    )
+    potential_business_capabilities: list[str] = Field(
+        default_factory=list,
+        description="Adjacent or plausible capabilities implied by architecture (clearly marked as inferred, not shipped)",
+    )
+    technical_capabilities: list[str] = Field(
+        default_factory=list,
+        description="Technical affordances: sync/async APIs, batch jobs, streaming, ML inference, file ingest, etc.",
+    )
+    frameworks_used: list[str] = Field(
+        default_factory=list,
+        description="Explicit frameworks, SDKs, and runtimes (e.g. 'FastAPI', 'React 18', 'LangChain') complementing tech_stack",
+    )
+    operational_deployment: str = Field(
+        default="",
+        description="How and where the system runs: containers, orchestration, CI/CD, environments, SLAs if documented",
+    )
+    data_and_integrations: str = Field(
+        default="",
+        description="Databases, caches, queues, object storage, SaaS integrations, webhooks, partner APIs",
+    )
+    security_compliance: str = Field(
+        default="",
+        description="AuthN/Z models, secrets handling, PII, encryption, audit, compliance hooks when evidenced",
+    )
+    testing_observability: str = Field(
+        default="",
+        description="Testing pyramid, coverage signals, logging, metrics, tracing, SLOs as evidenced",
+    )
+    developer_guide: str = Field(
+        default="",
+        description="Build, run locally, test, contribute, extension/plugin points—evidence-backed",
+    )
 
 
 # ─── Catalog Search ──────────────────────────────────────────────────────────
@@ -66,39 +127,72 @@ class CatalogEntry(BaseModel):
 
 
 class CatalogRerankItem(BaseModel):
-    """An LLM-scored catalog item with explicit business and technology sub-scores."""
-    repo_id: str = Field(description="The repo_id of the catalog entry")
-    business_relevance_score: int = Field(ge=0, le=100,
+    """An LLM-scored catalog row (one of the top vector hits) with intent-aware sub-scores."""
+    repo_id: str = Field(description="Must match one of the candidate repo_id values exactly")
+    business_relevance_score: int = Field(
+        ge=0,
+        le=100,
         description=(
-            "Primary score (0-100): how well this component's PURPOSE and BUSINESS CAPABILITIES "
-            "solve the user's stated business goal or domain need. "
-            "Focus on business_functionalities, category, and what the component achieves for real users. "
-            "Ignore technology stack entirely when computing this score."
-        )
+            "0-100: how well business_functionalities, category, and domain story address the user's need "
+            "when intent is business- or hybrid-leaning; use 50 if the query is purely technical."
+        ),
     )
-    technology_fit_score: int = Field(ge=0, le=100,
+    technology_fit_score: int = Field(
+        ge=0,
+        le=100,
         description=(
-            "Secondary score (0-100): how well the component's tech stack, architecture, and frameworks "
-            "align with any explicit technical constraints mentioned in the query. "
-            "Score 50 (neutral) if the query has no technical constraints."
-        )
+            "0-100: how well tech_stack, architecture, frameworks, and technical_capabilities address "
+            "the user's need when intent is technical- or hybrid-leaning; use 50 if purely business/domain."
+        ),
     )
-    final_score: int = Field(ge=0, le=100,
+    final_score: int = Field(
+        ge=0,
+        le=100,
         description=(
-            "Blended score: ROUND((business_relevance_score * 0.7) + (technology_fit_score * 0.3)). "
-            "This is the authoritative ranking score."
-        )
+            "Authoritative rank score 0-100, computed from intent_axis: "
+            "business → final_score = business_relevance_score; "
+            "technical → final_score = technology_fit_score; "
+            "hybrid → final_score = ROUND(business_relevance_score * 0.5 + technology_fit_score * 0.5)."
+        ),
+    )
+    intent_alignment: str = Field(
+        default="",
+        description=(
+            "One sentence: how this catalog component (from vector search) maps to the user's actual intent."
+        ),
     )
     reasoning: str = Field(
         description=(
-            "2-sentence explanation. Sentence 1: why the business relevance score was assigned. "
-            "Sentence 2: why the technology fit score was assigned."
+            "Brief rationale for the two dimension scores and how this component satisfies or misses the query."
         )
     )
 
+
 class CatalogRerankOutput(BaseModel):
-    """Structured output for search result re-ranking."""
-    items: list[CatalogRerankItem] = Field(default_factory=list, description="The strictly re-ordered and scored items.")
+    """Structured output for catalog search AI re-ranking over the top vector hits."""
+
+    query_intent: str = Field(
+        default="",
+        description="One clear sentence: what the user is actually trying to find, build, or evaluate",
+    )
+    intent_axis: Literal["business", "technical", "hybrid"] = Field(
+        default="hybrid",
+        description=(
+            "business = domain/outcome/capability focused; "
+            "technical = stack/framework/runtime/integration focused; "
+            "hybrid = both equally important"
+        ),
+    )
+    intent_confidence: int = Field(
+        default=70,
+        ge=0,
+        le=100,
+        description="Confidence 0-100 in the intent_axis classification",
+    )
+    items: list[CatalogRerankItem] = Field(
+        default_factory=list,
+        description="Scored and ordered items; must cover only the provided candidate repo_ids (typically ≤5)",
+    )
 
 
 class CatalogMatch(BaseModel):
