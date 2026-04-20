@@ -1252,6 +1252,147 @@ class PlaybookTools:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    async def graphify_shortest_path(self, params: dict) -> dict:
+        """Alias for shortest-path traversal (maps to graphify_path)."""
+        return await self.graphify_path(params)
+
+    async def graphify_god_nodes(self, params: dict) -> dict:
+        """Return high-degree architectural hubs from Graphify graph."""
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+            top_n = max(1, min(int(params.get("top_n", 10)), 50))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            from codemind.graphify.serve import _load_graph
+            from codemind.graphify.analyze import god_nodes as _god_nodes
+
+            G = _load_graph(graph_path)
+            nodes = _god_nodes(G, top_n=top_n)
+            return {
+                "success": True,
+                "repo_id": repo_id,
+                "top_n": top_n,
+                "count": len(nodes),
+                "nodes": nodes,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_neighbors(self, params: dict) -> dict:
+        """Return direct neighbors of a graph node with edge metadata."""
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            label = (params.get("label") or "").strip()
+            if not label:
+                return {"success": False, "error": "Missing required parameter: label"}
+
+            relation_filter = (params.get("relation_filter") or "").strip().lower()
+            max_neighbors = max(1, min(int(params.get("max_neighbors", 60)), 500))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            from codemind.graphify.serve import _load_graph, _find_node
+
+            G = _load_graph(graph_path)
+            matches = _find_node(G, label)
+            if not matches:
+                return {"success": False, "error": f"No node matching '{label}' found"}
+
+            node_id = matches[0]
+            neighbors: list[dict] = []
+            sorted_neighbors = sorted(G.neighbors(node_id), key=lambda n: G.degree(n), reverse=True)
+            for neighbor in sorted_neighbors:
+                edge = G.edges[node_id, neighbor]
+                relation = str(edge.get("relation", ""))
+                if relation_filter and relation_filter not in relation.lower():
+                    continue
+                nmeta = G.nodes[neighbor]
+                neighbors.append(
+                    {
+                        "label": nmeta.get("label", neighbor),
+                        "node_id": neighbor,
+                        "relation": relation,
+                        "confidence": edge.get("confidence", ""),
+                        "source_file": nmeta.get("source_file", ""),
+                        "community": nmeta.get("community"),
+                        "degree": G.degree(neighbor),
+                    }
+                )
+                if len(neighbors) >= max_neighbors:
+                    break
+
+            return {
+                "success": True,
+                "repo_id": repo_id,
+                "node": {
+                    "id": node_id,
+                    "label": G.nodes[node_id].get("label", node_id),
+                    "community": G.nodes[node_id].get("community"),
+                    "degree": G.degree(node_id),
+                },
+                "count": len(neighbors),
+                "neighbors": neighbors,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def graphify_community(self, params: dict) -> dict:
+        """Return nodes in a graph community ordered by connectivity."""
+        try:
+            repo_id = (params.get("repo_id") or "").strip()
+            if not repo_id:
+                return {"success": False, "error": "Missing required parameter: repo_id"}
+
+            if "community_id" not in params:
+                return {"success": False, "error": "Missing required parameter: community_id"}
+            community_id = int(params.get("community_id"))
+            max_nodes = max(10, min(int(params.get("max_nodes", 200)), 2000))
+            graph_path = str(self._repo_graph_path(repo_id))
+
+            from codemind.graphify.serve import _load_graph
+
+            G = _load_graph(graph_path)
+            members = [
+                nid for nid, meta in G.nodes(data=True)
+                if meta.get("community") is not None and int(meta.get("community")) == community_id
+            ]
+            if not members:
+                return {
+                    "success": True,
+                    "repo_id": repo_id,
+                    "community_id": community_id,
+                    "count": 0,
+                    "nodes": [],
+                }
+
+            ordered = sorted(members, key=lambda n: G.degree(n), reverse=True)
+            rows: list[dict] = []
+            for nid in ordered[:max_nodes]:
+                meta = G.nodes[nid]
+                rows.append(
+                    {
+                        "id": nid,
+                        "label": meta.get("label", nid),
+                        "source_file": meta.get("source_file", ""),
+                        "source_location": meta.get("source_location", ""),
+                        "degree": G.degree(nid),
+                    }
+                )
+            return {
+                "success": True,
+                "repo_id": repo_id,
+                "community_id": community_id,
+                "count": len(rows),
+                "total_in_community": len(members),
+                "nodes": rows,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     async def graphify_explain(self, params: dict) -> dict:
         """Explain a graph concept by node details + neighbors."""
         try:
@@ -2020,8 +2161,12 @@ class PlaybookTools:
             "get_map": self.get_map,
             "trace_path": self.trace_path,
             "graphify_query": self.graphify_query,
+            "graphify_shortest_path": self.graphify_shortest_path,
             "graphify_path": self.graphify_path,
             "graphify_explain": self.graphify_explain,
+            "graphify_neighbors": self.graphify_neighbors,
+            "graphify_community": self.graphify_community,
+            "graphify_god_nodes": self.graphify_god_nodes,
             "graphify_add": self.graphify_add,
             "graphify_run": self.graphify_run,
             "search_code": self.search_code,
@@ -2078,9 +2223,29 @@ class PlaybookTools:
                 "parameters": "repo_id (str), source (str), target (str), max_hops (int, optional)"
             },
             {
+                "name": "graphify_shortest_path",
+                "description": "Alias for graph shortest path between two concepts (same behavior as graphify_path).",
+                "parameters": "repo_id (str), source (str), target (str), max_hops (int, optional)"
+            },
+            {
                 "name": "graphify_explain",
                 "description": "Explain a graph node with metadata and neighbors (maps to /graphify explain).",
                 "parameters": "repo_id (str), term (str), include_neighbors (bool, optional), max_neighbors (int, optional)"
+            },
+            {
+                "name": "graphify_neighbors",
+                "description": "Get direct neighbors of a graph node with relation/confidence metadata.",
+                "parameters": "repo_id (str), label (str), relation_filter (str, optional), max_neighbors (int, optional)"
+            },
+            {
+                "name": "graphify_community",
+                "description": "List members of one graph community (ordered by degree) for focused analysis slices.",
+                "parameters": "repo_id (str), community_id (int), max_nodes (int, optional)"
+            },
+            {
+                "name": "graphify_god_nodes",
+                "description": "Return top high-degree architectural hubs (god nodes) for this repository graph.",
+                "parameters": "repo_id (str), top_n (int, optional)"
             },
             {
                 "name": "graphify_add",

@@ -66,6 +66,7 @@ _REACT_DEFAULT_ITERS   = int(os.getenv("CODEMIND_REACT_MAX_ITERATIONS", "50"))
 _SEEDED_DEFAULT_ITERS  = int(os.getenv("CODEMIND_SEEDED_MAX_ITERATIONS", "50"))
 # max chars to inject from pre-seeded vector search
 _SEED_MAX_CHARS        = int(os.getenv("CODEMIND_SEED_MAX_CHARS", "40000"))
+_SEED_GRAPH_QUERY_BUDGET = int(os.getenv("CODEMIND_SEED_GRAPH_QUERY_BUDGET", "1400"))
 
 _EXPLORATION_MODES = frozenset({"react"})
 _SEED_MODES        = frozenset({"catalog", "semantic", "hybrid"})
@@ -535,6 +536,7 @@ class PlaybookExecutor:
             "file_types": getattr(strategy, "file_types", []),
             "min_score":  getattr(strategy, "min_score", 0.0),
         }
+        graph_context = await self._build_graph_seed_context(repo_id, queries[0] if queries else "")
 
         try:
             if mode == "catalog":
@@ -543,11 +545,11 @@ class PlaybookExecutor:
                 result = await self.tools.search_codebase(params)
 
             if not result.get("success"):
-                return ""
+                return graph_context
 
             chunks = result.get("results", [])
             if not chunks:
-                return ""
+                return graph_context
 
             # Filter test files if requested
             if getattr(playbook, "exclude_test_files", False):
@@ -562,19 +564,62 @@ class PlaybookExecutor:
             from .token_utils import format_code_chunks_for_llm
             block = format_code_chunks_for_llm(chunks, max_tokens=_SEED_MAX_CHARS // 4)
             if not block.strip():
-                return ""
+                return graph_context
 
-            return (
+            seeded_context = (
                 "\n\n### PRE-RETRIEVED CONTEXT\n"
                 "The following code was retrieved from the repository using semantic search. "
                 "Use it as your primary evidence. Call tools only if you need additional "
                 "information beyond what is shown here.\n\n"
                 + block
             )
+            return (graph_context + seeded_context) if graph_context else seeded_context
 
         except Exception as exc:
             logger.warning("Seed context retrieval failed: %s", exc)
+            return graph_context
+
+    async def _build_graph_seed_context(self, repo_id: str | None, query: str) -> str:
+        """Build compact graph-derived context for better seeded relevance."""
+        if not repo_id:
             return ""
+
+        parts: list[str] = []
+        try:
+            gq = await self.tools.graphify_query(
+                {
+                    "repo_id": repo_id,
+                    "question": query or "architecture overview",
+                    "mode": "bfs",
+                    "depth": 2,
+                    "budget": max(600, min(_SEED_GRAPH_QUERY_BUDGET, 2500)),
+                }
+            )
+            if gq.get("success"):
+                context = str(gq.get("context") or "").strip()
+                if context and context != "No matching nodes found.":
+                    starts = ", ".join(gq.get("start_nodes") or [])
+                    parts.append(
+                        "### GRAPH CONTEXT (STRUCTURAL)\n"
+                        f"Query focus: `{query}`\n"
+                        f"Start nodes: {starts or 'n/a'}\n"
+                        f"Traversal nodes: {gq.get('node_count', 0)} · edges: {gq.get('edge_count', 0)}\n\n"
+                        f"{context}"
+                    )
+        except Exception as exc:
+            logger.debug("Graph seed query failed: %s", exc)
+
+        try:
+            hubs = await self.tools.graphify_god_nodes({"repo_id": repo_id, "top_n": 8})
+            if hubs.get("success") and hubs.get("nodes"):
+                rows = []
+                for i, n in enumerate(hubs["nodes"][:8], 1):
+                    rows.append(f"{i}. {n.get('label', n.get('id', ''))} ({n.get('edges', 0)} edges)")
+                parts.append("### GRAPH HUBS (GOD NODES)\n" + "\n".join(rows))
+        except Exception as exc:
+            logger.debug("Graph seed god_nodes failed: %s", exc)
+
+        return ("\n\n" + "\n\n".join(parts)) if parts else ""
 
     # ── system prompt builder ─────────────────────────────────────────────────
 
@@ -587,6 +632,11 @@ gather real evidence before drawing conclusions.
 **Architecture & Graph**
 - `get_map` — high-level architecture map: top-connected nodes, entry points, clusters.
   Start here for any repo-scoped analysis.
+- `graphify_query` — BFS/DFS traversal over graph structure to fetch bounded, high-signal context.
+- `graphify_god_nodes` — top connected abstractions (architectural hubs).
+- `graphify_neighbors` — direct dependency neighborhood with relation/confidence metadata.
+- `graphify_shortest_path` / `graphify_path` — shortest structural path between two concepts.
+- `graphify_community` — focused slice of one community for deep-dive analysis.
 - `get_file_outline` — class/function outline of a file without reading the full source.
 - `get_dependencies` — imports and reverse-imports for a file (`direction=imports|imported_by`).
 - `get_callers` — all callers of a function (who calls it).
