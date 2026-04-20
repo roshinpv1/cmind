@@ -236,6 +236,40 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
     print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
+def _build_graph_tools_fs(playbook_tools_instance, loop) -> dict:
+    import asyncio
+    import json
+
+    def make_sync(async_func):
+        def wrapper(**kwargs):
+            try:
+                # Many graph tools expect a single 'params' dictionary
+                future = asyncio.run_coroutine_threadsafe(async_func(kwargs), loop)
+                res = future.result()
+                return json.dumps(res, default=str)
+            except Exception as e:
+                return f"Error executing {async_func.__name__}: {e}"
+        return wrapper
+
+    if not playbook_tools_instance:
+        return {}
+        
+    return {
+        "get_map": make_sync(playbook_tools_instance.get_map),
+        "trace_path": make_sync(playbook_tools_instance.trace_path),
+        "graphify_query": make_sync(playbook_tools_instance.graphify_query),
+        "graphify_path": make_sync(playbook_tools_instance.graphify_path),
+        "graphify_explain": make_sync(playbook_tools_instance.graphify_explain),
+        "graphify_add": make_sync(playbook_tools_instance.graphify_add),
+        "graphify_run": make_sync(playbook_tools_instance.graphify_run),
+        "search_symbol": make_sync(playbook_tools_instance.search_symbol),
+        "get_file_outline": make_sync(playbook_tools_instance.get_file_outline),
+        "get_callers": make_sync(playbook_tools_instance.get_callers),
+        "get_callees": make_sync(playbook_tools_instance.get_callees),
+        "get_dependencies": make_sync(playbook_tools_instance.get_dependencies),
+    }
+
+
 async def run_autonomous_task(
     job_id: str,
     goal: str, 
@@ -345,20 +379,68 @@ async def run_autonomous_task(
                     generated_files=autonomous_jobs[job_id].get("generated_files", []),
                 )
         
-        # Execute planner directly as async coroutine
-        result = await planner_agent.execute(
-            effective_goal,
-            repo_id, 
-            max_iterations, 
-            on_update=update_job_state,
-            allowed_playbooks=allowed_playbooks,
-            thread_id=job_id,
-            execution_context={
-                "run_id": job_id,
-                "mirror_root": mirror_root,
-                "prefer_mirror_reads": bool(mirror_root),
-            },
-        )
+        def execute_codebase_agent():
+            from codemind.codebase_agent.agents.manager import AgentManager
+            from codemind.codebase_agent.config.configuration import ConfigurationManager
+            from pathlib import Path
+            
+            codebase_path = "."
+            if repo_id and manifest_manager:
+                if isinstance(repo_id, list):
+                    primary_repo = repo_id[0]
+                else:
+                    primary_repo = repo_id
+                repo = manifest_manager.get_repository_by_id(primary_repo)
+                if repo:
+                    codebase_path = repo.repo_path
+
+            config_manager = ConfigurationManager(Path.cwd())
+            config_manager.load_environment()
+            
+            from codemind.llm.factory import get_llm_client
+            import os
+            driver = get_llm_client()
+            if driver and hasattr(driver, "config"):
+                override_api_key = getattr(driver.config, "api_key", None)
+                if not override_api_key or override_api_key == "not-needed":
+                    override_api_key = "sk-dummy-key"
+                    
+                override_base_url = getattr(driver.config, "base_url", None)
+                if not override_base_url:
+                    # Provide a valid URL format fallback to pass validation
+                    override_base_url = "http://localhost:1234/v1"
+                    
+                override_model = getattr(driver.config, "model", None)
+                if not override_model:
+                    override_model = "gpt-4o"
+                
+                # Assign to both os.environ (if tools rely on it) and config_manager
+                os.environ["OPENAI_API_KEY"] = override_api_key
+                os.environ["OPENAI_BASE_URL"] = override_base_url
+                os.environ["OPENAI_MODEL"] = override_model
+                
+                config_manager._config.update({
+                    "OPENAI_API_KEY": override_api_key,
+                    "OPENAI_BASE_URL": override_base_url,
+                    "OPENAI_MODEL": override_model,
+                })
+                
+            agent_manager = AgentManager(config_manager)
+            agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools)
+            
+            return agent_manager.process_query_with_review_cycle(effective_goal, codebase_path)
+            
+        main_loop = asyncio.get_running_loop()
+        extra_tools = _build_graph_tools_fs(playbook_executor.tools if playbook_executor else None, main_loop)
+        
+        agent_result, statistics = await asyncio.to_thread(execute_codebase_agent)
+        
+        result = {
+            "answer": agent_result,
+            "iterations": statistics.get("total_review_cycles", 0),
+            "steps_taken": statistics.get("total_review_cycles", 0),
+            "generated_files": []
+        }
         
         # Update job with result
         autonomous_jobs[job_id]["status"] = "completed"
@@ -374,7 +456,7 @@ async def run_autonomous_task(
                 status="completed",
                 payload={
                     "steps_taken": result.get("steps_taken", 0),
-                    "playbooks_used": result.get("playbooks_used", []),
+                    "playbooks_used": ["auto"],
                     "generated_files": autonomous_jobs[job_id].get("generated_files", []),
                 },
             )
@@ -843,8 +925,84 @@ async def execute_playbook(request: PlaybookRequest):
             "prefer_mirror_reads": True,
         }
     
-    # Execute
-    result = await playbook_executor.execute(final_playbook_name, user_input)
+    # Execute with codebase_agent
+    def run_agent():
+        from codemind.codebase_agent.agents.manager import AgentManager
+        from codemind.codebase_agent.config.configuration import ConfigurationManager
+        from pathlib import Path
+        
+        codebase_path = repo_metadata.get("path", ".")
+        
+        config_manager = ConfigurationManager(Path.cwd())
+        config_manager.load_environment()
+        
+        from codemind.llm.factory import get_llm_client
+        import os
+        driver = get_llm_client()
+        if driver and hasattr(driver, "config"):
+            override_api_key = getattr(driver.config, "api_key", None)
+            if not override_api_key or override_api_key == "not-needed":
+                override_api_key = "sk-dummy-key"
+                
+            override_base_url = getattr(driver.config, "base_url", None)
+            if not override_base_url:
+                override_base_url = "http://localhost:1234/v1"
+                
+            override_model = getattr(driver.config, "model", None)
+            if not override_model:
+                override_model = "gpt-4o"
+            
+            os.environ["OPENAI_API_KEY"] = override_api_key
+            os.environ["OPENAI_BASE_URL"] = override_base_url
+            os.environ["OPENAI_MODEL"] = override_model
+            
+            config_manager._config.update({
+                "OPENAI_API_KEY": override_api_key,
+                "OPENAI_BASE_URL": override_base_url,
+                "OPENAI_MODEL": override_model,
+            })
+            
+        agent_manager = AgentManager(config_manager)
+        agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools)
+        
+        return agent_manager.process_query_with_review_cycle(compiled_query, codebase_path)
+        
+    try:
+        # Build strict playbook prompt boundaries BEFORE calling the sync agent loop
+        compiled_query = prompt or f"Execute playbook {final_playbook_name}"
+        playbook_def = playbook_executor.registry.get_playbook(final_playbook_name)
+        if playbook_def:
+            mode = getattr(playbook_def.search_strategy, "mode", "") or ""
+            is_seeded = mode in {"catalog", "semantic", "hybrid"}
+            seed_context = ""
+            if is_seeded:
+                seed_context = await playbook_executor._build_seed_context(playbook_def, user_input)
+                
+            repo_id_for_prompt = request.repo_id[0] if isinstance(request.repo_id, list) and request.repo_id else request.repo_id
+            sys_prompt = playbook_executor._build_system_prompt(playbook_def, seed_context, repo_id=repo_id_for_prompt)
+            if sys_prompt:
+                compiled_query = f"PLAYBOOK CONSTRAINTS & REQUIRED BEHAVIORS:\n{sys_prompt}\n\nUSER GOAL:\n{compiled_query}"
+    
+        main_loop = asyncio.get_running_loop()
+        extra_tools = _build_graph_tools_fs(playbook_executor.tools if playbook_executor else None, main_loop)
+        
+        agent_result, statistics = await asyncio.to_thread(run_agent)
+        result = {
+            "success": True,
+            "outputs": {
+                "result": agent_result,
+                "data": statistics,
+                "iterations": statistics.get("total_review_cycles", 0)
+            },
+            "logs": ["Executed playbook with codebase_agent AgentManager"],
+        }
+    except Exception as e:
+        result = {
+            "success": False,
+            "error": str(e),
+            "logs": [f"Execution failed: {e}"]
+        }
+
     if run_row and run_orchestrator:
         if result.get("success"):
             outputs = result.get("outputs", {}) or {}

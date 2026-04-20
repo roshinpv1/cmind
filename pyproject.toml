@@ -62,10 +62,16 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
     "click>=8.1.7",
+    "rich>=13.0.0",
 
     # MCP Server
     "mcp[cli]>=1.0.0",
     "httpx>=0.26.0",
+    
+    # Codebase Agent
+    "autogen-agentchat>=0.2.0",
+    "autogen-ext[openai]>=0.2.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
