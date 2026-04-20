@@ -7,18 +7,21 @@ Endpoints:
 - POST /api/v1/agents/autonomous - Execute autonomous agent with goal
 - GET /api/v1/agents/autonomous/{job_id}/status - Get job status
 - GET /api/v1/agents/autonomous/{job_id}/result - Get job result
+- GET /api/v1/agents/autonomous/{job_id}/telemetry - Incremental JSONL telemetry (cursor: after=)
 """
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, Any
 import os
+import re
 import uuid
 import asyncio
 from datetime import datetime
 
 from ..storage.db_factory import get_database
 from ..agents.run_orchestrator import RunOrchestrator
+from ..utils.agent_telemetry import read_telemetry_events
 
 router = APIRouter(prefix="/api/v1/agents", tags=["autonomous-agents"])
 
@@ -127,6 +130,33 @@ class AutonomousJobResult(BaseModel):
     error: Optional[str] = None
     mirror_root: Optional[str] = None
     generated_files: list[str] = []
+
+
+class AutonomousTelemetryPoll(BaseModel):
+    """Incremental telemetry lines for a job (JSONL records)."""
+
+    job_id: str
+    telemetry_enabled: bool
+    file_exists: bool
+    events: list[dict[str, Any]]
+    next_after: int
+
+
+_TELEMETRY_JOB_ID_RE = re.compile(
+    r"^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$"
+)
+
+
+def _validate_telemetry_job_id(job_id: str) -> str:
+    """Reject path traversal; only allow UUID-shaped run ids (same as new autonomous jobs)."""
+    raw = (job_id or "").strip()
+    if not raw or len(raw) > 128:
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    if any(s in raw for s in ("/", "\\", "..")):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    if not _TELEMETRY_JOB_ID_RE.fullmatch(raw):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
+    return raw
 
 
 class AutonomousRerunRequest(BaseModel):
@@ -532,6 +562,35 @@ async def list_autonomous_runs(limit: int = 20):
         raise HTTPException(status_code=503, detail="Run orchestration not initialized")
     _cleanup_expired_context()
     return run_orchestrator.list_runs(limit=limit)
+
+
+@router.get(
+    "/autonomous/{job_id}/telemetry",
+    response_model=AutonomousTelemetryPoll,
+)
+async def get_autonomous_telemetry(
+    job_id: str,
+    after: int = 0,
+    limit: int = 200,
+):
+    """Return new telemetry JSON events since cursor ``after`` (non-empty JSONL line count)."""
+    safe_id = _validate_telemetry_job_id(job_id)
+    try:
+        lim = int(limit)
+    except (TypeError, ValueError):
+        lim = 200
+    try:
+        cursor = int(after)
+    except (TypeError, ValueError):
+        cursor = 0
+    payload = read_telemetry_events(safe_id, after=max(0, cursor), limit=lim)
+    return AutonomousTelemetryPoll(
+        job_id=safe_id,
+        telemetry_enabled=bool(payload["telemetry_enabled"]),
+        file_exists=bool(payload["file_exists"]),
+        events=list(payload["events"]),
+        next_after=int(payload["next_after"]),
+    )
 
 
 @router.get("/autonomous/{job_id}/status", response_model=AutonomousJobStatus)

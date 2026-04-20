@@ -26,6 +26,7 @@ class PlannerState(MessagesState):
     repo_id: Optional[str]  # Repository to work with (None for global)
     allowed_playbooks: Optional[list[str]]  # Whitelist of playbooks (None = all)
     topology_context: Optional[str]  # Graphify pre-flight context hook
+    telemetry_run_id: Optional[str]  # Correlates planner + react telemetry JSONL
     
     # === Planning ===
     plan: list[dict]  # Current plan: [{"playbook": "...", "params": {...}}]

@@ -318,12 +318,21 @@ class PlaybookExecutor:
             enforced_mirror_root=enforced_mirror_root,
             prefer_mirror_reads=prefer_mirror_reads,
         )
+        telemetry_repo_id = (
+            enforced_repo_id if isinstance(enforced_repo_id, str)
+            else (enforced_repo_id[0] if enforced_repo_id else None)
+        )
         agent          = ReActAgent(
             llm_driver=self.llm,
             llm_with_tools=llm_with_tools,
             tool_dispatcher=dispatcher,
             compactor=compactor,
             repo_id=enforced_repo_id,
+            telemetry_context={
+                "run_id": (execution_context or {}).get("run_id") if isinstance(execution_context, dict) else None,
+                "playbook": playbook_name,
+                "repo_id": telemetry_repo_id,
+            },
         )
 
         # ── 5. goal message ──────────────────────────────────────────────────

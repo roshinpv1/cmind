@@ -10,7 +10,8 @@ import {
     X,
     Puzzle,
     LogOut,
-    User as UserIcon
+    User as UserIcon,
+    Activity,
 } from "lucide-react";
 import { useState } from "react";
 import { authService } from "../lib/auth";
@@ -25,6 +26,9 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
         { name: "Repositories", href: "/admin/repos", icon: Library },
         { name: "Catalogs", href: "/admin/catalogs", icon: BookOpen },
         { name: "Playbook Composer", href: "/admin/playbook-composer", icon: Puzzle },
+        ...(authService.getUser()?.role === "admin"
+            ? [{ name: "Live telemetry", href: "/admin/telemetry", icon: Activity }]
+            : []),
     ];
 
     return (
@@ -63,7 +67,9 @@ export function AdminLayout({ children }: { children: React.ReactNode }) {
                 </div>
                 <nav className="p-4 space-y-1">
                     {navigation.map((item) => {
-                        const isActive = location.pathname === item.href;
+                        const isActive =
+                            location.pathname === item.href ||
+                            (item.href === "/admin" && location.pathname === "/admin/dashboard");
                         return (
                             <Link
                                 key={item.name}

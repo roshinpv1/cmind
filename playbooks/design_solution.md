@@ -68,7 +68,7 @@ List any missing systems in the `gaps` array, and write a cohesive summary in `a
 ## Search Strategy
 ```yaml
 mode: catalog
-limit: 15
+limit: 30
 min_score: 0.5
 ```
 

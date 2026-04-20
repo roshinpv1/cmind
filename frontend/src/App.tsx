@@ -11,6 +11,7 @@ import AgentCatalogSearch from "./pages/user/AgentCatalogSearch";
 import ChatInterface from "./pages/user/ChatInterface";
 import PlaybookStore from "./pages/user/PlaybookStore";
 import PlaybookComposer from "./pages/admin/PlaybookComposer";
+import AdminTelemetry from "./pages/admin/AdminTelemetry";
 import Login from "./pages/Login";
 import { authService } from "./lib/auth";
 
@@ -45,6 +46,7 @@ function App() {
         <Route path="/admin/catalogs/propose" element={<ProtectedRoute><AdminLayout><ProposalCreate /></AdminLayout></ProtectedRoute>} />
         <Route path="/admin/playbook-composer" element={<ProtectedRoute><AdminLayout><PlaybookComposer /></AdminLayout></ProtectedRoute>} />
         <Route path="/admin/playbook-composer/:id" element={<ProtectedRoute><AdminLayout><PlaybookComposer /></AdminLayout></ProtectedRoute>} />
+        <Route path="/admin/telemetry" element={<ProtectedRoute><AdminLayout><AdminTelemetry /></AdminLayout></ProtectedRoute>} />
 
         {/* Catch all */}
         <Route path="*" element={<Navigate to="/" replace />} />

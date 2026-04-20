@@ -25,6 +25,43 @@ import os
 import uuid
 
 from .planner_state import PlannerState
+from codemind.utils.agent_telemetry import AgentTelemetry
+
+
+def _strip_json_fences(s: str) -> str:
+    """Strip markdown ```json ... ``` (or plain ``` ... ```) fences around a JSON payload.
+
+    LLMs frequently wrap structured JSON responses in markdown code fences even when
+    asked for raw JSON. This breaks downstream json.loads / JSON.parse callers, so we
+    normalize by stripping a single leading/trailing fence pair if present.
+    Returns the input unchanged if no fence is detected.
+    """
+    if not isinstance(s, str):
+        return s
+    t = s.strip()
+    if not t.startswith("```"):
+        return s
+    first_nl = t.find("\n")
+    if first_nl == -1:
+        return s
+    first_line = t[: first_nl].strip().lower()
+    if first_line not in ("```", "```json", "```json5", "```javascript", "```js"):
+        return s
+    body = t[first_nl + 1 :]
+    if body.rstrip().endswith("```"):
+        body = body.rstrip()[: -3]
+    return body.strip()
+
+
+def _maybe_parse_fenced_json(s):
+    """If s is a string wrapping JSON in markdown fences, parse and return the dict.
+    Otherwise return the original value."""
+    if not isinstance(s, str):
+        return s
+    try:
+        return json.loads(_strip_json_fences(s))
+    except (json.JSONDecodeError, TypeError):
+        return s
 
 
 def create_playbook_meta_tools(
@@ -219,6 +256,19 @@ class PlannerAgent:
                 await on_update(state)
             except Exception as exc:
                 print(f"[PLANNER] Callback error: {exc}")
+
+    def _telemetry_from_state(self, state: PlannerState) -> AgentTelemetry:
+        allowed = state.get("allowed_playbooks") or []
+        playbook = allowed[0] if len(allowed) == 1 else None
+        repo_val = state.get("repo_id")
+        if isinstance(repo_val, list):
+            repo_val = repo_val[0] if repo_val else None
+        return AgentTelemetry(
+            run_id=state.get("telemetry_run_id"),
+            component="planner",
+            playbook=playbook,
+            repo_id=repo_val,
+        )
     
     async def _think(self, state: PlannerState, llm_with_tools, on_update=None) -> dict:
         """
@@ -231,6 +281,14 @@ class PlannerAgent:
         print(f"\n[PLANNER] 🤔 Think (iteration {iteration})")
         await asyncio.sleep(0)
         await self._emit_update(state, on_update=on_update)
+        telemetry = self._telemetry_from_state(state)
+        telemetry.emit(
+            "planner_think_start",
+            iteration=int(iteration),
+            message_count=len(state.get("messages", []) or []),
+            thought_count=len(state.get("thoughts", []) or []),
+            action_count=len(state.get("actions", []) or []),
+        )
         
         # Count successful observations (legacy format)
         successful_runs = sum(
@@ -419,6 +477,14 @@ class PlannerAgent:
             if has_tool_calls:
                 for tc in response.tool_calls:
                     print(f"[PLANNER] Tool call: {tc['name']}({json.dumps(tc.get('args', {}))[:100]})")
+            telemetry.emit(
+                "planner_think_response",
+                iteration=int(iteration),
+                content_chars=len(str(content or "")),
+                has_tool_calls=bool(has_tool_calls),
+                tool_call_names=[tc.get("name") for tc in (response.tool_calls or [])] if has_tool_calls else [],
+                successful_runs=int(successful_runs),
+            )
             
             # Track thoughts
             thoughts = state.get("thoughts", []) + [content[:500]]
@@ -459,6 +525,11 @@ class PlannerAgent:
             print(f"[PLANNER] Think error: {e}")
             import traceback
             traceback.print_exc()
+            telemetry.emit(
+                "planner_think_error",
+                iteration=int(iteration),
+                error=str(e),
+            )
             
             if not has_data:
                 fallback_pb = self._get_fallback_playbook(state.get("allowed_playbooks"))
@@ -523,7 +594,7 @@ class PlannerAgent:
                         result_val = outputs["result"]
                         if isinstance(result_val, str):
                             try:
-                                parsed_result = json.loads(result_val)
+                                parsed_result = json.loads(_strip_json_fences(result_val))
                                 if isinstance(parsed_result, dict):
                                     playbook_output = parsed_result
                                 else:
@@ -566,7 +637,7 @@ class PlannerAgent:
                                     result_val = outputs_dict.get("result")
                                     if result_val and str(result_val).strip():
                                         try:
-                                            inner = json.loads(str(result_val))
+                                            inner = json.loads(_strip_json_fences(str(result_val)))
                                             playbook_output = inner if isinstance(inner, dict) else str(result_val)
                                         except (json.JSONDecodeError, TypeError):
                                             playbook_output = str(result_val)
@@ -577,7 +648,7 @@ class PlannerAgent:
                                 result_val = parsed["result"]
                                 if result_val and str(result_val).strip():
                                     try:
-                                        inner = json.loads(str(result_val))
+                                        inner = json.loads(_strip_json_fences(str(result_val)))
                                         playbook_output = inner if isinstance(inner, dict) else str(result_val)
                                     except (json.JSONDecodeError, TypeError):
                                         playbook_output = str(result_val)
@@ -599,6 +670,11 @@ class PlannerAgent:
             actions_used.append(name)
         
         if playbook_output:
+            # Final safety net: strip markdown fences if a JSON string leaked through
+            if isinstance(playbook_output, str):
+                maybe = _maybe_parse_fenced_json(playbook_output)
+                if isinstance(maybe, dict):
+                    playbook_output = maybe
             # Output can be dict or a string
             chars = len(str(playbook_output))
             print(f"[PLANNER] ✅ Using playbook output directly ({chars} chars)")
@@ -748,6 +824,24 @@ class PlannerAgent:
             allowed_playbooks = [p.lower().strip() for p in allowed_playbooks]
             print(f"[PLANNER] Allowed Playbooks: {allowed_playbooks}")
         print(f"{'='*60}")
+        telemetry_run_id = None
+        if isinstance(execution_context, dict):
+            telemetry_run_id = execution_context.get("run_id")
+        if not telemetry_run_id:
+            telemetry_run_id = thread_id or str(uuid.uuid4())
+        repo_for_telemetry = repo_id if isinstance(repo_id, str) else (repo_id[0] if isinstance(repo_id, list) and repo_id else None)
+        planner_telemetry = AgentTelemetry(
+            run_id=telemetry_run_id,
+            component="planner",
+            playbook=(allowed_playbooks[0] if allowed_playbooks and len(allowed_playbooks) == 1 else None),
+            repo_id=repo_for_telemetry,
+        )
+        planner_telemetry.emit(
+            "planner_run_start",
+            goal_preview=(goal or "")[:500],
+            max_iterations=int(max_iterations),
+            allowed_playbooks=allowed_playbooks or [],
+        )
         
         # Create tools and bind them — both are per-call, never stored on self
         tools          = self._create_tools(
@@ -771,6 +865,7 @@ class PlannerAgent:
             "goal": goal,
             "repo_id": repo_id,
             "topology_context": topology_context,
+            "telemetry_run_id": telemetry_run_id,
             "allowed_playbooks": allowed_playbooks,
             "plan": [],
             "current_step": 0,
@@ -800,6 +895,12 @@ class PlannerAgent:
             print(f"[PLANNER] Execution complete")
             print(f"[PLANNER] Iterations: {result.get('iteration', 0)}")
             print(f"{'='*60}\n")
+            planner_telemetry.emit(
+                "planner_run_complete",
+                iterations=int(result.get("iteration", 0) or 0),
+                finished=bool(result.get("finished")),
+                has_final_answer=bool(result.get("final_answer")),
+            )
             
             return result.get("final_answer", {
                 "goal": goal,
@@ -812,6 +913,7 @@ class PlannerAgent:
             print(f"\n[PLANNER] Execution failed: {e}")
             import traceback
             traceback.print_exc()
+            planner_telemetry.emit("planner_run_error", error=str(e))
             
             return {
                 "goal": goal,

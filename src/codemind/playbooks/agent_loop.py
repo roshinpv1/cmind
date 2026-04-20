@@ -22,6 +22,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -29,6 +30,11 @@ from .final_state import evaluate_final_state
 from .orchestration_controller import NextAction, OrchestrationController
 from .orchestration_policies import MIN_REPO_TOOL_CALLS, should_force_continuation
 from .quality_guard import evaluate_quality_guard
+from codemind.utils.agent_telemetry import (
+    AgentTelemetry,
+    tool_calls_detail_for_telemetry,
+    tool_result_summaries_for_telemetry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +419,7 @@ class ReActAgent:
         tool_dispatcher,     # ToolDispatcher instance
         compactor,           # ContextCompactor instance
         repo_id: str | list[str] | None = None,
+        telemetry_context: dict | None = None,
     ) -> None:
         self.llm            = llm_driver
         self.llm_with_tools = llm_with_tools
@@ -423,6 +430,13 @@ class ReActAgent:
             self._repo_id = repo_id[0] if repo_id else None
         else:
             self._repo_id = repo_id
+        tctx = telemetry_context if isinstance(telemetry_context, dict) else {}
+        self._telemetry = AgentTelemetry(
+            run_id=(tctx.get("run_id") or ""),
+            component="react_agent",
+            playbook=tctx.get("playbook"),
+            repo_id=tctx.get("repo_id") or self._repo_id,
+        )
 
     # ── internals ────────────────────────────────────────────────────────────
 
@@ -551,6 +565,42 @@ class ReActAgent:
                                 files.add(s)
         return files
 
+    def _emit_tool_telemetry_round(
+        self,
+        *,
+        iteration: int,
+        source: str,
+        tool_calls: list[Any],
+        tool_messages: list[Any],
+        no_evidence_streak: int,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Emit ``tool_dispatch`` + ``tool_results`` with scrubbed args and result previews."""
+        if not tool_calls:
+            return
+        names: list[str | None] = []
+        for tc in tool_calls:
+            if isinstance(tc, dict):
+                names.append(tc.get("name"))
+            else:
+                names.append(getattr(tc, "name", None))
+        self._telemetry.emit(
+            "tool_dispatch",
+            iteration=int(iteration),
+            source=str(source)[:64],
+            tool_calls_this_turn=int(len(tool_calls)),
+            tool_call_names=[n for n in names if n],
+            tool_calls_detail=tool_calls_detail_for_telemetry(tool_calls, telemetry=self._telemetry),
+            **({"context": extra} if extra else {}),
+        )
+        self._telemetry.emit(
+            "tool_results",
+            iteration=int(iteration),
+            source=str(source)[:64],
+            outcomes=tool_result_summaries_for_telemetry(tool_messages, telemetry=self._telemetry),
+            no_evidence_streak=int(no_evidence_streak),
+        )
+
     # ── synthesis ─────────────────────────────────────────────────────────────
 
     async def _synthesize(
@@ -650,6 +700,15 @@ class ReActAgent:
             max_consecutive_parse_failures=_MAX_CONSECUTIVE_PARSE_FAILURES,
             max_forced_recovery_steps=_MAX_FORCED_RECOVERY_STEPS,
         )
+        self._telemetry.emit(
+            "run_start",
+            playbook_name=playbook_name,
+            max_iterations=max_iterations,
+            goal_preview=(goal or "")[:500],
+            repo_id=self._repo_id,
+            output_type=output_type,
+            expected_critical_files_count=len(expected_critical_files or []),
+        )
 
         def _append_quality_scorecard(
             *,
@@ -678,22 +737,22 @@ class ReActAgent:
                 - planning_penalty
             )
             quality_score = max(0, min(100, int(base)))
-            quality_scorecards.append(
-                {
-                    "iteration": int(iteration_idx),
-                    "stage": stage,
-                    "tool_calls_this_turn": int(tool_calls_this_turn),
-                    "turn_evidence_score": round(turn_evidence, 3),
-                    "cumulative_evidence_score": round(cumulative_evidence_score, 3),
-                    "parse_failure_streak": int(orchestration.parse_failure_streak),
-                    "no_evidence_streak": int(orchestration.no_evidence_streak),
-                    "planning_or_giveup_detected": bool(
-                        should_force_continuation(response_text or "", tool_calls_made)
-                    ),
-                    "final_gate_reason": final_gate_reason or "",
-                    "quality_score": quality_score,
-                }
-            )
+            card = {
+                "iteration": int(iteration_idx),
+                "stage": stage,
+                "tool_calls_this_turn": int(tool_calls_this_turn),
+                "turn_evidence_score": round(turn_evidence, 3),
+                "cumulative_evidence_score": round(cumulative_evidence_score, 3),
+                "parse_failure_streak": int(orchestration.parse_failure_streak),
+                "no_evidence_streak": int(orchestration.no_evidence_streak),
+                "planning_or_giveup_detected": bool(
+                    should_force_continuation(response_text or "", tool_calls_made)
+                ),
+                "final_gate_reason": final_gate_reason or "",
+                "quality_score": quality_score,
+            }
+            quality_scorecards.append(card)
+            self._telemetry.emit("quality_scorecard", **card)
 
         def _quality_summary() -> dict:
             if not quality_scorecards:
@@ -714,6 +773,15 @@ class ReActAgent:
             }
 
         def _result(*, answer: str, iterations: int, error: str | None = None) -> AgentResult:
+            self._telemetry.emit(
+                "run_complete",
+                iterations=int(iterations),
+                tool_calls_made=int(tool_calls_made),
+                generated_files_count=len(generated_files),
+                quality_summary=_quality_summary(),
+                error=error or "",
+                answer_preview=(answer or "")[:800],
+            )
             return AgentResult(
                 answer=answer,
                 iterations=iterations,
@@ -730,6 +798,13 @@ class ReActAgent:
 
             # ── compact context if growing too large ───────────────────────
             messages = await self.compactor.compact(messages)
+            self._telemetry.emit(
+                "iteration_start",
+                iteration=int(iteration),
+                message_count=len(messages),
+                tool_calls_made=int(tool_calls_made),
+                finalization_retries=int(finalization_retries),
+            )
 
             # ── build per-turn system prompt ───────────────────────────────
             if iteration < 2:
@@ -782,6 +857,13 @@ class ReActAgent:
 
             tc_from_wrapper = getattr(response, "tool_calls", None) or []
             content_len = len(str(response.content or ""))
+            self._telemetry.emit(
+                "llm_response",
+                iteration=int(iteration),
+                content_chars=int(content_len),
+                tool_calls_from_wrapper=len(tc_from_wrapper),
+                tool_call_names=[tc.get("name") for tc in tc_from_wrapper],
+            )
             print(
                 f"[REACT] iter={iteration} | content_chars={content_len} | "
                 f"tool_calls_from_wrapper={len(tc_from_wrapper)} | "
@@ -799,6 +881,15 @@ class ReActAgent:
                 if repaired:
                     response   = AIMessage(content="", tool_calls=repaired)
                     has_calls  = True
+                    self._telemetry.emit(
+                        "tool_call_repair",
+                        iteration=int(iteration),
+                        repaired_count=len(repaired),
+                        repaired_names=[tc.get("name") for tc in repaired],
+                        tool_calls_detail=tool_calls_detail_for_telemetry(
+                            repaired, telemetry=self._telemetry
+                        ),
+                    )
                     orchestration.record_parse_attempt(
                         repaired=True, looks_like_tool_json=False
                     )
@@ -818,6 +909,11 @@ class ReActAgent:
                         repaired=False, looks_like_tool_json=looks_like_tool_json
                     )
                     if looks_like_tool_json:
+                        self._telemetry.emit(
+                            "tool_call_repair_failed",
+                            iteration=int(iteration),
+                            parse_failure_streak=int(orchestration.parse_failure_streak),
+                        )
                         logs.append(
                             f"  Iter {iteration}: tool-call parsing failed "
                             f"(streak={orchestration.parse_failure_streak})"
@@ -847,6 +943,17 @@ class ReActAgent:
                     tool_messages = await self.dispatcher.dispatch([decision.tool_call])
                     messages.extend(tool_messages)
                     tool_calls_made += 1
+                    self._emit_tool_telemetry_round(
+                        iteration=iteration,
+                        source="forced_no_tool",
+                        tool_calls=[decision.tool_call],
+                        tool_messages=tool_messages,
+                        no_evidence_streak=orchestration.no_evidence_streak,
+                        extra={
+                            "forced_recovery_step": int(orchestration.forced_recovery_steps),
+                            "max_forced_recovery_steps": _MAX_FORCED_RECOVERY_STEPS,
+                        },
+                    )
                     if decision.prompt:
                         messages.append(HumanMessage(content=decision.prompt))
                     _append_quality_scorecard(
@@ -982,6 +1089,14 @@ class ReActAgent:
                         tool_messages = await self.dispatcher.dispatch(synthetic_calls)
                         messages.extend(tool_messages)
                         tool_calls_made += len(synthetic_calls)
+                        self._emit_tool_telemetry_round(
+                            iteration=iteration,
+                            source="synthetic_manifest",
+                            tool_calls=synthetic_calls,
+                            tool_messages=tool_messages,
+                            no_evidence_streak=orchestration.no_evidence_streak,
+                            extra={"manifest_file_count": len(manifest_files)},
+                        )
                         for tm in tool_messages:
                             try:
                                 payload = json.loads(str(tm.content or "{}"))
@@ -1027,6 +1142,14 @@ class ReActAgent:
                         tool_messages = await self.dispatcher.dispatch(synthetic_calls)
                         messages.extend(tool_messages)
                         tool_calls_made += len(synthetic_calls)
+                        self._emit_tool_telemetry_round(
+                            iteration=iteration,
+                            source="synthetic_codeblock",
+                            tool_calls=synthetic_calls,
+                            tool_messages=tool_messages,
+                            no_evidence_streak=orchestration.no_evidence_streak,
+                            extra={"code_block_count": len(code_blocks)},
+                        )
                         for tm in tool_messages:
                             try:
                                 payload = json.loads(str(tm.content or "{}"))
@@ -1143,6 +1266,13 @@ class ReActAgent:
             tool_messages = await self.dispatcher.dispatch(response.tool_calls)
             messages.extend(tool_messages)
             tool_calls_made += call_count
+            self._emit_tool_telemetry_round(
+                iteration=iteration,
+                source="model",
+                tool_calls=list(response.tool_calls),
+                tool_messages=tool_messages,
+                no_evidence_streak=orchestration.no_evidence_streak,
+            )
             turn_outcomes: list[dict] = []
             for tm in tool_messages:
                 try:
@@ -1209,6 +1339,18 @@ class ReActAgent:
                 extra_tool_messages = await self.dispatcher.dispatch([decision.tool_call])
                 messages.extend(extra_tool_messages)
                 tool_calls_made += 1
+                self._emit_tool_telemetry_round(
+                    iteration=iteration,
+                    source="forced_after_tool",
+                    tool_calls=[decision.tool_call],
+                    tool_messages=extra_tool_messages,
+                    no_evidence_streak=orchestration.no_evidence_streak,
+                    extra={
+                        "forced_recovery_step": int(orchestration.forced_recovery_steps),
+                        "max_forced_recovery_steps": _MAX_FORCED_RECOVERY_STEPS,
+                        "prior_tool_calls_this_turn": int(call_count),
+                    },
+                )
                 _append_quality_scorecard(
                     iteration_idx=iteration,
                     tool_calls_this_turn=call_count + 1,

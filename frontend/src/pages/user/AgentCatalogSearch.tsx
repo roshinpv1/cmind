@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { authService } from "../../lib/auth";
@@ -31,6 +31,7 @@ import {
     MessageSquareCode,
     Scale,
     Heart,
+    Activity,
 } from "lucide-react";
 
 interface CatalogResult {
@@ -536,6 +537,13 @@ export default function AgentCatalogSearch() {
     const [discoveryLogs, setDiscoveryLogs] = useState<string[]>([]);
     const [discoveryResult, setDiscoveryResult] = useState<any>(null);
     const [proposedGapMatches, setProposedGapMatches] = useState<Record<string, any>>({});
+    const [telemetryEvents, setTelemetryEvents] = useState<Record<string, unknown>[]>([]);
+    const [telemetryPanelOpen, setTelemetryPanelOpen] = useState(true);
+    const [telemetryMeta, setTelemetryMeta] = useState<{
+        telemetry_enabled: boolean;
+        file_exists: boolean;
+    } | null>(null);
+    const telemetryAfterRef = useRef(0);
 
     // Build vs Reuse State (separate from discovery)
     const [bvrJobId, setBvrJobId] = useState<string | null>(null);
@@ -547,6 +555,47 @@ export default function AgentCatalogSearch() {
     const [limit, setLimit] = useState(5);
     const [minScore, setMinScore] = useState(0.3);
     const [aiRerank, setAiRerank] = useState(false);
+
+    useEffect(() => {
+        if (!discoveryJobId) {
+            telemetryAfterRef.current = 0;
+            setTelemetryEvents([]);
+            setTelemetryMeta(null);
+            return;
+        }
+        telemetryAfterRef.current = 0;
+        setTelemetryEvents([]);
+        setTelemetryMeta(null);
+    }, [discoveryJobId]);
+
+    useEffect(() => {
+        if (searchMode !== "discovery" || !discoveryJobId) return;
+        let interval: ReturnType<typeof setInterval>;
+        const pollTelemetry = async () => {
+            try {
+                const after = telemetryAfterRef.current;
+                const res = await fetch(
+                    `/api/v1/agents/autonomous/${discoveryJobId}/telemetry?after=${after}&limit=200`
+                );
+                if (!res.ok) return;
+                const data = await res.json();
+                setTelemetryMeta({
+                    telemetry_enabled: !!data.telemetry_enabled,
+                    file_exists: !!data.file_exists,
+                });
+                if (Array.isArray(data.events) && data.events.length > 0) {
+                    telemetryAfterRef.current =
+                        typeof data.next_after === "number" ? data.next_after : after + data.events.length;
+                    setTelemetryEvents((prev) => [...prev, ...data.events]);
+                }
+            } catch (e) {
+                console.error("Telemetry poll error", e);
+            }
+        };
+        pollTelemetry();
+        interval = setInterval(pollTelemetry, 2000);
+        return () => clearInterval(interval);
+    }, [discoveryJobId, searchMode]);
 
     // Discovery Polling Hook
     useEffect(() => {
@@ -1045,6 +1094,89 @@ export default function AgentCatalogSearch() {
 
                     {searchMode === "discovery" && (
                         <>
+                            {discoveryJobId && (
+                                <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden mb-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setTelemetryPanelOpen((o) => !o)}
+                                        className="w-full p-4 bg-gray-50/80 border-b border-gray-100 flex items-center justify-between gap-3 text-left hover:bg-gray-50 transition-colors"
+                                    >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <Activity className="h-4 w-4 text-primary shrink-0" />
+                                            <h3 className="text-sm font-bold text-gray-800 truncate">
+                                                Live telemetry
+                                            </h3>
+                                            <span className="text-[10px] font-mono text-gray-400 truncate shrink">
+                                                {discoveryJobId}
+                                            </span>
+                                        </div>
+                                        <div className="flex items-center gap-2 shrink-0">
+                                            {telemetryMeta && !telemetryMeta.telemetry_enabled && (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-amber-700 bg-amber-50 px-2 py-0.5 rounded">
+                                                    Off
+                                                </span>
+                                            )}
+                                            {telemetryMeta?.telemetry_enabled && !telemetryMeta.file_exists && (
+                                                <span className="text-[10px] text-gray-400">Waiting…</span>
+                                            )}
+                                            <span className="text-xs font-bold text-gray-500 tabular-nums">
+                                                {telemetryEvents.length} events
+                                            </span>
+                                            {telemetryPanelOpen ? (
+                                                <ChevronUp className="h-4 w-4 text-gray-400" />
+                                            ) : (
+                                                <ChevronDown className="h-4 w-4 text-gray-400" />
+                                            )}
+                                        </div>
+                                    </button>
+                                    {telemetryPanelOpen && (
+                                        <div className="p-3 max-h-72 overflow-y-auto space-y-1.5 font-mono text-[11px] leading-snug bg-gray-950 text-gray-100">
+                                            {telemetryMeta && !telemetryMeta.telemetry_enabled && (
+                                                <p className="text-amber-300/90 px-1">
+                                                    Server has CODEMIND_TELEMETRY_ENABLED off — no events will be
+                                                    written.
+                                                </p>
+                                            )}
+                                            {telemetryMeta?.telemetry_enabled &&
+                                                !telemetryMeta.file_exists &&
+                                                telemetryEvents.length === 0 && (
+                                                    <p className="text-gray-500 px-1">
+                                                        No telemetry file yet for this job (run in progress or writer
+                                                        not started).
+                                                    </p>
+                                                )}
+                                            {telemetryEvents.map((ev, i) => {
+                                                const e = ev as Record<string, unknown>;
+                                                const ts = String(e.ts ?? "");
+                                                const evt = String(e.event ?? "");
+                                                const rest = { ...e };
+                                                delete rest.ts;
+                                                delete rest.event;
+                                                const detail =
+                                                    Object.keys(rest).length > 0
+                                                        ? JSON.stringify(rest)
+                                                        : "";
+                                                return (
+                                                    <div
+                                                        key={`${ts}-${evt}-${i}`}
+                                                        className="border-b border-gray-800/80 pb-1.5 last:border-0"
+                                                    >
+                                                        <div className="flex flex-wrap gap-x-2 gap-y-0.5 text-gray-400">
+                                                            <span className="text-gray-500 shrink-0">{ts}</span>
+                                                            <span className="text-cyan-300 font-semibold">{evt}</span>
+                                                        </div>
+                                                        {detail ? (
+                                                            <pre className="mt-0.5 text-gray-300 whitespace-pre-wrap break-all">
+                                                                {detail}
+                                                            </pre>
+                                                        ) : null}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                             {/* Discovery Loading & Logs */}
                             {loading && (
                                 <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
@@ -1098,10 +1230,32 @@ export default function AgentCatalogSearch() {
                                     {(() => {
                                         const caps = discoveryResult.answer.capabilities;
                                         const decomp = discoveryResult.answer.decomposition;
-                                        // Normalize: handle both string[] and object[] from LLM
+                                        // Normalize: handle string, string[], and object shapes from LLM.
+                                        // Never use Object.values on a string — it yields one char per "item".
                                         const toStringList = (arr: any): string[] => {
-                                            if (!arr) return [];
-                                            const items = Array.isArray(arr) ? arr : (arr?.items || arr?.functional || arr?.core_modules || Object.values(arr || {}).flat());
+                                            if (arr == null || arr === "") return [];
+                                            if (typeof arr === "string") {
+                                                const s = arr.trim();
+                                                if (!s) return [];
+                                                const lines = s
+                                                    .split(/\n+/)
+                                                    .map((t) =>
+                                                        t.replace(/^\s*[\u2022\u2023\u25E6\u2043•\-\*]?\s*\d+[\).\]]\s*/, "").trim()
+                                                    )
+                                                    .filter(Boolean);
+                                                if (lines.length > 1) return lines;
+                                                const parts = s.split(/\s*;\s+/).filter(Boolean);
+                                                if (parts.length > 1) return parts;
+                                                return [s];
+                                            }
+                                            const items = Array.isArray(arr)
+                                                ? arr
+                                                : (arr?.items ||
+                                                      arr?.functional ||
+                                                      arr?.core_modules ||
+                                                      (typeof arr === "object"
+                                                          ? Object.values(arr).flat()
+                                                          : []));
                                             return (items || []).map((item: any) => {
                                                 if (typeof item === 'string') return item;
                                                 if (typeof item === 'object' && item !== null) return item.component_name || item.name || item.description || JSON.stringify(item);

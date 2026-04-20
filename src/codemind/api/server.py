@@ -140,6 +140,11 @@ async def lifespan(app: FastAPI):
     app.include_router(playbook_api_router)
     print("[SERVER] ✅ PlaybookStore API initialized")
 
+    from .admin_telemetry import router as admin_telemetry_router
+
+    app.include_router(admin_telemetry_router)
+    print("[SERVER] ✅ Admin telemetry API initialized")
+
     # Log all registered routes at startup
     routes_msg = "\n===== REGISTERED ROUTES =====\n"
     for route in app.routes:
