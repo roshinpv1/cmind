@@ -236,13 +236,17 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
     print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
-def _build_graph_tools_fs(playbook_tools_instance, loop) -> dict:
+def _build_graph_tools_fs(playbook_tools_instance, loop, default_repo_id=None) -> dict:
     import asyncio
     import json
 
     def make_sync(async_func):
         def wrapper(**kwargs):
             try:
+                # Inject repo_id if the LLM forgot to provide it but playbook tools require it
+                if default_repo_id and "repo_id" not in kwargs:
+                    kwargs["repo_id"] = default_repo_id
+                    
                 # Many graph tools expect a single 'params' dictionary
                 future = asyncio.run_coroutine_threadsafe(async_func(kwargs), loop)
                 res = future.result()
@@ -267,6 +271,12 @@ def _build_graph_tools_fs(playbook_tools_instance, loop) -> dict:
         "get_callers": make_sync(playbook_tools_instance.get_callers),
         "get_callees": make_sync(playbook_tools_instance.get_callees),
         "get_dependencies": make_sync(playbook_tools_instance.get_dependencies),
+        "search_code": make_sync(playbook_tools_instance.search_code),
+        "search_bm25": make_sync(playbook_tools_instance.search_bm25),
+        "grep_search": getattr(playbook_tools_instance, "grep_search", None) and make_sync(playbook_tools_instance.grep_search) or make_sync(playbook_tools_instance.search_code),
+        "list_files": make_sync(playbook_tools_instance.list_files),
+        "list_repo_directory": make_sync(playbook_tools_instance.list_repo_directory),
+        "read_file": make_sync(playbook_tools_instance.read_file),
     }
 
 
@@ -309,6 +319,27 @@ async def run_autonomous_task(
                     f"  - iterations: {prior_iterations}\n"
                     f"  - generated_files: {len(prior_generated)}\n"
                 )
+                
+        if allowed_playbooks and playbook_executor:
+            effective_goal += "\n\n### ALLOWED PLAYBOOKS & REQUIRED BEHAVIORS:\n"
+            effective_goal += "You must fulfill the intent of the following allowed playbooks as part of your analysis:\n"
+            for pb_name in allowed_playbooks:
+                pb_def = playbook_executor.registry.get_playbook(pb_name)
+                if pb_def:
+                    mode = getattr(pb_def.search_strategy, "mode", "") or ""
+                    is_seeded = mode in {"catalog", "semantic", "hybrid"}
+                    seed_context = ""
+                    if is_seeded:
+                        # Construct a mock user_input map for seeding
+                        mock_input = {"goal": goal, "repo_id": repo_id}
+                        seed_context = await playbook_executor._build_seed_context(pb_def, mock_input)
+                    
+                    sys_prompt = playbook_executor._build_system_prompt(
+                        pb_def, 
+                        seed_context, 
+                        repo_id=repo_id[0] if isinstance(repo_id, list) and repo_id else repo_id
+                    )
+                    effective_goal += f"\n--- PLAYBOOK CONSTRAINTS: {pb_name} ---\n{sys_prompt}\n"
         
         async def update_job_state(state: dict):
             """Callback to update job state from planner."""
@@ -426,12 +457,18 @@ async def run_autonomous_task(
                 })
                 
             agent_manager = AgentManager(config_manager)
-            agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools)
+            primary_repo = repo_id[0] if isinstance(repo_id, list) and repo_id else repo_id
+            agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools, repo_id=primary_repo)
             
             return agent_manager.process_query_with_review_cycle(effective_goal, codebase_path)
             
         main_loop = asyncio.get_running_loop()
-        extra_tools = _build_graph_tools_fs(playbook_executor.tools if playbook_executor else None, main_loop)
+        primary_repo_id = repo_id[0] if isinstance(repo_id, list) and repo_id else (repo_id if repo_id else None)
+        extra_tools = _build_graph_tools_fs(
+            playbook_executor.tools if playbook_executor else None, 
+            main_loop,
+            default_repo_id=primary_repo_id
+        )
         
         agent_result, statistics = await asyncio.to_thread(execute_codebase_agent)
         
@@ -963,7 +1000,7 @@ async def execute_playbook(request: PlaybookRequest):
             })
             
         agent_manager = AgentManager(config_manager)
-        agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools)
+        agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools, repo_id=repo_id_for_prompt)
         
         return agent_manager.process_query_with_review_cycle(compiled_query, codebase_path)
         
@@ -984,7 +1021,11 @@ async def execute_playbook(request: PlaybookRequest):
                 compiled_query = f"PLAYBOOK CONSTRAINTS & REQUIRED BEHAVIORS:\n{sys_prompt}\n\nUSER GOAL:\n{compiled_query}"
     
         main_loop = asyncio.get_running_loop()
-        extra_tools = _build_graph_tools_fs(playbook_executor.tools if playbook_executor else None, main_loop)
+        extra_tools = _build_graph_tools_fs(
+            playbook_executor.tools if playbook_executor else None, 
+            main_loop, 
+            default_repo_id=repo_id_for_prompt
+        )
         
         agent_result, statistics = await asyncio.to_thread(run_agent)
         result = {

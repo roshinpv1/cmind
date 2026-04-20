@@ -34,16 +34,18 @@ class CodeAnalyzer:
     self-assessment of analysis completeness.
     """
 
-    def __init__(self, config: dict, fs_tool):
+    def __init__(self, config: dict, fs_tool, repo_id: str = None):
         """
         Initialize the Code Analyzer agent.
 
         Args:
             config: Configuration dict containing model settings
             shell_tool: Shell execution tool for codebase exploration
+            repo_id: Active repository ID for graph analysis tool context
         """
         self.config = config
         self.fs_tool = fs_tool
+        self.repo_id = repo_id
         self.logger = logging.getLogger(__name__)
 
         # Initialize AutoGen agent with shell tool capability
@@ -83,6 +85,11 @@ Trust your pattern recognition abilities and adapt your exploration strategy bas
 - **Content-Driven Discovery**: Let what you find guide what you look for next
 - **Adaptive Exploration**: Change strategy based on what the codebase reveals
 - **Universal Understanding**: Focus on concepts rather than language-specific patterns
+
+🎯 ACTIVE CONTEXT:
+- Repository ID: {self.repo_id or "Unknown/Default"}
+- All graph tools (get_map, search_symbol, etc.) will use this repository context by default.
+- You can override this by providing a different "repo_id" in tool arguments if necessary.
 
 🚀 SMART ANALYSIS STRATEGY:
 
@@ -675,13 +682,13 @@ Always explain your findings with specific examples, line numbers, and evidence 
 
         if shared_key_findings:
             # Create a comprehensive technical report based on all key findings
-            synthesis += self._generate_comprehensive_analysis(
+            raw_analysis = self._generate_comprehensive_analysis(
                 query, shared_key_findings, context
             )
+            synthesis += raw_analysis
         else:
-            synthesis += (
-                "Unable to perform comprehensive analysis due to insufficient findings."
-            )
+            raw_analysis = "Unable to perform comprehensive analysis due to insufficient findings."
+            synthesis += raw_analysis
 
         synthesis += """
 
@@ -706,7 +713,9 @@ Always explain your findings with specific examples, line numbers, and evidence 
             kb_size = len(llm_decision.get("key_findings", []))
             synthesis += f"Knowledge base size: {kb_size} findings\n"
 
-        return synthesis
+        self.logger.info(f"Synthesized Analysis Diagnostic Output:\n{synthesis}")
+
+        return raw_analysis
 
     def _generate_comprehensive_analysis(
         self, query: str, key_findings: list, context: list

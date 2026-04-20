@@ -38,12 +38,13 @@ class AgentManager:
         self.code_analyzer: CodeAnalyzer | None = None
         self.task_specialist: TaskSpecialist | None = None
 
-    def initialize_agents(self, codebase_path: str = ".", extra_tools: dict = None) -> None:
+    def initialize_agents(self, codebase_path: str = ".", extra_tools: dict = None, repo_id: str = None) -> None:
         """Initialize all specialized agents with their configurations.
         
         Args:
             codebase_path: Initial working directory for executing tools.
             extra_tools: Additional tools to inject into the fs_tool routing dictionary.
+            repo_id: Optional repository ID for graph analysis tool context.
         """
         try:
             model_client = self.config_manager.get_model_client()
@@ -51,10 +52,10 @@ class AgentManager:
             # Create file system tool using the provided codebase path and extra tools
             fs_tool = FileSystemTool(codebase_path, extra_tools=extra_tools)
 
-            self.code_analyzer = CodeAnalyzer(model_client, fs_tool)
+            self.code_analyzer = CodeAnalyzer(model_client, fs_tool, repo_id=repo_id)
             self.task_specialist = TaskSpecialist(model_client)
 
-            self.logger.info("Successfully initialized all agents")
+            self.logger.info(f"Successfully initialized all agents for repo: {repo_id}")
 
         except Exception as e:
             self.logger.error(f"Failed to initialize agents: {e}")
@@ -214,8 +215,12 @@ This analysis was completed after reaching the maximum number of review cycles. 
 ## Areas for Further Investigation:
 {feedback_message}
 """
-
-        return final_response
+        
+        # Log the full structured output for debugging/telemetry
+        self.logger.info("Synthesized Internal Final Response:\n" + final_response)
+        
+        # Return only the raw LLM answer provided by the analyzer
+        return analysis_result
 
     def get_agent(self, agent_name: str) -> Any:
         """
