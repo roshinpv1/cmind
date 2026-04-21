@@ -243,15 +243,33 @@ def _build_graph_tools_fs(playbook_tools_instance, loop, default_repo_id=None) -
     def make_sync(async_func):
         def wrapper(**kwargs):
             try:
-                # Inject repo_id if the LLM forgot to provide it but playbook tools require it
+                # 1. Parameter Harmonization (Smart Adapter)
+                # codebase_agent typically uses 'path', but PlaybookTools uses specific keys.
+                if "path" in kwargs:
+                    path_val = kwargs.pop("path")
+                    # list_repo_directory expects 'relative_path'
+                    if async_func.__name__ == "list_repo_directory":
+                        kwargs["relative_path"] = path_val
+                    # read_file and get_file_outline expect 'file_path'
+                    else:
+                        kwargs["file_path"] = path_val
+                
+                # Map 'pattern' (native) to 'query' (playbook) for searches
+                if "pattern" in kwargs and "query" not in kwargs:
+                    kwargs["query"] = kwargs.pop("pattern")
+
+                # 2. Context Injection
+                # Inject repo_id if the LLM forgot to provide it
                 if default_repo_id and "repo_id" not in kwargs:
                     kwargs["repo_id"] = default_repo_id
                     
                 # Many graph tools expect a single 'params' dictionary
+                print(f"[AUTONOMOUS] Executing {async_func.__name__} with mapped args: {kwargs}")
                 future = asyncio.run_coroutine_threadsafe(async_func(kwargs), loop)
                 res = future.result()
                 return json.dumps(res, default=str)
             except Exception as e:
+                print(f"[AUTONOMOUS] Error in {async_func.__name__}: {e}")
                 return f"Error executing {async_func.__name__}: {e}"
         return wrapper
 
@@ -271,9 +289,9 @@ def _build_graph_tools_fs(playbook_tools_instance, loop, default_repo_id=None) -
         "get_callers": make_sync(playbook_tools_instance.get_callers),
         "get_callees": make_sync(playbook_tools_instance.get_callees),
         "get_dependencies": make_sync(playbook_tools_instance.get_dependencies),
-        "search_code": make_sync(playbook_tools_instance.search_code),
+        "search_code": make_sync(playbook_tools_instance.search_codebase),
         "search_bm25": make_sync(playbook_tools_instance.search_bm25),
-        "grep_search": getattr(playbook_tools_instance, "grep_search", None) and make_sync(playbook_tools_instance.grep_search) or make_sync(playbook_tools_instance.search_code),
+        "grep_search": make_sync(getattr(playbook_tools_instance, "grep_search", playbook_tools_instance.search_code)),
         "list_files": make_sync(playbook_tools_instance.list_files),
         "list_repo_directory": make_sync(playbook_tools_instance.list_repo_directory),
         "read_file": make_sync(playbook_tools_instance.read_file),
