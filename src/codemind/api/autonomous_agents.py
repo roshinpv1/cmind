@@ -236,68 +236,6 @@ def init_autonomous_agents(lance_storage, graph_service, chat_model, embedder, m
     print(f"[AUTONOMOUS] ✓ Available playbooks: {', '.join(registry.list_playbooks())}")
 
 
-def _build_graph_tools_fs(playbook_tools_instance, loop, default_repo_id=None) -> dict:
-    import asyncio
-    import json
-
-    def make_sync(async_func):
-        def wrapper(**kwargs):
-            try:
-                # 1. Parameter Harmonization (Smart Adapter)
-                # codebase_agent typically uses 'path', but PlaybookTools uses specific keys.
-                if "path" in kwargs:
-                    path_val = kwargs.pop("path")
-                    # list_repo_directory expects 'relative_path'
-                    if async_func.__name__ == "list_repo_directory":
-                        kwargs["relative_path"] = path_val
-                    # read_file and get_file_outline expect 'file_path'
-                    else:
-                        kwargs["file_path"] = path_val
-                
-                # Map 'pattern' (native) to 'query' (playbook) for searches
-                if "pattern" in kwargs and "query" not in kwargs:
-                    kwargs["query"] = kwargs.pop("pattern")
-
-                # 2. Context Injection
-                # Inject repo_id if the LLM forgot to provide it
-                if default_repo_id and "repo_id" not in kwargs:
-                    kwargs["repo_id"] = default_repo_id
-                    
-                # Many graph tools expect a single 'params' dictionary
-                print(f"[AUTONOMOUS] Executing {async_func.__name__} with mapped args: {kwargs}")
-                future = asyncio.run_coroutine_threadsafe(async_func(kwargs), loop)
-                res = future.result()
-                return json.dumps(res, default=str)
-            except Exception as e:
-                print(f"[AUTONOMOUS] Error in {async_func.__name__}: {e}")
-                return f"Error executing {async_func.__name__}: {e}"
-        return wrapper
-
-    if not playbook_tools_instance:
-        return {}
-        
-    return {
-        "get_map": make_sync(playbook_tools_instance.get_map),
-        "trace_path": make_sync(playbook_tools_instance.trace_path),
-        "graphify_query": make_sync(playbook_tools_instance.graphify_query),
-        "graphify_path": make_sync(playbook_tools_instance.graphify_path),
-        "graphify_explain": make_sync(playbook_tools_instance.graphify_explain),
-        "graphify_add": make_sync(playbook_tools_instance.graphify_add),
-        "graphify_run": make_sync(playbook_tools_instance.graphify_run),
-        "search_symbol": make_sync(playbook_tools_instance.search_symbol),
-        "get_file_outline": make_sync(playbook_tools_instance.get_file_outline),
-        "get_callers": make_sync(playbook_tools_instance.get_callers),
-        "get_callees": make_sync(playbook_tools_instance.get_callees),
-        "get_dependencies": make_sync(playbook_tools_instance.get_dependencies),
-        "search_code": make_sync(playbook_tools_instance.search_codebase),
-        "search_bm25": make_sync(playbook_tools_instance.search_bm25),
-        "grep_search": make_sync(getattr(playbook_tools_instance, "grep_search", playbook_tools_instance.search_code)),
-        "list_files": make_sync(playbook_tools_instance.list_files),
-        "list_repo_directory": make_sync(playbook_tools_instance.list_repo_directory),
-        "read_file": make_sync(playbook_tools_instance.read_file),
-    }
-
-
 async def run_autonomous_task(
     job_id: str,
     goal: str, 
@@ -337,27 +275,6 @@ async def run_autonomous_task(
                     f"  - iterations: {prior_iterations}\n"
                     f"  - generated_files: {len(prior_generated)}\n"
                 )
-                
-        if allowed_playbooks and playbook_executor:
-            effective_goal += "\n\n### ALLOWED PLAYBOOKS & REQUIRED BEHAVIORS:\n"
-            effective_goal += "You must fulfill the intent of the following allowed playbooks as part of your analysis:\n"
-            for pb_name in allowed_playbooks:
-                pb_def = playbook_executor.registry.get_playbook(pb_name)
-                if pb_def:
-                    mode = getattr(pb_def.search_strategy, "mode", "") or ""
-                    is_seeded = mode in {"catalog", "semantic", "hybrid"}
-                    seed_context = ""
-                    if is_seeded:
-                        # Construct a mock user_input map for seeding
-                        mock_input = {"goal": goal, "repo_id": repo_id}
-                        seed_context = await playbook_executor._build_seed_context(pb_def, mock_input)
-                    
-                    sys_prompt = playbook_executor._build_system_prompt(
-                        pb_def, 
-                        seed_context, 
-                        repo_id=repo_id[0] if isinstance(repo_id, list) and repo_id else repo_id
-                    )
-                    effective_goal += f"\n--- PLAYBOOK CONSTRAINTS: {pb_name} ---\n{sys_prompt}\n"
         
         async def update_job_state(state: dict):
             """Callback to update job state from planner."""
@@ -475,19 +392,10 @@ async def run_autonomous_task(
                 })
                 
             agent_manager = AgentManager(config_manager)
-            primary_repo = repo_id[0] if isinstance(repo_id, list) and repo_id else repo_id
-            agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools, repo_id=primary_repo)
+            agent_manager.initialize_agents(codebase_path)
             
             return agent_manager.process_query_with_review_cycle(effective_goal, codebase_path)
             
-        main_loop = asyncio.get_running_loop()
-        primary_repo_id = repo_id[0] if isinstance(repo_id, list) and repo_id else (repo_id if repo_id else None)
-        extra_tools = _build_graph_tools_fs(
-            playbook_executor.tools if playbook_executor else None, 
-            main_loop,
-            default_repo_id=primary_repo_id
-        )
-        
         agent_result, statistics = await asyncio.to_thread(execute_codebase_agent)
         
         result = {
@@ -1018,33 +926,12 @@ async def execute_playbook(request: PlaybookRequest):
             })
             
         agent_manager = AgentManager(config_manager)
-        agent_manager.initialize_agents(codebase_path, extra_tools=extra_tools, repo_id=repo_id_for_prompt)
+        agent_manager.initialize_agents(codebase_path)
         
-        return agent_manager.process_query_with_review_cycle(compiled_query, codebase_path)
+        query = prompt or f"Execute playbook {final_playbook_name}"
+        return agent_manager.process_query_with_review_cycle(query, codebase_path)
         
     try:
-        # Build strict playbook prompt boundaries BEFORE calling the sync agent loop
-        compiled_query = prompt or f"Execute playbook {final_playbook_name}"
-        playbook_def = playbook_executor.registry.get_playbook(final_playbook_name)
-        if playbook_def:
-            mode = getattr(playbook_def.search_strategy, "mode", "") or ""
-            is_seeded = mode in {"catalog", "semantic", "hybrid"}
-            seed_context = ""
-            if is_seeded:
-                seed_context = await playbook_executor._build_seed_context(playbook_def, user_input)
-                
-            repo_id_for_prompt = request.repo_id[0] if isinstance(request.repo_id, list) and request.repo_id else request.repo_id
-            sys_prompt = playbook_executor._build_system_prompt(playbook_def, seed_context, repo_id=repo_id_for_prompt)
-            if sys_prompt:
-                compiled_query = f"PLAYBOOK CONSTRAINTS & REQUIRED BEHAVIORS:\n{sys_prompt}\n\nUSER GOAL:\n{compiled_query}"
-    
-        main_loop = asyncio.get_running_loop()
-        extra_tools = _build_graph_tools_fs(
-            playbook_executor.tools if playbook_executor else None, 
-            main_loop, 
-            default_repo_id=repo_id_for_prompt
-        )
-        
         agent_result, statistics = await asyncio.to_thread(run_agent)
         result = {
             "success": True,

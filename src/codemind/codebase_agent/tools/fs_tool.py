@@ -27,7 +27,6 @@ class FileSystemTool:
         working_directory: str,
         max_output_size: int = 20000,
         enable_logging: bool = True,
-        extra_tools: dict = None,
     ):
         """Initialize FileSystemTool with security constraints.
 
@@ -39,7 +38,6 @@ class FileSystemTool:
         self.working_directory = Path(working_directory).resolve()
         self.max_output_size = max_output_size
         self.enable_logging = enable_logging
-        self.extra_tools = extra_tools or {}
 
         # Validate working directory
         if not self.working_directory.exists():
@@ -202,7 +200,6 @@ class FileSystemTool:
             "search_content": self.search_content,
             "get_file_info": self.get_file_info,
         }
-        tools.update(self.extra_tools)
         
         if tool_name not in tools:
             return False, "", f"Unknown tool: {tool_name}"
